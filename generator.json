@@ -1,0 +1,6 @@
+{
+  "project_name_override": "proofline-sdk",
+  "package_name_override": "_generated",
+  "package_version_override": "1.0.0",
+  "post_hooks": []
+}
