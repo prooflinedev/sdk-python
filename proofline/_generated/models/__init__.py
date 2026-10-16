@@ -7,6 +7,7 @@ from .agent_session_prompt_type_0 import AgentSessionPromptType0
 from .agent_session_prompt_type_1 import AgentSessionPromptType1
 from .agent_session_target import AgentSessionTarget
 from .agent_vendor import AgentVendor
+from .approval_gap import ApprovalGap
 from .assessment_projection import AssessmentProjection
 from .attributed_condition_view import AttributedConditionView
 from .author_choice import AuthorChoice
@@ -47,6 +48,9 @@ from .export_review_status import ExportReviewStatus
 from .export_validation import ExportValidation
 from .export_validation_source import ExportValidationSource
 from .file_projection import FileProjection
+from .file_review_request import FileReviewRequest
+from .file_review_response import FileReviewResponse
+from .file_scope import FileScope
 from .filter_choice import FilterChoice
 from .finding_causal_edge_view import FindingCausalEdgeView
 from .finding_causal_graph_view import FindingCausalGraphView
@@ -75,6 +79,8 @@ from .findings_export_row import FindingsExportRow
 from .gate_state import GateState
 from .gate_status import GateStatus
 from .not_assessed_view import NotAssessedView
+from .occurrence_capture import OccurrenceCapture
+from .occurrence_question import OccurrenceQuestion
 from .open_finding_counts import OpenFindingCounts
 from .open_item_environment import OpenItemEnvironment
 from .open_items_gap_reason import OpenItemsGapReason
@@ -136,6 +142,7 @@ from .specialist_pass_execution import SpecialistPassExecution
 from .spend_account_kind import SpendAccountKind
 from .spend_export_row import SpendExportRow
 from .start_session import StartSession
+from .stop_response import StopResponse
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
 from .thread_observation_freshness import ThreadObservationFreshness
@@ -152,6 +159,7 @@ __all__ = (
     "AgentSessionPromptType1",
     "AgentSessionTarget",
     "AgentVendor",
+    "ApprovalGap",
     "AssessmentProjection",
     "AttributedConditionView",
     "AuthorChoice",
@@ -192,6 +200,9 @@ __all__ = (
     "ExportValidation",
     "ExportValidationSource",
     "FileProjection",
+    "FileReviewRequest",
+    "FileReviewResponse",
+    "FileScope",
     "FilterChoice",
     "FindingCausalEdgeView",
     "FindingCausalGraphView",
@@ -220,6 +231,8 @@ __all__ = (
     "GateState",
     "GateStatus",
     "NotAssessedView",
+    "OccurrenceCapture",
+    "OccurrenceQuestion",
     "OpenFindingCounts",
     "OpenItemEnvironment",
     "OpenItemsGapReason",
@@ -281,6 +294,7 @@ __all__ = (
     "SpendAccountKind",
     "SpendExportRow",
     "StartSession",
+    "StopResponse",
     "SubjectAuthorization",
     "SubjectView",
     "ThreadObservationFreshness",

@@ -9,6 +9,7 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.occurrence_capture import OccurrenceCapture
     from ..models.override import Override
 
 
@@ -19,18 +20,27 @@ T = TypeVar("T", bound="GateState")
 class GateState:
     """
     Attributes:
+        occurrence_captures (list[OccurrenceCapture]): The occurrence questions the gate's approval deferred, as each
+             observed execution of its deployment answered them. Outcome-only
+             records: none of them changes the gate or grades a prediction.
         status (str): Local gate state. ALLOWED/BLOCKED can precede provider delivery.
              This field does not confirm that GitHub released or blocked a run.
         override_record (None | Override | Unset): Recorded override authorization, not confirmation of provider
             delivery.
     """
 
+    occurrence_captures: list[OccurrenceCapture]
     status: str
     override_record: None | Override | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.override import Override  # noqa: PLC0415
+
+        occurrence_captures = []
+        for occurrence_captures_item_data in self.occurrence_captures:
+            occurrence_captures_item = occurrence_captures_item_data.to_dict()
+            occurrence_captures.append(occurrence_captures_item)
 
         status = self.status
 
@@ -46,6 +56,7 @@ class GateState:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
+                "occurrence_captures": occurrence_captures,
                 "status": status,
             }
         )
@@ -56,9 +67,17 @@ class GateState:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.occurrence_capture import OccurrenceCapture  # noqa: PLC0415
         from ..models.override import Override  # noqa: PLC0415
 
         d = dict(src_dict)
+        occurrence_captures = []
+        _occurrence_captures = d.pop("occurrence_captures")
+        for occurrence_captures_item_data in _occurrence_captures:
+            occurrence_captures_item = OccurrenceCapture.from_dict(occurrence_captures_item_data)
+
+            occurrence_captures.append(occurrence_captures_item)
+
         status = d.pop("status")
 
         def _parse_override_record(data: object) -> None | Override | Unset:
@@ -79,6 +98,7 @@ class GateState:
         override_record = _parse_override_record(d.pop("override_record", UNSET))
 
         gate_state = cls(
+            occurrence_captures=occurrence_captures,
             status=status,
             override_record=override_record,
         )

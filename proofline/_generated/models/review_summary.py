@@ -24,7 +24,8 @@ class ReviewSummary:
         finding_count (int): How many findings this review's assessments recorded, across all of them.
         id (UUID): The review's identifier.
         kind (str): `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, a review of local changes
-             sent as a patch, or `COMMIT`, a review of pushed commits.
+             sent as a patch, `COMMIT`, a review of pushed commits, or `FILES`,
+             complete selected files at one pushed commit.
         public_key (str): The review's stable public address: `rev_` followed by its identifier without hyphens.
         publication (str): Whether the review reached the pull request: `PUBLISHED`, `WITHHELD`,
              `PUBLICATION_REQUESTED` or `PUBLICATION_REFUSED`. A review run from
