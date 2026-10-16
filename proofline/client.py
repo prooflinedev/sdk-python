@@ -30,10 +30,12 @@ from ._generated.api.default import (
     list_repositories,
     list_reviews,
     request_commit_review,
+    request_file_review,
     request_patch_review,
     request_review,
     rerun_review,
     start_agent_session,
+    stop_review,
 )
 from ._generated.client import AuthenticatedClient
 from ._generated.models.agent_session import AgentSession
@@ -44,6 +46,8 @@ from ._generated.models.commit_review_response import CommitReviewResponse
 from ._generated.models.customer_assessment_detail import CustomerAssessmentDetail
 from ._generated.models.customer_finding import CustomerFinding
 from ._generated.models.customer_review_detail import CustomerReviewDetail
+from ._generated.models.file_review_request import FileReviewRequest
+from ._generated.models.file_review_response import FileReviewResponse
 from ._generated.models.finding_fix_prompt_type_0 import FindingFixPromptType0
 from ._generated.models.finding_fix_prompt_type_1 import FindingFixPromptType1
 from ._generated.models.patch_review_request import PatchReviewRequest
@@ -59,6 +63,7 @@ from ._generated.models.review_summary import ReviewSummary
 from ._generated.models.run_now_request import RunNowRequest
 from ._generated.models.run_now_response import RunNowResponse
 from ._generated.models.start_session import StartSession
+from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._transport import ProoflineError
 from .outcomes import ReviewOutcome, outcome
@@ -370,6 +375,20 @@ class ProoflineClient:
             body=body,
         )
 
+    def request_file_review(
+        self, organization_id: UUID, repository_id: UUID, *, body: FileReviewRequest
+    ) -> FileReviewResponse:
+        return self._call(
+            request_file_review.sync_detailed,
+            FileReviewResponse,
+            organization_id,
+            repository_id,
+            body=body,
+        )
+
+    def stop_review(self, organization_id: UUID, review_id: UUID) -> StopResponse:
+        return self._call(stop_review.sync_detailed, StopResponse, organization_id, review_id)
+
     def request_commit_review(
         self, organization_id: UUID, repository_id: UUID, *, body: CommitReviewRequest
     ) -> CommitReviewResponse:
@@ -659,6 +678,22 @@ class AsyncProoflineClient:
             organization_id,
             repository_id,
             body=body,
+        )
+
+    async def request_file_review(
+        self, organization_id: UUID, repository_id: UUID, *, body: FileReviewRequest
+    ) -> FileReviewResponse:
+        return await self._call(
+            request_file_review.asyncio_detailed,
+            FileReviewResponse,
+            organization_id,
+            repository_id,
+            body=body,
+        )
+
+    async def stop_review(self, organization_id: UUID, review_id: UUID) -> StopResponse:
+        return await self._call(
+            stop_review.asyncio_detailed, StopResponse, organization_id, review_id
         )
 
     async def request_commit_review(
