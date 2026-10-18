@@ -15,7 +15,7 @@ class PatchVerification:
     """One finding a patch review re-verifies against the patch.
 
     Attributes:
-        finding_id (UUID):
+        finding_id (UUID): The finding being re-verified against this patch.
         iteration (int): This request's number among the requests to re-verify the finding's
              series on this patch, at most 3.
     """
