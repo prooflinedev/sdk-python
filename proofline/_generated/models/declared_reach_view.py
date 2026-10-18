@@ -13,6 +13,7 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.reach_gap_view import ReachGapView
     from ..models.reached_entity_view import ReachedEntityView
+    from ..models.terraform_roots_view import TerraformRootsView
 
 
 T = TypeVar("T", bound="DeclaredReachView")
@@ -32,6 +33,10 @@ class DeclaredReachView:
            outcome (DeclaredReachOutcome):
            receipt_digest (None | str | Unset): World's digest of its full answer. Null unless `READ`.
            snapshot_id (None | Unset | UUID): The World snapshot the reach was read at. Null unless `READ`.
+           terraform (None | TerraformRootsView | Unset): The Terraform addresses the reach also started from, or why it
+               took
+                none. Absent when the assessment read reach only from the deployed
+                revision.
     """
 
     complete: bool
@@ -40,9 +45,12 @@ class DeclaredReachView:
     outcome: DeclaredReachOutcome
     receipt_digest: None | str | Unset = UNSET
     snapshot_id: None | Unset | UUID = UNSET
+    terraform: None | TerraformRootsView | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.terraform_roots_view import TerraformRootsView  # noqa: PLC0415
+
         complete = self.complete
 
         entities = []
@@ -71,6 +79,14 @@ class DeclaredReachView:
         else:
             snapshot_id = self.snapshot_id
 
+        terraform: dict[str, Any] | None | Unset
+        if isinstance(self.terraform, Unset):
+            terraform = UNSET
+        elif isinstance(self.terraform, TerraformRootsView):
+            terraform = self.terraform.to_dict()
+        else:
+            terraform = self.terraform
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -85,6 +101,8 @@ class DeclaredReachView:
             field_dict["receipt_digest"] = receipt_digest
         if snapshot_id is not UNSET:
             field_dict["snapshot_id"] = snapshot_id
+        if terraform is not UNSET:
+            field_dict["terraform"] = terraform
 
         return field_dict
 
@@ -92,6 +110,7 @@ class DeclaredReachView:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.reach_gap_view import ReachGapView  # noqa: PLC0415
         from ..models.reached_entity_view import ReachedEntityView  # noqa: PLC0415
+        from ..models.terraform_roots_view import TerraformRootsView  # noqa: PLC0415
 
         d = dict(src_dict)
         complete = d.pop("complete")
@@ -138,6 +157,23 @@ class DeclaredReachView:
 
         snapshot_id = _parse_snapshot_id(d.pop("snapshot_id", UNSET))
 
+        def _parse_terraform(data: object) -> None | TerraformRootsView | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                terraform_type_0 = TerraformRootsView.from_dict(data)
+
+                return terraform_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | TerraformRootsView | Unset, data)
+
+        terraform = _parse_terraform(d.pop("terraform", UNSET))
+
         declared_reach_view = cls(
             complete=complete,
             entities=entities,
@@ -145,6 +181,7 @@ class DeclaredReachView:
             outcome=outcome,
             receipt_digest=receipt_digest,
             snapshot_id=snapshot_id,
+            terraform=terraform,
         )
 
         declared_reach_view.additional_properties = d
