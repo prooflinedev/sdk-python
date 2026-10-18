@@ -16,10 +16,10 @@ T = TypeVar("T", bound="FileFact")
 class FileFact:
     """
     Attributes:
-        additions (int):
-        deletions (int):
+        additions (int): Lines added in this file's recorded diff.
+        deletions (int): Lines deleted in this file's recorded diff.
         depth (ReviewDepth): The depth the applied route plan read a file at.
-        path (str):
+        path (str): The repository-relative path of the changed file.
         status (str): GitHub's file status: `added`, `modified`, `removed`, `renamed` and so on.
         previous_path (None | str | Unset): The path before a rename.
     """
