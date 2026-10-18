@@ -20,7 +20,7 @@ class LocalReverification:
        Attributes:
            checks (Any): Each deterministic check the finding cited and its result on the
                 patched head. Empty until an outcome is recorded.
-           finding_id (UUID):
+           finding_id (UUID): The finding being re-verified against this patch.
            iteration (int): The request's number among the requests to re-verify the finding's
                 series on this patch, at most 3.
            outcome (LocalReverificationOutcome): `RESOLVED_VERIFIED` needs the re-investigation to reject the finding's
