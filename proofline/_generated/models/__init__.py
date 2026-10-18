@@ -157,6 +157,8 @@ from .start_session import StartSession
 from .stop_response import StopResponse
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
+from .terraform_plan_view import TerraformPlanView
+from .terraform_roots_view import TerraformRootsView
 from .thread_observation_freshness import ThreadObservationFreshness
 from .thread_observation_view import ThreadObservationView
 from .thread_provider_state import ThreadProviderState
@@ -321,6 +323,8 @@ __all__ = (
     "StopResponse",
     "SubjectAuthorization",
     "SubjectView",
+    "TerraformPlanView",
+    "TerraformRootsView",
     "ThreadObservationFreshness",
     "ThreadObservationView",
     "ThreadProviderState",

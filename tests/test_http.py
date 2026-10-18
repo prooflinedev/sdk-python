@@ -42,6 +42,7 @@ from proofline import (
     StopResponse,
     _sync_http,
     _transport,
+    models,
 )
 from proofline import client as client_module
 from proofline._generated.models.finding_fix_prompt_type_0 import FindingFixPromptType0
@@ -113,7 +114,13 @@ class Clock:
 
 
 @MODES
-async def test_all_public_operations_use_generated_models_and_scoped_paths(mode: str) -> None:
+@pytest.mark.parametrize(
+    "terraform",
+    [UNSET, None, {"plan": "TAKEN", "addresses": ["aws_s3_bucket.synthetic"], "omitted": 1}],
+)
+async def test_all_public_operations_use_generated_models_and_scoped_paths(
+    mode: str, terraform: Any
+) -> None:
     prefix = f"/api/v1/organizations/{ORG}"
     paths = [
         ("GET", f"{prefix}/reviews", page(), ReviewPage),
@@ -192,6 +199,19 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
         ),
     ]
 
+    for _, _, body, response_model in paths:
+        if response_model is CustomerReviewDetail:
+            assessments = body["assessments"]
+        elif response_model is CustomerAssessmentDetail:
+            assessments = [body]
+        else:
+            continue
+        for entry in assessments:
+            reach = {"complete": True, "entities": [], "gaps": [], "outcome": "READ"}
+            if terraform is not UNSET:
+                reach["terraform"] = terraform
+            entry["declared_reach"] = reach
+
     def respond(request: Request, index: int) -> Reply:
         method, path, body, _ = paths[index]
         assert request.method == method
@@ -223,6 +243,19 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
             for index, (name, args, kwargs) in enumerate(calls):
                 result = await call(client, name, *args, **kwargs)
                 assert isinstance(result, paths[index][3])
+                if isinstance(result, (CustomerReviewDetail, CustomerAssessmentDetail)):
+                    entries = (
+                        result.assessments if isinstance(result, CustomerReviewDetail) else [result]
+                    )
+                    for entry in entries:
+                        roots = entry.declared_reach.terraform
+                        if isinstance(terraform, dict):
+                            assert isinstance(roots, models.TerraformRootsView)
+                            assert roots.plan is models.TerraformPlanView.TAKEN
+                            assert roots.addresses == ["aws_s3_bucket.synthetic"]
+                            assert roots.omitted == 1
+                        else:
+                            assert roots is terraform
                 if isinstance(result, CustomerFinding):
                     assert result.rule_refs[0].key == "no-sync-io-in-handlers"
                     revision = result.rule_refs[0].revisions[0]
