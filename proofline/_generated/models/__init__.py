@@ -7,6 +7,7 @@ from .agent_session_prompt_type_0 import AgentSessionPromptType0
 from .agent_session_prompt_type_1 import AgentSessionPromptType1
 from .agent_session_target import AgentSessionTarget
 from .agent_vendor import AgentVendor
+from .approval_gap import ApprovalGap
 from .assessment_projection import AssessmentProjection
 from .attributed_condition_view import AttributedConditionView
 from .author_choice import AuthorChoice
@@ -14,6 +15,9 @@ from .authority import Authority
 from .availability_type_0 import AvailabilityType0
 from .change_attribution_view import ChangeAttributionView
 from .change_count_view import ChangeCountView
+from .change_diagram_kind_view import ChangeDiagramKindView
+from .change_diagram_outcome_type_0 import ChangeDiagramOutcomeType0
+from .change_diagram_view import ChangeDiagramView
 from .code_assessment_status_type_0 import CodeAssessmentStatusType0
 from .comment_address_evaluation_view import CommentAddressEvaluationView
 from .comment_address_outcome import CommentAddressOutcome
@@ -34,6 +38,8 @@ from .customer_finding import CustomerFinding
 from .customer_finding_validation import CustomerFindingValidation
 from .customer_review_detail import CustomerReviewDetail
 from .dataset import Dataset
+from .declared_reach_outcome import DeclaredReachOutcome
+from .declared_reach_view import DeclaredReachView
 from .deep_review_escalation import DeepReviewEscalation
 from .deep_review_escalation_status import DeepReviewEscalationStatus
 from .domain_view import DomainView
@@ -47,6 +53,9 @@ from .export_review_status import ExportReviewStatus
 from .export_validation import ExportValidation
 from .export_validation_source import ExportValidationSource
 from .file_projection import FileProjection
+from .file_review_request import FileReviewRequest
+from .file_review_response import FileReviewResponse
+from .file_scope import FileScope
 from .filter_choice import FilterChoice
 from .finding_causal_edge_view import FindingCausalEdgeView
 from .finding_causal_graph_view import FindingCausalGraphView
@@ -74,7 +83,11 @@ from .finding_validations_export_row import FindingValidationsExportRow
 from .findings_export_row import FindingsExportRow
 from .gate_state import GateState
 from .gate_status import GateStatus
+from .local_reverification import LocalReverification
+from .local_reverification_outcome import LocalReverificationOutcome
 from .not_assessed_view import NotAssessedView
+from .occurrence_capture import OccurrenceCapture
+from .occurrence_question import OccurrenceQuestion
 from .open_finding_counts import OpenFindingCounts
 from .open_item_environment import OpenItemEnvironment
 from .open_items_gap_reason import OpenItemsGapReason
@@ -90,10 +103,15 @@ from .pass_projection import PassProjection
 from .patch_review_request import PatchReviewRequest
 from .patch_review_response import PatchReviewResponse
 from .patch_trigger_source import PatchTriggerSource
+from .patch_verification import PatchVerification
 from .permission_view import PermissionView
 from .plan_projection import PlanProjection
 from .problem import Problem
 from .pull_request_merge_gate import PullRequestMergeGate
+from .reach_gap_view import ReachGapView
+from .reach_step_view import ReachStepView
+from .reached_entity_view import ReachedEntityView
+from .refresh_view import RefreshView
 from .refused_environment import RefusedEnvironment
 from .related_review import RelatedReview
 from .repository_guidance import RepositoryGuidance
@@ -136,6 +154,7 @@ from .specialist_pass_execution import SpecialistPassExecution
 from .spend_account_kind import SpendAccountKind
 from .spend_export_row import SpendExportRow
 from .start_session import StartSession
+from .stop_response import StopResponse
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
 from .thread_observation_freshness import ThreadObservationFreshness
@@ -152,6 +171,7 @@ __all__ = (
     "AgentSessionPromptType1",
     "AgentSessionTarget",
     "AgentVendor",
+    "ApprovalGap",
     "AssessmentProjection",
     "AttributedConditionView",
     "AuthorChoice",
@@ -159,6 +179,9 @@ __all__ = (
     "AvailabilityType0",
     "ChangeAttributionView",
     "ChangeCountView",
+    "ChangeDiagramKindView",
+    "ChangeDiagramOutcomeType0",
+    "ChangeDiagramView",
     "CodeAssessmentStatusType0",
     "CommentAddressEvaluationView",
     "CommentAddressOutcome",
@@ -179,6 +202,8 @@ __all__ = (
     "CustomerFindingValidation",
     "CustomerReviewDetail",
     "Dataset",
+    "DeclaredReachOutcome",
+    "DeclaredReachView",
     "DeepReviewEscalation",
     "DeepReviewEscalationStatus",
     "DomainView",
@@ -192,6 +217,9 @@ __all__ = (
     "ExportValidation",
     "ExportValidationSource",
     "FileProjection",
+    "FileReviewRequest",
+    "FileReviewResponse",
+    "FileScope",
     "FilterChoice",
     "FindingCausalEdgeView",
     "FindingCausalGraphView",
@@ -219,7 +247,11 @@ __all__ = (
     "FindingValidationsExportRow",
     "GateState",
     "GateStatus",
+    "LocalReverification",
+    "LocalReverificationOutcome",
     "NotAssessedView",
+    "OccurrenceCapture",
+    "OccurrenceQuestion",
     "OpenFindingCounts",
     "OpenItemEnvironment",
     "OpenItemsGapReason",
@@ -235,10 +267,15 @@ __all__ = (
     "PatchReviewRequest",
     "PatchReviewResponse",
     "PatchTriggerSource",
+    "PatchVerification",
     "PermissionView",
     "PlanProjection",
     "Problem",
     "PullRequestMergeGate",
+    "ReachedEntityView",
+    "ReachGapView",
+    "ReachStepView",
+    "RefreshView",
     "RefusedEnvironment",
     "RelatedReview",
     "RepositoryGuidance",
@@ -281,6 +318,7 @@ __all__ = (
     "SpendAccountKind",
     "SpendExportRow",
     "StartSession",
+    "StopResponse",
     "SubjectAuthorization",
     "SubjectView",
     "ThreadObservationFreshness",
