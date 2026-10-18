@@ -18,6 +18,7 @@ from .change_count_view import ChangeCountView
 from .change_diagram_kind_view import ChangeDiagramKindView
 from .change_diagram_outcome_type_0 import ChangeDiagramOutcomeType0
 from .change_diagram_view import ChangeDiagramView
+from .change_summary import ChangeSummary
 from .code_assessment_status_type_0 import CodeAssessmentStatusType0
 from .comment_address_evaluation_view import CommentAddressEvaluationView
 from .comment_address_outcome import CommentAddressOutcome
@@ -52,6 +53,7 @@ from .export_review_kind import ExportReviewKind
 from .export_review_status import ExportReviewStatus
 from .export_validation import ExportValidation
 from .export_validation_source import ExportValidationSource
+from .file_fact import FileFact
 from .file_projection import FileProjection
 from .file_review_request import FileReviewRequest
 from .file_review_response import FileReviewResponse
@@ -107,6 +109,8 @@ from .patch_verification import PatchVerification
 from .permission_view import PermissionView
 from .plan_projection import PlanProjection
 from .problem import Problem
+from .prose import Prose
+from .prose_outcome_type_0 import ProseOutcomeType0
 from .pull_request_merge_gate import PullRequestMergeGate
 from .reach_gap_view import ReachGapView
 from .reach_step_view import ReachStepView
@@ -119,6 +123,7 @@ from .repository_name import RepositoryName
 from .repository_names import RepositoryNames
 from .rerun_response import RerunResponse
 from .review_actions import ReviewActions
+from .review_depth import ReviewDepth
 from .review_diff_stats import ReviewDiffStats
 from .review_filters import ReviewFilters
 from .review_open_items import ReviewOpenItems
@@ -157,6 +162,7 @@ from .start_session import StartSession
 from .stop_response import StopResponse
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
+from .summary_route import SummaryRoute
 from .thread_observation_freshness import ThreadObservationFreshness
 from .thread_observation_view import ThreadObservationView
 from .thread_provider_state import ThreadProviderState
@@ -182,6 +188,7 @@ __all__ = (
     "ChangeDiagramKindView",
     "ChangeDiagramOutcomeType0",
     "ChangeDiagramView",
+    "ChangeSummary",
     "CodeAssessmentStatusType0",
     "CommentAddressEvaluationView",
     "CommentAddressOutcome",
@@ -216,6 +223,7 @@ __all__ = (
     "ExportReviewStatus",
     "ExportValidation",
     "ExportValidationSource",
+    "FileFact",
     "FileProjection",
     "FileReviewRequest",
     "FileReviewResponse",
@@ -271,6 +279,8 @@ __all__ = (
     "PermissionView",
     "PlanProjection",
     "Problem",
+    "Prose",
+    "ProseOutcomeType0",
     "PullRequestMergeGate",
     "ReachedEntityView",
     "ReachGapView",
@@ -283,6 +293,7 @@ __all__ = (
     "RepositoryNames",
     "RerunResponse",
     "ReviewActions",
+    "ReviewDepth",
     "ReviewDiffStats",
     "ReviewedTreeCitationView",
     "ReviewFilters",
@@ -321,6 +332,7 @@ __all__ = (
     "StopResponse",
     "SubjectAuthorization",
     "SubjectView",
+    "SummaryRoute",
     "ThreadObservationFreshness",
     "ThreadObservationView",
     "ThreadProviderState",
