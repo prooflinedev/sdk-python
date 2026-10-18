@@ -14,6 +14,7 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.actor_view import ActorView
     from ..models.change_diagram_view import ChangeDiagramView
+    from ..models.change_summary import ChangeSummary
     from ..models.customer_assessment import CustomerAssessment
     from ..models.customer_code_assessment import CustomerCodeAssessment
     from ..models.deep_review_escalation import DeepReviewEscalation
@@ -75,6 +76,12 @@ class CustomerReviewDetail:
             pinned code
              index and the relations World declares. Absent when the review
              recorded none.
+        change_summary (ChangeSummary | None | Unset): What the change does and which files the review read at which
+            depth
+             (§55). Null until the review's publication records it, and for a
+             review that is not of a pull request. Generated text has current
+             credentials and recorded protected values withheld; missing or expired
+             provenance withholds the generated text whole.
         check_run_url (None | str | Unset): The GitHub check run Proofline published for this review. Null when
              none was published.
         code_assessment (CustomerCodeAssessment | None | Unset): The code assessment this review recorded, apart from
@@ -188,6 +195,7 @@ class CustomerReviewDetail:
     base_commit_url: None | str | Unset = UNSET
     base_ref: None | str | Unset = UNSET
     change_diagram: ChangeDiagramView | None | Unset = UNSET
+    change_summary: ChangeSummary | None | Unset = UNSET
     check_run_url: None | str | Unset = UNSET
     code_assessment: CustomerCodeAssessment | None | Unset = UNSET
     compare_url: None | str | Unset = UNSET
@@ -230,6 +238,7 @@ class CustomerReviewDetail:
     def to_dict(self) -> dict[str, Any]:
         from ..models.actor_view import ActorView  # noqa: PLC0415
         from ..models.change_diagram_view import ChangeDiagramView  # noqa: PLC0415
+        from ..models.change_summary import ChangeSummary  # noqa: PLC0415
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
@@ -308,6 +317,14 @@ class CustomerReviewDetail:
             change_diagram = self.change_diagram.to_dict()
         else:
             change_diagram = self.change_diagram
+
+        change_summary: dict[str, Any] | None | Unset
+        if isinstance(self.change_summary, Unset):
+            change_summary = UNSET
+        elif isinstance(self.change_summary, ChangeSummary):
+            change_summary = self.change_summary.to_dict()
+        else:
+            change_summary = self.change_summary
 
         check_run_url: None | str | Unset
         if isinstance(self.check_run_url, Unset):
@@ -593,6 +610,8 @@ class CustomerReviewDetail:
             field_dict["base_ref"] = base_ref
         if change_diagram is not UNSET:
             field_dict["change_diagram"] = change_diagram
+        if change_summary is not UNSET:
+            field_dict["change_summary"] = change_summary
         if check_run_url is not UNSET:
             field_dict["check_run_url"] = check_run_url
         if code_assessment is not UNSET:
@@ -674,6 +693,7 @@ class CustomerReviewDetail:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.actor_view import ActorView  # noqa: PLC0415
         from ..models.change_diagram_view import ChangeDiagramView  # noqa: PLC0415
+        from ..models.change_summary import ChangeSummary  # noqa: PLC0415
         from ..models.customer_assessment import CustomerAssessment  # noqa: PLC0415
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
@@ -787,6 +807,23 @@ class CustomerReviewDetail:
             return cast(ChangeDiagramView | None | Unset, data)
 
         change_diagram = _parse_change_diagram(d.pop("change_diagram", UNSET))
+
+        def _parse_change_summary(data: object) -> ChangeSummary | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                change_summary_type_0 = ChangeSummary.from_dict(data)
+
+                return change_summary_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(ChangeSummary | None | Unset, data)
+
+        change_summary = _parse_change_summary(d.pop("change_summary", UNSET))
 
         def _parse_check_run_url(data: object) -> None | str | Unset:
             if data is None:
@@ -1280,6 +1317,7 @@ class CustomerReviewDetail:
             base_commit_url=base_commit_url,
             base_ref=base_ref,
             change_diagram=change_diagram,
+            change_summary=change_summary,
             check_run_url=check_run_url,
             code_assessment=code_assessment,
             compare_url=compare_url,

@@ -392,6 +392,87 @@ async def test_local_and_commit_reviews_post_their_subject_and_decode_the_review
 
 
 @MODES
+@pytest.mark.parametrize("summary_state", ["absent", "null", "published", "withheld"])
+async def test_review_reads_preserve_summary_and_exact_code_identity(
+    mode: str, summary_state: str
+) -> None:
+    body = review()
+    body.update(head_commit_sha="a" * 40, base_commit_sha="b" * 40)
+    if summary_state != "absent":
+        body["change_summary"] = (
+            None
+            if summary_state == "null"
+            else {
+                "head_sha": "a" * 40,
+                "base_sha": "b" * 40,
+                "files": [
+                    {
+                        "path": "src/new.py",
+                        "previous_path": "src/old.py",
+                        "status": "renamed",
+                        "additions": 3,
+                        "deletions": 1,
+                        "depth": "STANDARD",
+                    }
+                ],
+                "route": "SHORT",
+                "prose_outcome": "PUBLISHED",
+                "prose": None
+                if summary_state == "withheld"
+                else {
+                    "headline": "[withheld] <script>literal text</script>",
+                    "paragraphs": ["Moves the request handler."],
+                    "notable_paths": ["src/new.py"],
+                },
+            }
+        )
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.method == "GET"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        return Reply(body=body)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            for operation, args in [
+                ("get_review", (ORG, REVIEW)),
+                ("get_pull_request_review", (ORG, "repo/name", 42, 3)),
+                ("get_deployment_review", (ORG, "deployment")),
+            ]:
+                result = await call(client, operation, *args)
+                assert result.publication == "WITHHELD"
+                assert result.head_commit_sha == "a" * 40
+                assert result.base_commit_sha == "b" * 40
+                summary = result.change_summary
+                if summary_state in {"absent", "null"}:
+                    assert summary is (UNSET if summary_state == "absent" else None)
+                    continue
+                assert isinstance(summary, models.ChangeSummary)
+                assert (summary.head_sha, summary.base_sha) == ("a" * 40, "b" * 40)
+                assert summary.route is models.SummaryRoute.SHORT
+                assert summary.prose_outcome == "PUBLISHED"
+                assert len(summary.files) == 1
+                file = summary.files[0]
+                assert (file.path, file.previous_path, file.status) == (
+                    "src/new.py",
+                    "src/old.py",
+                    "renamed",
+                )
+                assert (file.additions, file.deletions, file.depth) == (
+                    3,
+                    1,
+                    models.ReviewDepth.STANDARD,
+                )
+                if summary_state == "withheld":
+                    assert summary.prose is None
+                else:
+                    assert isinstance(summary.prose, models.Prose)
+                    assert summary.prose.headline == "[withheld] <script>literal text</script>"
+                    assert summary.prose.paragraphs == ["Moves the request handler."]
+                    assert summary.prose.notable_paths == ["src/new.py"]
+
+
+@MODES
 @pytest.mark.parametrize("status", [401, 403, 404])
 async def test_authority_problems_do_not_retry_or_disclose_secrets(
     mode: str, status: int, caplog: pytest.LogCaptureFixture
