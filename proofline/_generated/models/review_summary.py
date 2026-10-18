@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import UUID
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.refresh_view import RefreshView
+
 
 T = TypeVar("T", bound="ReviewSummary")
 
@@ -24,7 +28,8 @@ class ReviewSummary:
         finding_count (int): How many findings this review's assessments recorded, across all of them.
         id (UUID): The review's identifier.
         kind (str): `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, a review of local changes
-             sent as a patch, or `COMMIT`, a review of pushed commits.
+             sent as a patch, `COMMIT`, a review of pushed commits, or `FILES`,
+             complete selected files at one pushed commit.
         public_key (str): The review's stable public address: `rev_` followed by its identifier without hyphens.
         publication (str): Whether the review reached the pull request: `PUBLISHED`, `WITHHELD`,
              `PUBLICATION_REQUESTED` or `PUBLICATION_REFUSED`. A review run from
@@ -62,6 +67,9 @@ class ReviewSummary:
              renderers must treat it as text, never markup.
         pull_request_url (None | str | Unset): The pull request on GitHub. Absent for a deployment review or when the
             repository is unknown.
+        refresh (None | RefreshView | Unset): How this review decided what it reviews after a push or a full-review
+             request. Absent for a review that refreshes nothing, and while a
+             refresh has not decided yet.
         repository_full_name (None | str | Unset): The repository's `owner/name`. Absent when the review names no
             repository.
         repository_id (None | Unset | UUID): The review's repository. Set only on a single-review read, and absent there
@@ -96,6 +104,7 @@ class ReviewSummary:
     pull_request_state: None | str | Unset = UNSET
     pull_request_title: None | str | Unset = UNSET
     pull_request_url: None | str | Unset = UNSET
+    refresh: None | RefreshView | Unset = UNSET
     repository_full_name: None | str | Unset = UNSET
     repository_id: None | Unset | UUID = UNSET
     repository_name: None | str | Unset = UNSET
@@ -104,6 +113,8 @@ class ReviewSummary:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.refresh_view import RefreshView  # noqa: PLC0415
+
         assessment_count = self.assessment_count
 
         created_at = self.created_at.isoformat()
@@ -204,6 +215,14 @@ class ReviewSummary:
         else:
             pull_request_url = self.pull_request_url
 
+        refresh: dict[str, Any] | None | Unset
+        if isinstance(self.refresh, Unset):
+            refresh = UNSET
+        elif isinstance(self.refresh, RefreshView):
+            refresh = self.refresh.to_dict()
+        else:
+            refresh = self.refresh
+
         repository_full_name: None | str | Unset
         if isinstance(self.repository_full_name, Unset):
             repository_full_name = UNSET
@@ -278,6 +297,8 @@ class ReviewSummary:
             field_dict["pull_request_title"] = pull_request_title
         if pull_request_url is not UNSET:
             field_dict["pull_request_url"] = pull_request_url
+        if refresh is not UNSET:
+            field_dict["refresh"] = refresh
         if repository_full_name is not UNSET:
             field_dict["repository_full_name"] = repository_full_name
         if repository_id is not UNSET:
@@ -293,6 +314,8 @@ class ReviewSummary:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.refresh_view import RefreshView  # noqa: PLC0415
+
         d = dict(src_dict)
         assessment_count = d.pop("assessment_count")
 
@@ -449,6 +472,23 @@ class ReviewSummary:
 
         pull_request_url = _parse_pull_request_url(d.pop("pull_request_url", UNSET))
 
+        def _parse_refresh(data: object) -> None | RefreshView | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                refresh_type_0 = RefreshView.from_dict(data)
+
+                return refresh_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | RefreshView | Unset, data)
+
+        refresh = _parse_refresh(d.pop("refresh", UNSET))
+
         def _parse_repository_full_name(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -526,6 +566,7 @@ class ReviewSummary:
             pull_request_state=pull_request_state,
             pull_request_title=pull_request_title,
             pull_request_url=pull_request_url,
+            refresh=refresh,
             repository_full_name=repository_full_name,
             repository_id=repository_id,
             repository_name=repository_name,

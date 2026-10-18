@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..models.customer_checks import CustomerChecks
     from ..models.customer_decision import CustomerDecision
     from ..models.customer_finding import CustomerFinding
+    from ..models.declared_reach_view import DeclaredReachView
     from ..models.domain_view import DomainView
 
 
@@ -37,6 +38,10 @@ class CustomerAssessment:
             deployment
              authorization. Absent when none is recorded and the review kind
              records no decision basis.
+        declared_reach (DeclaredReachView | None | Unset): What World declares depends on what this change deploys in
+            this
+             environment, at the assessment's pinned snapshot. Absent when the
+             assessment's kind records no declared reach.
         incompleteness_kind (None | str | Unset): Why an `INCOMPLETE` assessment is incomplete: `NOT_CONFIGURED`,
              `POLICY_EXCLUDED`, `EVIDENCE_UNAVAILABLE`, `HYPOTHESES_UNRESOLVED` or
              `MODEL_BUDGET_EXHAUSTED`. Absent otherwise; an unclassified gap is not a
@@ -57,6 +62,7 @@ class CustomerAssessment:
     status: str
     completed_at: datetime.datetime | None | Unset = UNSET
     decision_presentation: CustomerDecision | None | Unset = UNSET
+    declared_reach: DeclaredReachView | None | Unset = UNSET
     incompleteness_kind: None | str | Unset = UNSET
     reason_codes: list[str] | None | Unset = UNSET
     release_evidence_gap: None | str | Unset = UNSET
@@ -65,6 +71,7 @@ class CustomerAssessment:
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.customer_decision import CustomerDecision  # noqa: PLC0415
+        from ..models.declared_reach_view import DeclaredReachView  # noqa: PLC0415
 
         checks = self.checks.to_dict()
 
@@ -99,6 +106,14 @@ class CustomerAssessment:
             decision_presentation = self.decision_presentation.to_dict()
         else:
             decision_presentation = self.decision_presentation
+
+        declared_reach: dict[str, Any] | None | Unset
+        if isinstance(self.declared_reach, Unset):
+            declared_reach = UNSET
+        elif isinstance(self.declared_reach, DeclaredReachView):
+            declared_reach = self.declared_reach.to_dict()
+        else:
+            declared_reach = self.declared_reach
 
         incompleteness_kind: None | str | Unset
         if isinstance(self.incompleteness_kind, Unset):
@@ -145,6 +160,8 @@ class CustomerAssessment:
             field_dict["completed_at"] = completed_at
         if decision_presentation is not UNSET:
             field_dict["decision_presentation"] = decision_presentation
+        if declared_reach is not UNSET:
+            field_dict["declared_reach"] = declared_reach
         if incompleteness_kind is not UNSET:
             field_dict["incompleteness_kind"] = incompleteness_kind
         if reason_codes is not UNSET:
@@ -161,6 +178,7 @@ class CustomerAssessment:
         from ..models.customer_checks import CustomerChecks  # noqa: PLC0415
         from ..models.customer_decision import CustomerDecision  # noqa: PLC0415
         from ..models.customer_finding import CustomerFinding  # noqa: PLC0415
+        from ..models.declared_reach_view import DeclaredReachView  # noqa: PLC0415
         from ..models.domain_view import DomainView  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -219,6 +237,23 @@ class CustomerAssessment:
             return cast(CustomerDecision | None | Unset, data)
 
         decision_presentation = _parse_decision_presentation(d.pop("decision_presentation", UNSET))
+
+        def _parse_declared_reach(data: object) -> DeclaredReachView | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                declared_reach_type_0 = DeclaredReachView.from_dict(data)
+
+                return declared_reach_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(DeclaredReachView | None | Unset, data)
+
+        declared_reach = _parse_declared_reach(d.pop("declared_reach", UNSET))
 
         def _parse_incompleteness_kind(data: object) -> None | str | Unset:
             if data is None:
@@ -281,6 +316,7 @@ class CustomerAssessment:
             status=status,
             completed_at=completed_at,
             decision_presentation=decision_presentation,
+            declared_reach=declared_reach,
             incompleteness_kind=incompleteness_kind,
             reason_codes=reason_codes,
             release_evidence_gap=release_evidence_gap,

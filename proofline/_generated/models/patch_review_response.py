@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
+
+if TYPE_CHECKING:
+    from ..models.patch_verification import PatchVerification
+
 
 T = TypeVar("T", bound="PatchReviewResponse")
 
@@ -21,11 +25,14 @@ class PatchReviewResponse:
              the repository and base commit.
         review_id (UUID): The review of this patch on this base, readable through the review
              and findings routes.
+        verify (list[PatchVerification]): Each finding of `verify_finding_ids` the review re-verifies, one per
+             finding series. Empty without `verify_finding_ids`.
     """
 
     existing: bool
     patch_digest: str
     review_id: UUID
+    verify: list[PatchVerification]
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -35,6 +42,11 @@ class PatchReviewResponse:
 
         review_id = str(self.review_id)
 
+        verify = []
+        for verify_item_data in self.verify:
+            verify_item = verify_item_data.to_dict()
+            verify.append(verify_item)
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -42,6 +54,7 @@ class PatchReviewResponse:
                 "existing": existing,
                 "patch_digest": patch_digest,
                 "review_id": review_id,
+                "verify": verify,
             }
         )
 
@@ -49,6 +62,8 @@ class PatchReviewResponse:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.patch_verification import PatchVerification  # noqa: PLC0415
+
         d = dict(src_dict)
         existing = d.pop("existing")
 
@@ -56,10 +71,18 @@ class PatchReviewResponse:
 
         review_id = UUID(d.pop("review_id"))
 
+        verify = []
+        _verify = d.pop("verify")
+        for verify_item_data in _verify:
+            verify_item = PatchVerification.from_dict(verify_item_data)
+
+            verify.append(verify_item)
+
         patch_review_response = cls(
             existing=existing,
             patch_digest=patch_digest,
             review_id=review_id,
+            verify=verify,
         )
 
         patch_review_response.additional_properties = d

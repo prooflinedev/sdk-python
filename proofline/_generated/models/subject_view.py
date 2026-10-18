@@ -10,6 +10,7 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.file_scope import FileScope
     from ..models.subject_authorization import SubjectAuthorization
 
 
@@ -47,6 +48,7 @@ class SubjectView:
              `GIT_PATCH` subject applies to. Absent for other kinds.
         deployment_external_id (None | str | Unset): The GitHub deployment identifier a `GITHUB_WORKFLOW_RUN` subject
             ran for. Absent when the run was not for a deployment.
+        file_scope (FileScope | None | Unset): Whole-file selection at the pinned revision; absent for comparisons.
         patch_digest (None | str | Unset): The SHA-256 of a `GIT_PATCH` subject's canonical patch. Absent for
              other kinds.
         repository_full_name (None | str | Unset): Absent only when the subject's repository record itself is gone.
@@ -67,6 +69,7 @@ class SubjectView:
     artifact_digest: None | str | Unset = UNSET
     commit_sha: None | str | Unset = UNSET
     deployment_external_id: None | str | Unset = UNSET
+    file_scope: FileScope | None | Unset = UNSET
     patch_digest: None | str | Unset = UNSET
     repository_full_name: None | str | Unset = UNSET
     repository_id: None | Unset | UUID = UNSET
@@ -76,6 +79,8 @@ class SubjectView:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.file_scope import FileScope  # noqa: PLC0415
+
         id = str(self.id)
 
         kind = self.kind
@@ -104,6 +109,14 @@ class SubjectView:
             deployment_external_id = UNSET
         else:
             deployment_external_id = self.deployment_external_id
+
+        file_scope: dict[str, Any] | None | Unset
+        if isinstance(self.file_scope, Unset):
+            file_scope = UNSET
+        elif isinstance(self.file_scope, FileScope):
+            file_scope = self.file_scope.to_dict()
+        else:
+            file_scope = self.file_scope
 
         patch_digest: None | str | Unset
         if isinstance(self.patch_digest, Unset):
@@ -159,6 +172,8 @@ class SubjectView:
             field_dict["commit_sha"] = commit_sha
         if deployment_external_id is not UNSET:
             field_dict["deployment_external_id"] = deployment_external_id
+        if file_scope is not UNSET:
+            field_dict["file_scope"] = file_scope
         if patch_digest is not UNSET:
             field_dict["patch_digest"] = patch_digest
         if repository_full_name is not UNSET:
@@ -176,6 +191,7 @@ class SubjectView:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.file_scope import FileScope  # noqa: PLC0415
         from ..models.subject_authorization import SubjectAuthorization  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -222,6 +238,23 @@ class SubjectView:
         deployment_external_id = _parse_deployment_external_id(
             d.pop("deployment_external_id", UNSET)
         )
+
+        def _parse_file_scope(data: object) -> FileScope | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                file_scope_type_0 = FileScope.from_dict(data)
+
+                return file_scope_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(FileScope | None | Unset, data)
+
+        file_scope = _parse_file_scope(d.pop("file_scope", UNSET))
 
         def _parse_patch_digest(data: object) -> None | str | Unset:
             if data is None:
@@ -293,6 +326,7 @@ class SubjectView:
             artifact_digest=artifact_digest,
             commit_sha=commit_sha,
             deployment_external_id=deployment_external_id,
+            file_scope=file_scope,
             patch_digest=patch_digest,
             repository_full_name=repository_full_name,
             repository_id=repository_id,

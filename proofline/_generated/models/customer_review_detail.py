@@ -13,11 +13,14 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.actor_view import ActorView
+    from ..models.change_diagram_view import ChangeDiagramView
     from ..models.customer_assessment import CustomerAssessment
     from ..models.customer_code_assessment import CustomerCodeAssessment
     from ..models.deep_review_escalation import DeepReviewEscalation
+    from ..models.local_reverification import LocalReverification
     from ..models.open_items_view import OpenItemsView
     from ..models.pull_request_merge_gate import PullRequestMergeGate
+    from ..models.refresh_view import RefreshView
     from ..models.related_review import RelatedReview
     from ..models.review_actions import ReviewActions
     from ..models.review_diff_stats import ReviewDiffStats
@@ -41,7 +44,8 @@ class CustomerReviewDetail:
         finding_count (int): How many findings this review's assessments recorded, across all of them.
         id (UUID): The review's identifier.
         kind (str): `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, a review of local changes
-             sent as a patch, or `COMMIT`, a review of pushed commits.
+             sent as a patch, `COMMIT`, a review of pushed commits, or `FILES`,
+             complete selected files at one pushed commit.
         public_key (str): The review's stable public address: `rev_` followed by its identifier without hyphens.
         publication (str): Whether the review reached the pull request: `PUBLISHED`, `WITHHELD`,
              `PUBLICATION_REQUESTED` or `PUBLICATION_REFUSED`. A review run from
@@ -67,6 +71,10 @@ class CustomerReviewDetail:
              repository is unknown.
         base_ref (None | str | Unset): The pull request's base branch name as last recorded from GitHub, for
              orientation only. Null when no pull request state is recorded.
+        change_diagram (ChangeDiagramView | None | Unset): The change-level diagram: the changed call path from the
+            pinned code
+             index and the relations World declares. Absent when the review
+             recorded none.
         check_run_url (None | str | Unset): The GitHub check run Proofline published for this review. Null when
              none was published.
         code_assessment (CustomerCodeAssessment | None | Unset): The code assessment this review recorded, apart from
@@ -94,6 +102,11 @@ class CustomerReviewDetail:
              branch moves, the reviewed input does not. Absent for a patch review.
         head_ref (None | str | Unset): The pull request's head branch name as last recorded from GitHub, for
              orientation only. Null when no pull request state is recorded.
+        local_reverifications (list[LocalReverification] | Unset): For a patch review requested with
+            `verify_finding_ids`, each finding
+             it re-verifies against the patch and the outcome. The outcome is
+             local: the pull request's finding is unchanged whatever it is. Absent
+             otherwise.
         merge_gate (None | PullRequestMergeGate | Unset): The deterministic policy for this exact repository/head, when
             opted in.
              Its captured review owner and GitHub bypass remain separate history.
@@ -122,6 +135,9 @@ class CustomerReviewDetail:
              renderers must treat it as text, never markup.
         pull_request_url (None | str | Unset): The pull request on GitHub. Absent for a deployment review or when the
             repository is unknown.
+        refresh (None | RefreshView | Unset): How this review decided what it reviews after a push or a full-review
+             request. Absent for a review that refreshes nothing, and while a
+             refresh has not decided yet.
         repository_full_name (None | str | Unset): The repository's `owner/name`. Absent when the review names no
             repository.
         repository_id (None | Unset | UUID): The review's repository. Set only on a single-review read, and absent there
@@ -171,6 +187,7 @@ class CustomerReviewDetail:
     base_commit_sha: None | str | Unset = UNSET
     base_commit_url: None | str | Unset = UNSET
     base_ref: None | str | Unset = UNSET
+    change_diagram: ChangeDiagramView | None | Unset = UNSET
     check_run_url: None | str | Unset = UNSET
     code_assessment: CustomerCodeAssessment | None | Unset = UNSET
     compare_url: None | str | Unset = UNSET
@@ -181,6 +198,7 @@ class CustomerReviewDetail:
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
     head_ref: None | str | Unset = UNSET
+    local_reverifications: list[LocalReverification] | Unset = UNSET
     merge_gate: None | PullRequestMergeGate | Unset = UNSET
     open_items: None | OpenItemsView | Unset = UNSET
     open_items_observation: None | ReviewOpenItems | Unset = UNSET
@@ -193,6 +211,7 @@ class CustomerReviewDetail:
     pull_request_state: None | str | Unset = UNSET
     pull_request_title: None | str | Unset = UNSET
     pull_request_url: None | str | Unset = UNSET
+    refresh: None | RefreshView | Unset = UNSET
     repository_full_name: None | str | Unset = UNSET
     repository_id: None | Unset | UUID = UNSET
     repository_name: None | str | Unset = UNSET
@@ -210,10 +229,12 @@ class CustomerReviewDetail:
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.actor_view import ActorView  # noqa: PLC0415
+        from ..models.change_diagram_view import ChangeDiagramView  # noqa: PLC0415
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
         from ..models.pull_request_merge_gate import PullRequestMergeGate  # noqa: PLC0415
+        from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
 
@@ -279,6 +300,14 @@ class CustomerReviewDetail:
             base_ref = UNSET
         else:
             base_ref = self.base_ref
+
+        change_diagram: dict[str, Any] | None | Unset
+        if isinstance(self.change_diagram, Unset):
+            change_diagram = UNSET
+        elif isinstance(self.change_diagram, ChangeDiagramView):
+            change_diagram = self.change_diagram.to_dict()
+        else:
+            change_diagram = self.change_diagram
 
         check_run_url: None | str | Unset
         if isinstance(self.check_run_url, Unset):
@@ -347,6 +376,13 @@ class CustomerReviewDetail:
             head_ref = UNSET
         else:
             head_ref = self.head_ref
+
+        local_reverifications: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.local_reverifications, Unset):
+            local_reverifications = []
+            for local_reverifications_item_data in self.local_reverifications:
+                local_reverifications_item = local_reverifications_item_data.to_dict()
+                local_reverifications.append(local_reverifications_item)
 
         merge_gate: dict[str, Any] | None | Unset
         if isinstance(self.merge_gate, Unset):
@@ -425,6 +461,14 @@ class CustomerReviewDetail:
             pull_request_url = UNSET
         else:
             pull_request_url = self.pull_request_url
+
+        refresh: dict[str, Any] | None | Unset
+        if isinstance(self.refresh, Unset):
+            refresh = UNSET
+        elif isinstance(self.refresh, RefreshView):
+            refresh = self.refresh.to_dict()
+        else:
+            refresh = self.refresh
 
         repository_full_name: None | str | Unset
         if isinstance(self.repository_full_name, Unset):
@@ -547,6 +591,8 @@ class CustomerReviewDetail:
             field_dict["base_commit_url"] = base_commit_url
         if base_ref is not UNSET:
             field_dict["base_ref"] = base_ref
+        if change_diagram is not UNSET:
+            field_dict["change_diagram"] = change_diagram
         if check_run_url is not UNSET:
             field_dict["check_run_url"] = check_run_url
         if code_assessment is not UNSET:
@@ -567,6 +613,8 @@ class CustomerReviewDetail:
             field_dict["head_commit_url"] = head_commit_url
         if head_ref is not UNSET:
             field_dict["head_ref"] = head_ref
+        if local_reverifications is not UNSET:
+            field_dict["local_reverifications"] = local_reverifications
         if merge_gate is not UNSET:
             field_dict["merge_gate"] = merge_gate
         if open_items is not UNSET:
@@ -591,6 +639,8 @@ class CustomerReviewDetail:
             field_dict["pull_request_title"] = pull_request_title
         if pull_request_url is not UNSET:
             field_dict["pull_request_url"] = pull_request_url
+        if refresh is not UNSET:
+            field_dict["refresh"] = refresh
         if repository_full_name is not UNSET:
             field_dict["repository_full_name"] = repository_full_name
         if repository_id is not UNSET:
@@ -623,11 +673,14 @@ class CustomerReviewDetail:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.actor_view import ActorView  # noqa: PLC0415
+        from ..models.change_diagram_view import ChangeDiagramView  # noqa: PLC0415
         from ..models.customer_assessment import CustomerAssessment  # noqa: PLC0415
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
+        from ..models.local_reverification import LocalReverification  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
         from ..models.pull_request_merge_gate import PullRequestMergeGate  # noqa: PLC0415
+        from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.related_review import RelatedReview  # noqa: PLC0415
         from ..models.review_actions import ReviewActions  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
@@ -717,6 +770,23 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         base_ref = _parse_base_ref(d.pop("base_ref", UNSET))
+
+        def _parse_change_diagram(data: object) -> ChangeDiagramView | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                change_diagram_type_0 = ChangeDiagramView.from_dict(data)
+
+                return change_diagram_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(ChangeDiagramView | None | Unset, data)
+
+        change_diagram = _parse_change_diagram(d.pop("change_diagram", UNSET))
 
         def _parse_check_run_url(data: object) -> None | str | Unset:
             if data is None:
@@ -843,6 +913,17 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         head_ref = _parse_head_ref(d.pop("head_ref", UNSET))
+
+        _local_reverifications = d.pop("local_reverifications", UNSET)
+        local_reverifications: list[LocalReverification] | Unset = UNSET
+        if _local_reverifications is not UNSET:
+            local_reverifications = []
+            for local_reverifications_item_data in _local_reverifications:
+                local_reverifications_item = LocalReverification.from_dict(
+                    local_reverifications_item_data
+                )
+
+                local_reverifications.append(local_reverifications_item)
 
         def _parse_merge_gate(data: object) -> None | PullRequestMergeGate | Unset:
             if data is None:
@@ -985,6 +1066,23 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         pull_request_url = _parse_pull_request_url(d.pop("pull_request_url", UNSET))
+
+        def _parse_refresh(data: object) -> None | RefreshView | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                refresh_type_0 = RefreshView.from_dict(data)
+
+                return refresh_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | RefreshView | Unset, data)
+
+        refresh = _parse_refresh(d.pop("refresh", UNSET))
 
         def _parse_repository_full_name(data: object) -> None | str | Unset:
             if data is None:
@@ -1181,6 +1279,7 @@ class CustomerReviewDetail:
             base_commit_sha=base_commit_sha,
             base_commit_url=base_commit_url,
             base_ref=base_ref,
+            change_diagram=change_diagram,
             check_run_url=check_run_url,
             code_assessment=code_assessment,
             compare_url=compare_url,
@@ -1191,6 +1290,7 @@ class CustomerReviewDetail:
             head_commit_sha=head_commit_sha,
             head_commit_url=head_commit_url,
             head_ref=head_ref,
+            local_reverifications=local_reverifications,
             merge_gate=merge_gate,
             open_items=open_items,
             open_items_observation=open_items_observation,
@@ -1203,6 +1303,7 @@ class CustomerReviewDetail:
             pull_request_state=pull_request_state,
             pull_request_title=pull_request_title,
             pull_request_url=pull_request_url,
+            refresh=refresh,
             repository_full_name=repository_full_name,
             repository_id=repository_id,
             repository_name=repository_name,

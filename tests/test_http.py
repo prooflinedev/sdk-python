@@ -26,6 +26,8 @@ from proofline import (
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
+    FileReviewRequest,
+    FileReviewResponse,
     PatchReviewRequest,
     PatchReviewResponse,
     ProoflineClient,
@@ -37,6 +39,7 @@ from proofline import (
     RunNowMode,
     RunNowRequest,
     RunNowResponse,
+    StopResponse,
     _sync_http,
     _transport,
 )
@@ -172,6 +175,17 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
         ),
         (
             "POST",
+            f"{prefix}/reviews/{REVIEW}/stop",
+            {
+                "review_id": str(REVIEW),
+                "status": "STOPPED",
+                "stopped_by": {"github_user_id": 42, "login": "synthetic-user"},
+                "stopped_at": "2026-01-01T00:00:00Z",
+            },
+            StopResponse,
+        ),
+        (
+            "POST",
             f"{prefix}/reviews/{REVIEW}/rerun",
             {"review_id": str(REVIEW), "public_key": "synthetic-review"},
             RerunResponse,
@@ -203,6 +217,7 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
                 ("get_review_guidance", (ORG, REPOSITORY), {}),
                 ("list_repositories", (ORG,), {}),
                 ("request_review", (ORG, REPOSITORY, 42), {}),
+                ("stop_review", (ORG, REVIEW), {}),
                 ("rerun_review", (ORG, REVIEW), {}),
             ]
             for index, (name, args, kwargs) in enumerate(calls):
@@ -216,6 +231,10 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
                         "CONSOLE",
                         1,
                     )
+                elif isinstance(result, StopResponse):
+                    assert result.review_id == REVIEW
+                    assert result.status == "STOPPED"
+                    assert result.stopped_by.github_user_id == 42
                 elif isinstance(result, FindingFixPromptType0):
                     assert result.untrusted_text == PRIVATE
                 elif isinstance(result, FindingFixPromptType1):
@@ -293,7 +312,15 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
             {"base_commit_sha": "a" * 40, "patch": "diff --git a/x b/x\n"},
             PatchReviewRequest,
             PatchReviewResponse,
-            {"patch_digest": "b" * 64},
+            {"patch_digest": "b" * 64, "verify": []},
+        ),
+        (
+            "request_file_review",
+            "file-reviews",
+            {"commit_sha": "a" * 40, "paths": ["src/main.py"]},
+            FileReviewRequest,
+            FileReviewResponse,
+            {},
         ),
         (
             "request_commit_review",
@@ -309,10 +336,10 @@ async def test_local_and_commit_reviews_post_their_subject_and_decode_the_review
     mode: str,
     operation: str,
     route: str,
-    sent: dict[str, str],
+    sent: dict[str, Any],
     request_model: Any,
     response_model: Any,
-    extra: dict[str, str],
+    extra: dict[str, Any],
 ) -> None:
     body = request_model(**sent)
 

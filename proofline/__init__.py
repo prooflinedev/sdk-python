@@ -11,6 +11,8 @@ from ._generated.models import (
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
+    FileReviewRequest,
+    FileReviewResponse,
     PatchReviewRequest,
     PatchReviewResponse,
     PatchTriggerSource,
@@ -22,6 +24,7 @@ from ._generated.models import (
     RunNowRequest,
     RunNowResponse,
     StartSession,
+    StopResponse,
 )
 from ._transport import VERSION as __version__
 from ._transport import ProoflineError
@@ -39,6 +42,8 @@ __all__ = [
     "CustomerAssessmentDetail",
     "CustomerFinding",
     "CustomerReviewDetail",
+    "FileReviewRequest",
+    "FileReviewResponse",
     "PatchReviewRequest",
     "PatchReviewResponse",
     "PatchTriggerSource",
@@ -55,6 +60,7 @@ __all__ = [
     "RunNowResponse",
     "SecretStr",
     "StartSession",
+    "StopResponse",
     "__version__",
     "models",
 ]

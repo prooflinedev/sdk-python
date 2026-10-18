@@ -19,8 +19,9 @@ T = TypeVar("T", bound="PullRequestMergeGate")
 class PullRequestMergeGate:
     """
     Attributes:
-        blocking_severity (str): The frozen blocking threshold, either SERIOUS or WARNING; later settings do not restamp
-            it.
+        blocking_severity (str): The frozen blocking threshold, either SERIOUS (serious and critical findings) or
+            WARNING (every
+             supported finding); later settings do not restamp it.
         head_sha (str): The exact lowercase commit SHA whose captured policy this gate evaluates.
         id (UUID): The immutable identity of the gate captured for this tenant, repository and head.
         policy_version (str): The deterministic policy version frozen when this gate was captured.

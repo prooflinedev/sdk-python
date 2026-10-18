@@ -77,8 +77,10 @@ def sync_detailed(
 
      Reviews a unified diff against a commit GitHub has in the repository, and returns that patch's
     review when one exists. The review reads only that commit and the patch, and is never posted to a
-    pull request. Requires live GitHub read access; the same patch on the same base always returns the
-    same review.
+    pull request. With `verify_finding_ids`, the review also re-verifies those open findings of one pull
+    request against the patch and reports each outcome on the review, without changing the pull
+    request's findings. Requires live GitHub read access; the same patch on the same base, re-verifying
+    the same findings, always returns the same review.
 
     Args:
         org_id (UUID):
@@ -118,8 +120,10 @@ def sync(
 
      Reviews a unified diff against a commit GitHub has in the repository, and returns that patch's
     review when one exists. The review reads only that commit and the patch, and is never posted to a
-    pull request. Requires live GitHub read access; the same patch on the same base always returns the
-    same review.
+    pull request. With `verify_finding_ids`, the review also re-verifies those open findings of one pull
+    request against the patch and reports each outcome on the review, without changing the pull
+    request's findings. Requires live GitHub read access; the same patch on the same base, re-verifying
+    the same findings, always returns the same review.
 
     Args:
         org_id (UUID):
@@ -154,8 +158,10 @@ async def asyncio_detailed(
 
      Reviews a unified diff against a commit GitHub has in the repository, and returns that patch's
     review when one exists. The review reads only that commit and the patch, and is never posted to a
-    pull request. Requires live GitHub read access; the same patch on the same base always returns the
-    same review.
+    pull request. With `verify_finding_ids`, the review also re-verifies those open findings of one pull
+    request against the patch and reports each outcome on the review, without changing the pull
+    request's findings. Requires live GitHub read access; the same patch on the same base, re-verifying
+    the same findings, always returns the same review.
 
     Args:
         org_id (UUID):
@@ -193,8 +199,10 @@ async def asyncio(
 
      Reviews a unified diff against a commit GitHub has in the repository, and returns that patch's
     review when one exists. The review reads only that commit and the patch, and is never posted to a
-    pull request. Requires live GitHub read access; the same patch on the same base always returns the
-    same review.
+    pull request. With `verify_finding_ids`, the review also re-verifies those open findings of one pull
+    request against the patch and reports each outcome on the review, without changing the pull
+    request's findings. Requires live GitHub read access; the same patch on the same base, re-verifying
+    the same findings, always returns the same review.
 
     Args:
         org_id (UUID):
