@@ -109,6 +109,7 @@ class CustomerReviewDetail:
              branch moves, the reviewed input does not. Absent for a patch review.
         head_ref (None | str | Unset): The pull request's head branch name as last recorded from GitHub, for
              orientation only. Null when no pull request state is recorded.
+        is_deep_review (bool | Unset): Present and true when this run is a Deep Review.
         local_reverifications (list[LocalReverification] | Unset): For a patch review requested with
             `verify_finding_ids`, each finding
              it re-verifies against the patch and the outcome. The outcome is
@@ -206,6 +207,7 @@ class CustomerReviewDetail:
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
     head_ref: None | str | Unset = UNSET
+    is_deep_review: bool | Unset = UNSET
     local_reverifications: list[LocalReverification] | Unset = UNSET
     merge_gate: None | PullRequestMergeGate | Unset = UNSET
     open_items: None | OpenItemsView | Unset = UNSET
@@ -393,6 +395,8 @@ class CustomerReviewDetail:
             head_ref = UNSET
         else:
             head_ref = self.head_ref
+
+        is_deep_review = self.is_deep_review
 
         local_reverifications: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.local_reverifications, Unset):
@@ -632,6 +636,8 @@ class CustomerReviewDetail:
             field_dict["head_commit_url"] = head_commit_url
         if head_ref is not UNSET:
             field_dict["head_ref"] = head_ref
+        if is_deep_review is not UNSET:
+            field_dict["is_deep_review"] = is_deep_review
         if local_reverifications is not UNSET:
             field_dict["local_reverifications"] = local_reverifications
         if merge_gate is not UNSET:
@@ -950,6 +956,8 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         head_ref = _parse_head_ref(d.pop("head_ref", UNSET))
+
+        is_deep_review = d.pop("is_deep_review", UNSET)
 
         _local_reverifications = d.pop("local_reverifications", UNSET)
         local_reverifications: list[LocalReverification] | Unset = UNSET
@@ -1328,6 +1336,7 @@ class CustomerReviewDetail:
             head_commit_sha=head_commit_sha,
             head_commit_url=head_commit_url,
             head_ref=head_ref,
+            is_deep_review=is_deep_review,
             local_reverifications=local_reverifications,
             merge_gate=merge_gate,
             open_items=open_items,
