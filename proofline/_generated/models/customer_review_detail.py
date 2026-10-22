@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ..models.review_diff_stats import ReviewDiffStats
     from ..models.review_open_items import ReviewOpenItems
     from ..models.subject_view import SubjectView
+    from ..models.walkthrough_view import WalkthroughView
 
 
 T = TypeVar("T", bound="CustomerReviewDetail")
@@ -174,6 +175,10 @@ class CustomerReviewDetail:
             `HOOK_PRE_COMMIT` or
              `HOOK_PRE_PUSH`. Null for any other review, and for a patch review
              requested without naming a hook.
+        walkthrough (None | Unset | WalkthroughView): The reviewed head's changed files in reading groups, with a line
+            per
+             file. Absent until the walkthrough is stored, and for a review that
+             has none.
     """
 
     actions: ReviewActions
@@ -235,6 +240,7 @@ class CustomerReviewDetail:
     stopped_from: None | str | Unset = UNSET
     superseded_by_review_id: None | Unset | UUID = UNSET
     trigger_source: None | PatchTriggerSource | Unset = UNSET
+    walkthrough: None | Unset | WalkthroughView = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -248,6 +254,7 @@ class CustomerReviewDetail:
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
+        from ..models.walkthrough_view import WalkthroughView  # noqa: PLC0415
 
         actions = self.actions.to_dict()
 
@@ -583,6 +590,14 @@ class CustomerReviewDetail:
         else:
             trigger_source = self.trigger_source
 
+        walkthrough: dict[str, Any] | None | Unset
+        if isinstance(self.walkthrough, Unset):
+            walkthrough = UNSET
+        elif isinstance(self.walkthrough, WalkthroughView):
+            walkthrough = self.walkthrough.to_dict()
+        else:
+            walkthrough = self.walkthrough
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -692,6 +707,8 @@ class CustomerReviewDetail:
             field_dict["superseded_by_review_id"] = superseded_by_review_id
         if trigger_source is not UNSET:
             field_dict["trigger_source"] = trigger_source
+        if walkthrough is not UNSET:
+            field_dict["walkthrough"] = walkthrough
 
         return field_dict
 
@@ -712,6 +729,7 @@ class CustomerReviewDetail:
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
         from ..models.subject_view import SubjectView  # noqa: PLC0415
+        from ..models.walkthrough_view import WalkthroughView  # noqa: PLC0415
 
         d = dict(src_dict)
         actions = ReviewActions.from_dict(d.pop("actions"))
@@ -1304,6 +1322,23 @@ class CustomerReviewDetail:
 
         trigger_source = _parse_trigger_source(d.pop("trigger_source", UNSET))
 
+        def _parse_walkthrough(data: object) -> None | Unset | WalkthroughView:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                walkthrough_type_0 = WalkthroughView.from_dict(data)
+
+                return walkthrough_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | WalkthroughView, data)
+
+        walkthrough = _parse_walkthrough(d.pop("walkthrough", UNSET))
+
         customer_review_detail = cls(
             actions=actions,
             assessment_count=assessment_count,
@@ -1364,6 +1399,7 @@ class CustomerReviewDetail:
             stopped_from=stopped_from,
             superseded_by_review_id=superseded_by_review_id,
             trigger_source=trigger_source,
+            walkthrough=walkthrough,
         )
 
         customer_review_detail.additional_properties = d
