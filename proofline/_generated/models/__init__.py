@@ -170,6 +170,9 @@ from .thread_observation_view import ThreadObservationView
 from .thread_provider_state import ThreadProviderState
 from .thread_reply_evidence import ThreadReplyEvidence
 from .untrusted_text import UntrustedText
+from .walkthrough_file_view import WalkthroughFileView
+from .walkthrough_group_view import WalkthroughGroupView
+from .walkthrough_view import WalkthroughView
 
 __all__ = (
     "ActionUnavailability",
@@ -342,4 +345,7 @@ __all__ = (
     "ThreadProviderState",
     "ThreadReplyEvidence",
     "UntrustedText",
+    "WalkthroughFileView",
+    "WalkthroughGroupView",
+    "WalkthroughView",
 )
