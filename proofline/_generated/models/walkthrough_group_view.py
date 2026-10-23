@@ -19,11 +19,11 @@ T = TypeVar("T", bound="WalkthroughGroupView")
 class WalkthroughGroupView:
     """
     Attributes:
-        files (list[WalkthroughFileView]):
+        files (list[WalkthroughFileView]): The group's files.
         kind (str): `FEATURE`, `FIX`, `REFACTOR`, `CONFIGURATION`, `INFRASTRUCTURE`,
              `DATA`, `DEPENDENCIES`, `TESTS` or `DOCS`.
-        title (str):
-        description (None | str | Unset):
+        title (str): The group's title.
+        description (None | str | Unset): What the group changes. Absent when the group has no description.
     """
 
     files: list[WalkthroughFileView]

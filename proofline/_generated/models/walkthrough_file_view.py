@@ -15,15 +15,15 @@ T = TypeVar("T", bound="WalkthroughFileView")
 class WalkthroughFileView:
     """
     Attributes:
-        additions (int):
+        additions (int): Lines added.
         change (str): GitHub's change status, upper case, such as `ADDED` or `RENAMED`.
-        deletions (int):
+        deletions (int): Lines deleted.
         generated (bool): Whether `line` is model-authored.
         line (str): A model sentence, or the deterministic line when there is none.
-        path (str):
+        path (str): The file's path at the head commit.
         depth (None | str | Unset): The route plan's depth tier. Absent for a file the review did not
              evaluate.
-        previous_path (None | str | Unset):
+        previous_path (None | str | Unset): The file's path before a rename. Absent otherwise.
         skip_class (None | str | Unset): Why the review did not evaluate the file, such as `LOCKFILE` or
              `REPOSITORY_FILTER`.
     """

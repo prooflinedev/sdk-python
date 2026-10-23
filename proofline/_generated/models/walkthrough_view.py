@@ -20,7 +20,7 @@ class WalkthroughView:
 
        Attributes:
            groups (list[WalkthroughGroupView]): Groups in reading order.
-           head_sha (str):
+           head_sha (str): The head commit SHA the walkthrough describes.
     """
 
     groups: list[WalkthroughGroupView]
