@@ -25,6 +25,28 @@ coroutines. The [SDK guide](https://proofline.sh/docs/sdks/) and
 Licensed under the Apache License, Version 2.0. The generated models under
 `proofline/_generated` carry the MIT license of the generator templates.
 
+## Exports
+
+`export_reviews` reads one CSV or NDJSON page through the existing bounded transport.
+It returns the original text, decoded rows, dataset version, settled horizon and
+optional next cursor. CSV cells remain strings, including nested JSON cells;
+NDJSON retains JSON values. Export tokens need `analytics:read`.
+Repeat with the returned cursor and the same dataset, window, format and grouping.
+A missing next cursor marks the last page. Each CSV page includes its own header.
+
+```python
+from uuid import UUID
+
+with ProoflineClient() as client:
+    page = client.export_reviews(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]), "reviews",
+        from_time="2026-10-01T00:00:00Z", to_time="2026-10-25T00:00:00Z",
+        format="csv",
+    )
+    print(page.text, end="")
+    # Continue with cursor=page.next_cursor when it is not None.
+```
+
 ## Coverage uploads
 
 Use a repository-restricted token with `coverage:write` and current repository write

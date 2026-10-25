@@ -84,8 +84,12 @@ def generate(destination: Path) -> None:
         raise SystemExit(f"Generation requires ruff=={RUFF_VERSION}.")
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     document = json.loads(DOCUMENT.read_text())
-    if document["info"]["version"] != version:
-        raise SystemExit("The SDK version must match the public API version.")
+    package_version = tuple(map(int, version.split(".")))
+    api_version = tuple(map(int, document["info"]["version"].split(".")))
+    if package_version[:2] != api_version[:2] or package_version[2] < api_version[2]:
+        raise SystemExit(
+            "The SDK must follow the public API major/minor and not precede its patch."
+        )
     env = dict(os.environ)
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
