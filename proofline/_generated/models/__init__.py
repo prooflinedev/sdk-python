@@ -27,6 +27,9 @@ from .comment_reaction_view import CommentReactionView
 from .commit_review_request import CommitReviewRequest
 from .commit_review_response import CommitReviewResponse
 from .complete_record_view import CompleteRecordView
+from .coverage_refused import CoverageRefused
+from .coverage_upload_request import CoverageUploadRequest
+from .coverage_upload_response import CoverageUploadResponse
 from .customer_assessment import CustomerAssessment
 from .customer_assessment_detail import CustomerAssessmentDetail
 from .customer_check import CustomerCheck
@@ -170,6 +173,7 @@ from .thread_observation_view import ThreadObservationView
 from .thread_provider_state import ThreadProviderState
 from .thread_reply_evidence import ThreadReplyEvidence
 from .untrusted_text import UntrustedText
+from .uploaded_report import UploadedReport
 from .walkthrough_file_view import WalkthroughFileView
 from .walkthrough_group_view import WalkthroughGroupView
 from .walkthrough_view import WalkthroughView
@@ -202,6 +206,9 @@ __all__ = (
     "CommitReviewRequest",
     "CommitReviewResponse",
     "CompleteRecordView",
+    "CoverageRefused",
+    "CoverageUploadRequest",
+    "CoverageUploadResponse",
     "CustomerAssessment",
     "CustomerAssessmentDetail",
     "CustomerCheck",
@@ -345,6 +352,7 @@ __all__ = (
     "ThreadProviderState",
     "ThreadReplyEvidence",
     "UntrustedText",
+    "UploadedReport",
     "WalkthroughFileView",
     "WalkthroughGroupView",
     "WalkthroughView",

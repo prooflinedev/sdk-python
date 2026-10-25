@@ -24,9 +24,9 @@ def main() -> None:
         for path in (ROOT / "proofline/_generated/api/default").glob("*.py")
         if path.name != "__init__.py"
     }
-    if declared != generated or len(declared) != 20:
+    if declared != generated or len(declared) != 21:
         raise SystemExit(
-            "The generated JSON operations must match the twenty public JSON token routes."
+            "The generated JSON operations must match the twenty-one public JSON token routes."
         )
     tree = ast.parse((ROOT / "proofline/client.py").read_text())
     helpers = {"close", "aclose", "iter_reviews", "wait_for_review"}

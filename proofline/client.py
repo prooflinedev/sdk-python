@@ -36,6 +36,7 @@ from ._generated.api.default import (
     rerun_review,
     start_agent_session,
     stop_review,
+    upload_coverage_reports,
 )
 from ._generated.client import AuthenticatedClient
 from ._generated.models.agent_session import AgentSession
@@ -43,6 +44,8 @@ from ._generated.models.agent_session_prompt_type_0 import AgentSessionPromptTyp
 from ._generated.models.agent_session_prompt_type_1 import AgentSessionPromptType1
 from ._generated.models.commit_review_request import CommitReviewRequest
 from ._generated.models.commit_review_response import CommitReviewResponse
+from ._generated.models.coverage_upload_request import CoverageUploadRequest
+from ._generated.models.coverage_upload_response import CoverageUploadResponse
 from ._generated.models.customer_assessment_detail import CustomerAssessmentDetail
 from ._generated.models.customer_finding import CustomerFinding
 from ._generated.models.customer_review_detail import CustomerReviewDetail
@@ -375,6 +378,17 @@ class ProoflineClient:
             body=body,
         )
 
+    def upload_coverage_reports(
+        self, organization_id: UUID, repository_id: UUID, *, body: CoverageUploadRequest
+    ) -> CoverageUploadResponse:
+        return self._call(
+            upload_coverage_reports.sync_detailed,
+            CoverageUploadResponse,
+            organization_id,
+            repository_id,
+            body=body,
+        )
+
     def request_file_review(
         self, organization_id: UUID, repository_id: UUID, *, body: FileReviewRequest
     ) -> FileReviewResponse:
@@ -675,6 +689,17 @@ class AsyncProoflineClient:
         return await self._call(
             request_patch_review.asyncio_detailed,
             PatchReviewResponse,
+            organization_id,
+            repository_id,
+            body=body,
+        )
+
+    async def upload_coverage_reports(
+        self, organization_id: UUID, repository_id: UUID, *, body: CoverageUploadRequest
+    ) -> CoverageUploadResponse:
+        return await self._call(
+            upload_coverage_reports.asyncio_detailed,
+            CoverageUploadResponse,
             organization_id,
             repository_id,
             body=body,

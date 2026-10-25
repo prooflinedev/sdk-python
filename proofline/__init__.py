@@ -8,6 +8,8 @@ from ._generated.models import (
     AgentVendor,
     CommitReviewRequest,
     CommitReviewResponse,
+    CoverageUploadRequest,
+    CoverageUploadResponse,
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
@@ -25,6 +27,7 @@ from ._generated.models import (
     RunNowResponse,
     StartSession,
     StopResponse,
+    UploadedReport,
 )
 from ._transport import VERSION as __version__
 from ._transport import ProoflineError
@@ -39,6 +42,8 @@ __all__ = [
     "CheckGap",
     "CommitReviewRequest",
     "CommitReviewResponse",
+    "CoverageUploadRequest",
+    "CoverageUploadResponse",
     "CustomerAssessmentDetail",
     "CustomerFinding",
     "CustomerReviewDetail",
@@ -61,6 +66,7 @@ __all__ = [
     "SecretStr",
     "StartSession",
     "StopResponse",
+    "UploadedReport",
     "__version__",
     "models",
 ]
