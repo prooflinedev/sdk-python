@@ -278,7 +278,7 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(
         assert len({request.peer_port for request in server.requests}) == 1
         for request in server.requests:
             assert request.headers["Authorization"] == f"Bearer {TOKEN}"
-            assert request.headers["User-Agent"] == "proofline-python/1.0.0"
+            assert request.headers["User-Agent"] == "proofline-python/1.0.1"
             assert request.headers["Accept-Encoding"] == "identity"
             assert "Cookie" not in request.headers
             assert "Content-Type" not in request.headers
@@ -1273,3 +1273,42 @@ def test_token_environment_and_https_origin_rejection(monkeypatch: pytest.Monkey
             ProoflineClient(TOKEN, base_url=origin)
     with ProoflineClient(TOKEN, base_url="http://[::1]:8080"):
         pass
+
+
+@MODES
+async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        query = parse_qs(urlsplit(request.path).query)
+        assert request.path.startswith(f"/api/v1/organizations/{ORG}/exports/findings?")
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        if query.get("cursor") == ["refused"]:
+            return Reply(status=404, body={"detail": "not found"})
+        is_csv = query.get("format") == ["csv"]
+        return Reply(
+            body=(
+                b'dataset_version,claim\r\n1,"comma, quote "" and\nnewline"\r\n'
+                if is_csv
+                else b'{"dataset_version":1,"claim":"hello"}\n'
+            ),
+            headers={
+                "Content-Type": "text/csv" if is_csv else "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+                "X-Proofline-Export-Next-Cursor": "opaque/+cursor",
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            kwargs = {"from_time": "2026-10-01T00:00:00Z", "to_time": "2026-10-25T00:00:00Z"}
+            exported = await call(client, "export_reviews", ORG, "findings", format="csv", **kwargs)
+            assert exported.rows[0]["claim"] == 'comma, quote " and\nnewline'
+            assert exported.next_cursor == "opaque/+cursor"
+            exported = await call(
+                client, "export_reviews", ORG, "findings", cursor=exported.next_cursor, **kwargs
+            )
+            assert exported.rows[0]["dataset_version"] == 1
+            assert "cursor=opaque%2F%2Bcursor" in server.requests[1].path
+            with pytest.raises(ProoflineError) as caught:
+                await call(client, "export_reviews", ORG, "findings", cursor="refused", **kwargs)
+            assert caught.value.status == 404

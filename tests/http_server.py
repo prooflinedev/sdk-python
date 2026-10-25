@@ -68,7 +68,8 @@ class Server(AbstractContextManager["Server"]):
                 )
                 time.sleep(reply.header_pause)
                 self.send_response(reply.status)
-                self.send_header("Content-Type", "application/json")
+                if "Content-Type" not in reply.headers:
+                    self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 for key, value in reply.headers.items():
                     self.send_header(key, value)

@@ -66,6 +66,7 @@ from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._transport import ProoflineError
+from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .outcomes import ReviewOutcome, outcome
 
 T = TypeVar("T")
@@ -242,6 +243,43 @@ class ProoflineClient:
             raise _network(error) from None
         except Exception:
             raise _malformed() from None
+
+    def export_reviews(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+    ) -> ExportPage:
+        """Read one export page. Repeat with next_cursor and the same filters."""
+        if dataset not in (
+            "reviews",
+            "finding_outcomes",
+            "finding_validations",
+            "spend",
+            "findings",
+        ):
+            raise ValueError("Unknown export dataset.")
+        if format not in ("csv", "ndjson"):
+            raise ValueError("Export format must be csv or ndjson.")
+        params = {"from": from_time, "to": to_time, "format": format}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if group_by is not None:
+            params["group_by"] = group_by
+        try:
+            response = self._http.get(
+                f"/api/v1/organizations/{organization_id}/exports/{dataset}",
+                params=params,
+                headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
+            )
+            return decode_export(response, format)
+        except httpx.HTTPError as error:
+            raise _network(error) from None
 
     def list_reviews(self, organization_id: UUID, **filters: Unpack[ReviewFilters]) -> ReviewPage:
         return self._call(list_reviews.sync_detailed, ReviewPage, organization_id, **filters)
@@ -526,6 +564,43 @@ class AsyncProoflineClient:
             raise _network(error) from None
         except Exception:
             raise _malformed() from None
+
+    async def export_reviews(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+    ) -> ExportPage:
+        """Read one export page. Repeat with next_cursor and the same filters."""
+        if dataset not in (
+            "reviews",
+            "finding_outcomes",
+            "finding_validations",
+            "spend",
+            "findings",
+        ):
+            raise ValueError("Unknown export dataset.")
+        if format not in ("csv", "ndjson"):
+            raise ValueError("Export format must be csv or ndjson.")
+        params = {"from": from_time, "to": to_time, "format": format}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if group_by is not None:
+            params["group_by"] = group_by
+        try:
+            response = await self._http.get(
+                f"/api/v1/organizations/{organization_id}/exports/{dataset}",
+                params=params,
+                headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
+            )
+            return decode_export(response, format)
+        except httpx.HTTPError as error:
+            raise _network(error) from None
 
     async def list_reviews(
         self, organization_id: UUID, **filters: Unpack[ReviewFilters]
