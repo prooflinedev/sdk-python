@@ -23,6 +23,8 @@ from proofline import (
     AsyncProoflineClient,
     CommitReviewRequest,
     CommitReviewResponse,
+    CoverageUploadRequest,
+    CoverageUploadResponse,
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
@@ -40,6 +42,7 @@ from proofline import (
     RunNowRequest,
     RunNowResponse,
     StopResponse,
+    UploadedReport,
     _sync_http,
     _transport,
     models,
@@ -389,6 +392,62 @@ async def test_local_and_commit_reviews_post_their_subject_and_decode_the_review
             assert isinstance(result, response_model)
             assert (result.review_id, result.existing) == (REVIEW, True)
         assert len(server.requests) == 1
+
+
+@MODES
+async def test_coverage_upload_preserves_reports_commit_and_server_refusal(mode: str) -> None:
+    content = "SF:src/main.py\nDA:1,1\nDA:2,0\nend_of_record\n"
+    body = CoverageUploadRequest(
+        tested_sha="a" * 40,
+        reports=[UploadedReport(name="python/lcov.info", content=content)],
+    )
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.method == "POST"
+        assert request.path == (
+            f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}/coverage-reports"
+        )
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        assert request.headers["Content-Type"] == "application/json"
+        assert json.loads(request.body) == {
+            "tested_sha": "a" * 40,
+            "reports": [{"name": "python/lcov.info", "content": content}],
+        }
+        if index == 2:
+            return Reply(
+                status=422,
+                body={
+                    "title": "unprocessable coverage upload",
+                    "status": 422,
+                    "detail": "The coverage upload was refused.",
+                },
+            )
+        return Reply(
+            status=201 if index == 0 else 200,
+            body={
+                "report_id": str(REVIEW),
+                "tested_sha": "a" * 40,
+                "created": index == 0,
+                "formats": ["LCOV"],
+                "instrumented_lines": 2,
+                "covered_lines": 1,
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            for created in (True, False):
+                result = await call(client, "upload_coverage_reports", ORG, REPOSITORY, body=body)
+                assert isinstance(result, CoverageUploadResponse)
+                assert result.report_id == REVIEW
+                assert result.tested_sha == "a" * 40
+                assert result.created is created
+                assert result.formats == ["LCOV"]
+                assert (result.covered_lines, result.instrumented_lines) == (1, 2)
+            with pytest.raises(ProoflineError) as refused:
+                await call(client, "upload_coverage_reports", ORG, REPOSITORY, body=body)
+            assert refused.value.status == 422
+        assert len(server.requests) == 3
 
 
 @MODES
