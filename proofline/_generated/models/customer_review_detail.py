@@ -103,6 +103,9 @@ class CustomerReviewDetail:
         diff_stats (None | ReviewDiffStats | Unset): Line totals from this run's pinned comparison. Null until recorded,
             or
              when the provider's changed-file list was incomplete.
+        fix_generation_enabled (bool | Unset): Whether fix generation is configured for this deployment and
+            organization.
+             Write authorization is checked again when a fix is requested.
         head_commit_sha (None | str | Unset): The head commit this review is pinned to. For a patch review, the
              revision ID Proofline derives from its base commit and patch digest,
              which is not a commit. Absent when the review recorded none.
@@ -209,6 +212,7 @@ class CustomerReviewDetail:
     current_head_commit_sha: None | str | Unset = UNSET
     deep_review_escalation: DeepReviewEscalation | None | Unset = UNSET
     diff_stats: None | ReviewDiffStats | Unset = UNSET
+    fix_generation_enabled: bool | Unset = UNSET
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
     head_ref: None | str | Unset = UNSET
@@ -384,6 +388,8 @@ class CustomerReviewDetail:
             diff_stats = self.diff_stats.to_dict()
         else:
             diff_stats = self.diff_stats
+
+        fix_generation_enabled = self.fix_generation_enabled
 
         head_commit_sha: None | str | Unset
         if isinstance(self.head_commit_sha, Unset):
@@ -645,6 +651,8 @@ class CustomerReviewDetail:
             field_dict["deep_review_escalation"] = deep_review_escalation
         if diff_stats is not UNSET:
             field_dict["diff_stats"] = diff_stats
+        if fix_generation_enabled is not UNSET:
+            field_dict["fix_generation_enabled"] = fix_generation_enabled
         if head_commit_sha is not UNSET:
             field_dict["head_commit_sha"] = head_commit_sha
         if head_commit_url is not UNSET:
@@ -947,6 +955,8 @@ class CustomerReviewDetail:
             return cast(None | ReviewDiffStats | Unset, data)
 
         diff_stats = _parse_diff_stats(d.pop("diff_stats", UNSET))
+
+        fix_generation_enabled = d.pop("fix_generation_enabled", UNSET)
 
         def _parse_head_commit_sha(data: object) -> None | str | Unset:
             if data is None:
@@ -1368,6 +1378,7 @@ class CustomerReviewDetail:
             current_head_commit_sha=current_head_commit_sha,
             deep_review_escalation=deep_review_escalation,
             diff_stats=diff_stats,
+            fix_generation_enabled=fix_generation_enabled,
             head_commit_sha=head_commit_sha,
             head_commit_url=head_commit_url,
             head_ref=head_ref,
