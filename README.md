@@ -25,6 +25,36 @@ coroutines. The [SDK guide](https://proofline.sh/docs/sdks/) and
 Licensed under the Apache License, Version 2.0. The generated models under
 `proofline/_generated` carry the MIT license of the generator templates.
 
+## Coverage uploads
+
+Use a repository-restricted token with `coverage:write` and current repository write
+access to upload reports from your CI. Name the full commit SHA the tests ran on.
+Reports may use LCOV, Cobertura XML, JaCoCo XML or Go cover profiles.
+
+```python
+import os
+from pathlib import Path
+from uuid import UUID
+from proofline import CoverageUploadRequest, ProoflineClient, UploadedReport
+
+with ProoflineClient() as client:
+    report = client.upload_coverage_reports(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        UUID(os.environ["PROOFLINE_REPOSITORY_ID"]),
+        body=CoverageUploadRequest(
+            tested_sha=os.environ["TESTED_SHA"],
+            reports=[UploadedReport(
+                name="lcov.info",
+                content=Path("lcov.info").read_text(encoding="utf-8"),
+            )],
+        ),
+    )
+```
+
+The response names the recorded report and its covered and instrumented line counts.
+An identical upload returns that report with `created=False`. Refused reports raise
+`ProoflineError`; uploading a report does not establish a check verdict.
+
 ## Development
 
 The repository bundles its public API contract in `openapi.public.json`.
