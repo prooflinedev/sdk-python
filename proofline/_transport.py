@@ -211,7 +211,8 @@ def check_stream(size: int, status: int, deadline: float) -> None:
         )
     budget = remaining()
     if monotonic() >= deadline or (budget is not None and budget <= 0):
-        if 200 <= status < 300:
+        # Retryable statuses time out as an expired read does; other problems keep their status.
+        if 200 <= status < 300 or status in (429, 503):
             raise timeout_error()
         raise unreadable_problem(status)
 
