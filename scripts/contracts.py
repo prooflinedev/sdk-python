@@ -42,8 +42,9 @@ def main() -> None:
         if isinstance(node, ast.ClassDef)
         and node.name in {"ProoflineClient", "AsyncProoflineClient"}
     }
-    if clients != {"ProoflineClient": declared, "AsyncProoflineClient": declared}:
-        raise SystemExit("Both client facades must expose exactly the generated public operations.")
+    public = declared | {"export_reviews"}
+    if clients != {"ProoflineClient": public, "AsyncProoflineClient": public}:
+        raise SystemExit("Both client facades must expose the JSON operations and metadata export.")
     prohibited = {"safe", "passed", "clean"}
     for path in (ROOT / "proofline").rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
