@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "proofline-sdk"
-version = "1.0.2"
+version = "1.0.3"
 description = "Typed synchronous and asynchronous clients for the Proofline review API"
 readme = "README.md"
 license = "Apache-2.0 AND MIT"

@@ -24,8 +24,8 @@ TOKEN = "pln_synthetic_installed_package_token"
 def main() -> None:
     if not Path(proofline.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
         raise SystemExit("The smoke test must import the installed artifact, not checkout source.")
-    assert importlib.metadata.version("proofline-sdk") == "1.0.2"
-    assert proofline.__version__ == "1.0.2"
+    assert importlib.metadata.version("proofline-sdk") == "1.0.3"
+    assert proofline.__version__ == "1.0.3"
     calls: list[str] = []
     finding = {
         "id": str(FINDING),
@@ -79,7 +79,7 @@ def main() -> None:
 
         def do_GET(self) -> None:
             assert self.headers["Authorization"] == f"Bearer {TOKEN}"
-            assert self.headers["User-Agent"] == "proofline-python/1.0.2"
+            assert self.headers["User-Agent"] == "proofline-python/1.0.3"
             calls.append(self.path)
             body = finding if "/findings/" in self.path else review
             payload = json.dumps(body).encode()
