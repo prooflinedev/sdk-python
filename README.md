@@ -92,3 +92,27 @@ and makes one tool request without retries, including questions and implementati
 starts. Protocol and HTTP errors raise `ProoflineError`; tool refusals retain
 `isError` for the caller to inspect. No browser configuration or cloud-trust API
 is added. Use the signed-in console for onboarding and connection changes.
+
+## Fix context and re-verification
+
+Sync and async clients expose `client.fixes.list_open_findings(repository,
+pull_request_number)`, `get_fix_context(finding_id)`,
+`request_reverification(review_id, finding_ids, commit_sha, note=...)` and
+`get_reverification(request_id)` over the existing MCP endpoint.
+
+```python
+result = client.fixes.request_reverification(
+    review_id, [finding_id], pushed_commit_sha,
+    note="Fixed the null case and added a regression test.",
+)
+if result.get("isError"):
+    raise RuntimeError("Re-verification was refused.")
+```
+
+Use `await` with `AsyncProoflineClient`. The commit must be the live pushed head;
+the server confirms it. The request accepts 1–20 distinct findings of one review
+and an optional 1–2,000-character note. Reads need `reviews:read`; requesting
+verification also needs `reviews:request` and repository write access.
+Calls never retry. Results retain untrusted-text wrappers, availability,
+assessment gaps and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix.
+A tool request never records a human disposition.

@@ -1362,3 +1362,69 @@ async def test_knowledge_negotiation_scope_and_no_retry(mode: str) -> None:
             with pytest.raises(ProoflineError):
                 await invoke()
         assert len(server.requests) == 9
+
+
+@MODES
+async def test_fixes_preserve_unavailable_context_and_never_retry(mode: str) -> None:
+    observed: list[dict[str, Any]] = []
+    refuse = False
+    result = {
+        "content": [{"type": "text", "text": "untrusted source"}],
+        "structuredContent": {"status": "UNAVAILABLE", "items": None},
+    }
+
+    def respond(request: Request, index: int) -> Reply:
+        body = json.loads(request.body)
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        if body["method"] == "initialize":
+            return Reply(
+                body={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-11-25"}}
+            )
+        if body["method"] == "notifications/initialized":
+            return Reply(status=202, body=b"")
+        observed.append(body["params"])
+        if refuse:
+            return Reply(status=503, body={"detail": "unavailable"}, headers={"Retry-After": "0"})
+        return Reply(body={"jsonrpc": "2.0", "id": 2, "result": result})
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+
+            async def invoke(name: str, *args: Any, **kwargs: Any) -> Any:
+                answer = getattr(client.fixes, name)(*args, **kwargs)
+                return await answer if inspect.isawaitable(answer) else answer
+
+            assert await invoke("list_open_findings", "owner/name", 7) == result
+            assert await invoke("get_fix_context", str(REVIEW)) == result
+            assert (
+                await invoke(
+                    "request_reverification",
+                    str(REVIEW),
+                    [str(REVIEW)],
+                    "a" * 40,
+                    note="fixed code",
+                )
+                == result
+            )
+            assert await invoke("get_reverification", str(REVIEW)) == result
+            assert observed == [
+                {
+                    "name": "list_open_findings",
+                    "arguments": {"repository": "owner/name", "pull_request_number": 7},
+                },
+                {"name": "get_fix_context", "arguments": {"finding_id": str(REVIEW)}},
+                {
+                    "name": "request_reverification",
+                    "arguments": {
+                        "review_id": str(REVIEW),
+                        "finding_ids": [str(REVIEW)],
+                        "commit_sha": "a" * 40,
+                        "note": "fixed code",
+                    },
+                },
+                {"name": "get_reverification", "arguments": {"request_id": str(REVIEW)}},
+            ]
+            refuse = True
+            with pytest.raises(ProoflineError):
+                await invoke("request_reverification", str(REVIEW), [str(REVIEW)], "a" * 40)
+            assert len(observed) == 5
