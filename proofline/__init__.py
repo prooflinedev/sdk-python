@@ -74,3 +74,5 @@ __all__ = [
     "__version__",
     "models",
 ]
+
+from .knowledge import KnowledgeResult as KnowledgeResult

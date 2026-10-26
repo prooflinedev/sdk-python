@@ -70,6 +70,7 @@ from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
+from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
 
 T = TypeVar("T")
@@ -213,6 +214,7 @@ class ProoflineClient:
             transport=_transport.RetryTransport(self._api.token, timeout),
         )
         self._api.set_httpx_client(self._http)
+        self.knowledge = KnowledgeClient(self._http)
 
     def close(self) -> None:
         self._http.close()
@@ -545,6 +547,7 @@ class AsyncProoflineClient:
             transport=_transport.AsyncRetryTransport(self._api.token, timeout),
         )
         self._api.set_async_httpx_client(self._http)
+        self.knowledge = AsyncKnowledgeClient(self._http)
 
     async def aclose(self) -> None:
         await self._http.aclose()
