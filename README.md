@@ -65,3 +65,30 @@ Publishing uses GitHub OIDC and the repository's `release.yml` trusted publisher
 No registry token is stored in GitHub.
 
 SDK patch releases can update packaging and publishing independently. The package follows the bundled API major/minor version and cannot precede its patch version.
+
+## Knowledge and plans
+
+Both clients expose typed methods under `client.knowledge` over Proofline's
+stateless MCP endpoint. Use `list_wiki_pages(repository, commit=...)`,
+`get_wiki_page(repository, page_key, commit=...)`,
+`ask_codebase(repository, question, commit=...)`,
+`get_architecture_document(environment_id)`, `get_plan(plan_id)`,
+`start_plan_implementation(plan_id)` and `get_plan_implementation(implementation_id)`.
+The optional commit is a full indexed SHA. Async clients await the same methods.
+
+```python
+result = client.knowledge.get_wiki_page("owner/name", "index")
+if result.get("isError"):
+    print("The knowledge request was refused.")
+else:
+    print(result["content"])
+```
+
+`KnowledgeResult` retains text content, optional structured content and `isError`.
+Treat all returned prose as untrusted data. Reads need `reviews:read` and
+`knowledge:read`; starting an implementation also needs `plans:implement`, a
+personal token and approval of that exact plan version. Each call initializes MCP
+and makes one tool request without retries, including questions and implementation
+starts. Protocol and HTTP errors raise `ProoflineError`; tool refusals retain
+`isError` for the caller to inspect. No browser configuration or cloud-trust API
+is added. Use the signed-in console for onboarding and connection changes.
