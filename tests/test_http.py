@@ -1371,3 +1371,53 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
             with pytest.raises(ProoflineError) as caught:
                 await call(client, "export_reviews", ORG, "findings", cursor="refused", **kwargs)
             assert caught.value.status == 404
+
+
+@MODES
+async def test_knowledge_negotiation_scope_and_no_retry(mode: str) -> None:
+    refusal = False
+    wrong_id = False
+
+    def respond(request: Request, index: int) -> Reply:
+        body = json.loads(request.body)
+        assert request.path == "/mcp"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        if body["method"] == "initialize":
+            return Reply(
+                body={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-11-25"}}
+            )
+        assert request.headers["MCP-Protocol-Version"] == "2025-11-25"
+        if body["method"] == "notifications/initialized":
+            return Reply(status=202, body=b"")
+        assert body["params"] == {
+            "name": "get_wiki_page",
+            "arguments": {"repository": "owner/name", "page_key": "index", "commit": "a" * 40},
+        }
+        if refusal:
+            return Reply(status=503, body={"detail": "unavailable"})
+        return Reply(
+            body={
+                "jsonrpc": "2.0",
+                "id": 99 if wrong_id else 2,
+                "result": {
+                    "isError": True,
+                    "content": [{"type": "text", "text": "RESOURCE_NOT_FOUND"}],
+                },
+            }
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+
+            async def invoke() -> Any:
+                result = client.knowledge.get_wiki_page("owner/name", "index", commit="a" * 40)
+                return await result if inspect.isawaitable(result) else result
+
+            assert (await invoke())["isError"] is True
+            wrong_id = True
+            with pytest.raises(ProoflineError):
+                await invoke()
+            refusal = True
+            with pytest.raises(ProoflineError):
+                await invoke()
+        assert len(server.requests) == 9
