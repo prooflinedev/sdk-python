@@ -281,7 +281,7 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(
         assert len({request.peer_port for request in server.requests}) == 1
         for request in server.requests:
             assert request.headers["Authorization"] == f"Bearer {TOKEN}"
-            assert request.headers["User-Agent"] == "proofline-python/1.0.1"
+            assert request.headers["User-Agent"] == "proofline-python/1.0.2"
             assert request.headers["Accept-Encoding"] == "identity"
             assert "Cookie" not in request.headers
             assert "Content-Type" not in request.headers
