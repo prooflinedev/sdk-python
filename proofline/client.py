@@ -70,6 +70,7 @@ from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
+from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
 
@@ -215,6 +216,7 @@ class ProoflineClient:
         )
         self._api.set_httpx_client(self._http)
         self.knowledge = KnowledgeClient(self._http)
+        self.fixes = FixesClient(self._http)
 
     def close(self) -> None:
         self._http.close()
@@ -548,6 +550,7 @@ class AsyncProoflineClient:
         )
         self._api.set_async_httpx_client(self._http)
         self.knowledge = AsyncKnowledgeClient(self._http)
+        self.fixes = AsyncFixesClient(self._http)
 
     async def aclose(self) -> None:
         await self._http.aclose()
