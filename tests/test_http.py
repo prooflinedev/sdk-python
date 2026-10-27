@@ -1100,22 +1100,41 @@ async def test_deadline_expiring_with_a_received_problem_chunk_keeps_retry_polic
 @MODES
 @pytest.mark.parametrize("status", [200, 403])
 async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
-    mode: str, status: int
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     body = review() if status == 200 else {"detail": PRIVATE}
-    with Server(lambda request, index: Reply(status, body, split=8, pause=0.2)) as server:
-        async with session(mode, server.url) as client:
-            started = time.monotonic()
-            if status == 200:
-                result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.05)
-                assert result.status == "TIMED_OUT"
-                assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
-            else:
-                with pytest.raises(ProoflineError) as raised:
-                    await call(client, "wait_for_review", ORG, REVIEW, timeout=0.05)
-                assert raised.value.status == 403
-            assert time.monotonic() - started < 0.5
-        assert len(server.requests) == 1
+    # Expire only after the real transport receives the status. A short wall-clock
+    # timeout can expire before headers on a busy worker, when TIMED_OUT is correct.
+    with monkeypatch.context() as patch:
+        clock = Clock(patch)
+        sync_request = _sync_http.Transport.handle_request
+        async_request = httpx.AsyncHTTPTransport.handle_async_request
+
+        def expire_sync(transport: _sync_http.Transport, request: httpx.Request) -> httpx.Response:
+            response = sync_request(transport, request)
+            clock.now += 10
+            return response
+
+        async def expire_async(
+            transport: httpx.AsyncHTTPTransport, request: httpx.Request
+        ) -> httpx.Response:
+            response = await async_request(transport, request)
+            clock.now += 10
+            return response
+
+        patch.setattr(_sync_http.Transport, "handle_request", expire_sync)
+        patch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", expire_async)
+        with Server(lambda request, index: Reply(status, body, split=8, pause=0.2)) as server:
+            async with session(mode, server.url) as client:
+                if status == 200:
+                    result = await call(client, "wait_for_review", ORG, REVIEW, timeout=10)
+                    assert result.status == "TIMED_OUT"
+                    assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+                else:
+                    with pytest.raises(ProoflineError) as raised:
+                        await call(client, "wait_for_review", ORG, REVIEW, timeout=10)
+                    assert raised.value.status == 403
+            assert len(server.requests) == 1
     slow_reply = Reply(status, body, split=8, header_pause=0.06, first_pause=0.26, pause=0.24)
     with Server(
         lambda request, index: slow_reply if index == 0 else Reply(body=finding())
