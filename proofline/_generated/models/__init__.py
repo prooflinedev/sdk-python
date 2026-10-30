@@ -47,6 +47,7 @@ from .declared_reach_view import DeclaredReachView
 from .deep_review_escalation import DeepReviewEscalation
 from .deep_review_escalation_status import DeepReviewEscalationStatus
 from .domain_view import DomainView
+from .earlier_open_finding import EarlierOpenFinding
 from .evidence_view import EvidenceView
 from .export_evidence_kind import ExportEvidenceKind
 from .export_evidence_ref import ExportEvidenceRef
@@ -226,6 +227,7 @@ __all__ = (
     "DeepReviewEscalation",
     "DeepReviewEscalationStatus",
     "DomainView",
+    "EarlierOpenFinding",
     "EvidenceView",
     "ExportEvidenceKind",
     "ExportEvidenceRef",
