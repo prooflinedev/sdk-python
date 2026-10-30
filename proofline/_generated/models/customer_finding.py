@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..models.finding_placement_view import FindingPlacementView
     from ..models.finding_rule_ref_view import FindingRuleRefView
     from ..models.finding_support import FindingSupport
+    from ..models.matched_local_finding import MatchedLocalFinding
     from ..models.thread_observation_view import ThreadObservationView
 
 
@@ -65,6 +66,9 @@ class CustomerFinding:
         latest_validation (CustomerFindingValidation | None | Unset): The latest decision on the finding's series, with
             who made it, where
              and when. Null when no decision is recorded.
+        local_findings (list[MatchedLocalFinding] | Unset): Earlier occurrences in the author's local reviews linked by
+            exact patch
+             identity. These links carry no verdict or finding decision.
         placement (FindingPlacementView | None | Unset): Where this review's comment gate placed the finding, as it
             recorded
              the placement. Null when the review recorded none.
@@ -102,6 +106,7 @@ class CustomerFinding:
     finding_fingerprint: None | str | Unset = UNSET
     github_comment_url: None | str | Unset = UNSET
     latest_validation: CustomerFindingValidation | None | Unset = UNSET
+    local_findings: list[MatchedLocalFinding] | Unset = UNSET
     placement: FindingPlacementView | None | Unset = UNSET
     remediation: None | str | Unset = UNSET
     supporting_evidence: FindingSupport | None | Unset = UNSET
@@ -194,6 +199,13 @@ class CustomerFinding:
         else:
             latest_validation = self.latest_validation
 
+        local_findings: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.local_findings, Unset):
+            local_findings = []
+            for local_findings_item_data in self.local_findings:
+                local_findings_item = local_findings_item_data.to_dict()
+                local_findings.append(local_findings_item)
+
         placement: dict[str, Any] | None | Unset
         if isinstance(self.placement, Unset):
             placement = UNSET
@@ -258,6 +270,8 @@ class CustomerFinding:
             field_dict["github_comment_url"] = github_comment_url
         if latest_validation is not UNSET:
             field_dict["latest_validation"] = latest_validation
+        if local_findings is not UNSET:
+            field_dict["local_findings"] = local_findings
         if placement is not UNSET:
             field_dict["placement"] = placement
         if remediation is not UNSET:
@@ -283,6 +297,7 @@ class CustomerFinding:
         from ..models.finding_placement_view import FindingPlacementView  # noqa: PLC0415
         from ..models.finding_rule_ref_view import FindingRuleRefView  # noqa: PLC0415
         from ..models.finding_support import FindingSupport  # noqa: PLC0415
+        from ..models.matched_local_finding import MatchedLocalFinding  # noqa: PLC0415
         from ..models.thread_observation_view import ThreadObservationView  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -448,6 +463,15 @@ class CustomerFinding:
 
         latest_validation = _parse_latest_validation(d.pop("latest_validation", UNSET))
 
+        _local_findings = d.pop("local_findings", UNSET)
+        local_findings: list[MatchedLocalFinding] | Unset = UNSET
+        if _local_findings is not UNSET:
+            local_findings = []
+            for local_findings_item_data in _local_findings:
+                local_findings_item = MatchedLocalFinding.from_dict(local_findings_item_data)
+
+                local_findings.append(local_findings_item)
+
         def _parse_placement(data: object) -> FindingPlacementView | None | Unset:
             if data is None:
                 return data
@@ -534,6 +558,7 @@ class CustomerFinding:
             finding_fingerprint=finding_fingerprint,
             github_comment_url=github_comment_url,
             latest_validation=latest_validation,
+            local_findings=local_findings,
             placement=placement,
             remediation=remediation,
             supporting_evidence=supporting_evidence,

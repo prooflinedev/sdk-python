@@ -91,6 +91,7 @@ from .gate_state import GateState
 from .gate_status import GateStatus
 from .local_reverification import LocalReverification
 from .local_reverification_outcome import LocalReverificationOutcome
+from .matched_local_finding import MatchedLocalFinding
 from .not_assessed_view import NotAssessedView
 from .occurrence_capture import OccurrenceCapture
 from .occurrence_question import OccurrenceQuestion
@@ -271,6 +272,7 @@ __all__ = (
     "GateStatus",
     "LocalReverification",
     "LocalReverificationOutcome",
+    "MatchedLocalFinding",
     "NotAssessedView",
     "OccurrenceCapture",
     "OccurrenceQuestion",
