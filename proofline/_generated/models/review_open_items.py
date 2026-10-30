@@ -12,6 +12,7 @@ from ..models.open_items_review_status import OpenItemsReviewStatus
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.earlier_open_finding import EarlierOpenFinding
     from ..models.open_finding_counts import OpenFindingCounts
     from ..models.open_item_environment import OpenItemEnvironment
     from ..models.open_items_threads_type_0 import OpenItemsThreadsType0
@@ -46,6 +47,9 @@ class ReviewOpenItems:
              `current_head_sha` comes from. Null when none is recorded.
         current_head_sha (None | str | Unset): The pull request's head commit as Proofline last recorded it from
              GitHub. Null when no pull request state is recorded.
+        earlier_findings (list[EarlierOpenFinding] | Unset): Exact published occurrences of earlier unresolved
+            environment findings.
+             Absent from observations recorded before destinations were captured.
         latest_review_head_sha (None | str | Unset): The head commit of the newest review of this pull request the
             caller
              can see. Null when that review recorded none.
@@ -65,6 +69,7 @@ class ReviewOpenItems:
     threads: OpenItemsThreadsType0 | OpenItemsThreadsType1
     current_head_provider_updated_at: datetime.datetime | None | Unset = UNSET
     current_head_sha: None | str | Unset = UNSET
+    earlier_findings: list[EarlierOpenFinding] | Unset = UNSET
     latest_review_head_sha: None | str | Unset = UNSET
     reviewed_head_sha: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -113,6 +118,13 @@ class ReviewOpenItems:
         else:
             current_head_sha = self.current_head_sha
 
+        earlier_findings: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.earlier_findings, Unset):
+            earlier_findings = []
+            for earlier_findings_item_data in self.earlier_findings:
+                earlier_findings_item = earlier_findings_item_data.to_dict()
+                earlier_findings.append(earlier_findings_item)
+
         latest_review_head_sha: None | str | Unset
         if isinstance(self.latest_review_head_sha, Unset):
             latest_review_head_sha = UNSET
@@ -145,6 +157,8 @@ class ReviewOpenItems:
             field_dict["current_head_provider_updated_at"] = current_head_provider_updated_at
         if current_head_sha is not UNSET:
             field_dict["current_head_sha"] = current_head_sha
+        if earlier_findings is not UNSET:
+            field_dict["earlier_findings"] = earlier_findings
         if latest_review_head_sha is not UNSET:
             field_dict["latest_review_head_sha"] = latest_review_head_sha
         if reviewed_head_sha is not UNSET:
@@ -154,6 +168,7 @@ class ReviewOpenItems:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.earlier_open_finding import EarlierOpenFinding  # noqa: PLC0415
         from ..models.open_finding_counts import OpenFindingCounts  # noqa: PLC0415
         from ..models.open_item_environment import OpenItemEnvironment  # noqa: PLC0415
         from ..models.open_items_threads_type_0 import OpenItemsThreadsType0  # noqa: PLC0415
@@ -230,6 +245,15 @@ class ReviewOpenItems:
 
         current_head_sha = _parse_current_head_sha(d.pop("current_head_sha", UNSET))
 
+        _earlier_findings = d.pop("earlier_findings", UNSET)
+        earlier_findings: list[EarlierOpenFinding] | Unset = UNSET
+        if _earlier_findings is not UNSET:
+            earlier_findings = []
+            for earlier_findings_item_data in _earlier_findings:
+                earlier_findings_item = EarlierOpenFinding.from_dict(earlier_findings_item_data)
+
+                earlier_findings.append(earlier_findings_item)
+
         def _parse_latest_review_head_sha(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -263,6 +287,7 @@ class ReviewOpenItems:
             threads=threads,
             current_head_provider_updated_at=current_head_provider_updated_at,
             current_head_sha=current_head_sha,
+            earlier_findings=earlier_findings,
             latest_review_head_sha=latest_review_head_sha,
             reviewed_head_sha=reviewed_head_sha,
         )

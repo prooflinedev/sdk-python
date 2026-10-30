@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
+from ..types import UNSET, Unset
+
 if TYPE_CHECKING:
+    from ..models.earlier_open_finding import EarlierOpenFinding
     from ..models.not_assessed_view import NotAssessedView
 
 
@@ -27,12 +30,15 @@ class OpenItemsView:
                 earlier published series of the pull request that this review did not
                 find again.
            serious_findings (int): The `SERIOUS` findings among `open_findings`.
+           earlier_findings (list[EarlierOpenFinding] | Unset): Exact published occurrences of earlier unresolved
+               environment findings.
     """
 
     accepted_risks: int
     not_assessed: list[NotAssessedView]
     open_findings: int
     serious_findings: int
+    earlier_findings: list[EarlierOpenFinding] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,6 +53,13 @@ class OpenItemsView:
 
         serious_findings = self.serious_findings
 
+        earlier_findings: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.earlier_findings, Unset):
+            earlier_findings = []
+            for earlier_findings_item_data in self.earlier_findings:
+                earlier_findings_item = earlier_findings_item_data.to_dict()
+                earlier_findings.append(earlier_findings_item)
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -57,11 +70,14 @@ class OpenItemsView:
                 "serious_findings": serious_findings,
             }
         )
+        if earlier_findings is not UNSET:
+            field_dict["earlier_findings"] = earlier_findings
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.earlier_open_finding import EarlierOpenFinding  # noqa: PLC0415
         from ..models.not_assessed_view import NotAssessedView  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -78,11 +94,21 @@ class OpenItemsView:
 
         serious_findings = d.pop("serious_findings")
 
+        _earlier_findings = d.pop("earlier_findings", UNSET)
+        earlier_findings: list[EarlierOpenFinding] | Unset = UNSET
+        if _earlier_findings is not UNSET:
+            earlier_findings = []
+            for earlier_findings_item_data in _earlier_findings:
+                earlier_findings_item = EarlierOpenFinding.from_dict(earlier_findings_item_data)
+
+                earlier_findings.append(earlier_findings_item)
+
         open_items_view = cls(
             accepted_risks=accepted_risks,
             not_assessed=not_assessed,
             open_findings=open_findings,
             serious_findings=serious_findings,
+            earlier_findings=earlier_findings,
         )
 
         open_items_view.additional_properties = d
