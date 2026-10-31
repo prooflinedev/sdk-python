@@ -19,6 +19,8 @@ from .change_diagram_kind_view import ChangeDiagramKindView
 from .change_diagram_outcome_type_0 import ChangeDiagramOutcomeType0
 from .change_diagram_view import ChangeDiagramView
 from .change_summary import ChangeSummary
+from .ci_failure_attribution import CiFailureAttribution
+from .ci_failure_line import CiFailureLine
 from .code_assessment_status_type_0 import CodeAssessmentStatusType0
 from .comment_address_evaluation_view import CommentAddressEvaluationView
 from .comment_address_outcome import CommentAddressOutcome
@@ -200,6 +202,8 @@ __all__ = (
     "ChangeDiagramOutcomeType0",
     "ChangeDiagramView",
     "ChangeSummary",
+    "CiFailureAttribution",
+    "CiFailureLine",
     "CodeAssessmentStatusType0",
     "CommentAddressEvaluationView",
     "CommentAddressOutcome",

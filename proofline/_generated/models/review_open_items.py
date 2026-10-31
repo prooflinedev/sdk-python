@@ -12,6 +12,7 @@ from ..models.open_items_review_status import OpenItemsReviewStatus
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.ci_failure_line import CiFailureLine
     from ..models.earlier_open_finding import EarlierOpenFinding
     from ..models.open_finding_counts import OpenFindingCounts
     from ..models.open_item_environment import OpenItemEnvironment
@@ -42,6 +43,14 @@ class ReviewOpenItems:
         open_findings (OpenFindingCounts):
         review_status (OpenItemsReviewStatus):
         threads (OpenItemsThreadsType0 | OpenItemsThreadsType1):
+        ci_failures (list[CiFailureLine] | Unset): Failed CI jobs diagnosed on the reviewed head, the newest diagnosed
+             attempt of each run, in diagnosis order. The Check states each one;
+             none is a Proofline open item. Absent when no job was diagnosed.
+        ci_failures_omitted (int | Unset): Diagnosed failed CI jobs on the reviewed head beyond `ci_failures`.
+        ci_runs_pending (int | Unset): Failed CI run attempts on the reviewed head whose diagnosis is queued
+             or running, so none of their jobs has a line yet.
+        ci_runs_unfinished (int | Unset): Failed CI run attempts on the reviewed head whose diagnosis failed or
+             was cancelled, so none of their jobs has a line.
         current_head_provider_updated_at (datetime.datetime | None | Unset): GitHub's update time for the recorded pull
             request state that
              `current_head_sha` comes from. Null when none is recorded.
@@ -67,6 +76,10 @@ class ReviewOpenItems:
     open_findings: OpenFindingCounts
     review_status: OpenItemsReviewStatus
     threads: OpenItemsThreadsType0 | OpenItemsThreadsType1
+    ci_failures: list[CiFailureLine] | Unset = UNSET
+    ci_failures_omitted: int | Unset = UNSET
+    ci_runs_pending: int | Unset = UNSET
+    ci_runs_unfinished: int | Unset = UNSET
     current_head_provider_updated_at: datetime.datetime | None | Unset = UNSET
     current_head_sha: None | str | Unset = UNSET
     earlier_findings: list[EarlierOpenFinding] | Unset = UNSET
@@ -103,6 +116,19 @@ class ReviewOpenItems:
             threads = self.threads.to_dict()
         else:
             threads = self.threads.to_dict()
+
+        ci_failures: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.ci_failures, Unset):
+            ci_failures = []
+            for ci_failures_item_data in self.ci_failures:
+                ci_failures_item = ci_failures_item_data.to_dict()
+                ci_failures.append(ci_failures_item)
+
+        ci_failures_omitted = self.ci_failures_omitted
+
+        ci_runs_pending = self.ci_runs_pending
+
+        ci_runs_unfinished = self.ci_runs_unfinished
 
         current_head_provider_updated_at: None | str | Unset
         if isinstance(self.current_head_provider_updated_at, Unset):
@@ -153,6 +179,14 @@ class ReviewOpenItems:
                 "threads": threads,
             }
         )
+        if ci_failures is not UNSET:
+            field_dict["ci_failures"] = ci_failures
+        if ci_failures_omitted is not UNSET:
+            field_dict["ci_failures_omitted"] = ci_failures_omitted
+        if ci_runs_pending is not UNSET:
+            field_dict["ci_runs_pending"] = ci_runs_pending
+        if ci_runs_unfinished is not UNSET:
+            field_dict["ci_runs_unfinished"] = ci_runs_unfinished
         if current_head_provider_updated_at is not UNSET:
             field_dict["current_head_provider_updated_at"] = current_head_provider_updated_at
         if current_head_sha is not UNSET:
@@ -168,6 +202,7 @@ class ReviewOpenItems:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.ci_failure_line import CiFailureLine  # noqa: PLC0415
         from ..models.earlier_open_finding import EarlierOpenFinding  # noqa: PLC0415
         from ..models.open_finding_counts import OpenFindingCounts  # noqa: PLC0415
         from ..models.open_item_environment import OpenItemEnvironment  # noqa: PLC0415
@@ -214,6 +249,21 @@ class ReviewOpenItems:
             return componentsschemas_open_items_threads_type_1
 
         threads = _parse_threads(d.pop("threads"))
+
+        _ci_failures = d.pop("ci_failures", UNSET)
+        ci_failures: list[CiFailureLine] | Unset = UNSET
+        if _ci_failures is not UNSET:
+            ci_failures = []
+            for ci_failures_item_data in _ci_failures:
+                ci_failures_item = CiFailureLine.from_dict(ci_failures_item_data)
+
+                ci_failures.append(ci_failures_item)
+
+        ci_failures_omitted = d.pop("ci_failures_omitted", UNSET)
+
+        ci_runs_pending = d.pop("ci_runs_pending", UNSET)
+
+        ci_runs_unfinished = d.pop("ci_runs_unfinished", UNSET)
 
         def _parse_current_head_provider_updated_at(
             data: object,
@@ -285,6 +335,10 @@ class ReviewOpenItems:
             open_findings=open_findings,
             review_status=review_status,
             threads=threads,
+            ci_failures=ci_failures,
+            ci_failures_omitted=ci_failures_omitted,
+            ci_runs_pending=ci_runs_pending,
+            ci_runs_unfinished=ci_runs_unfinished,
             current_head_provider_updated_at=current_head_provider_updated_at,
             current_head_sha=current_head_sha,
             earlier_findings=earlier_findings,
