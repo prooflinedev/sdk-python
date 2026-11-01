@@ -31,6 +31,9 @@ class RoutingFindingView:
             retained.
         promotion (FindingPromotionView | None | Unset): Human override beside the original decision, when one was
             requested.
+        publication_group (None | Unset | UUID): The finding that represents this finding's publication group, when an
+             applied group publishes it in one comment with other findings. Every
+             member names the same finding, the representative included.
     """
 
     finding_id: UUID
@@ -42,6 +45,7 @@ class RoutingFindingView:
     floor_reason: None | str | Unset = UNSET
     inline_reason: None | str | Unset = UNSET
     promotion: FindingPromotionView | None | Unset = UNSET
+    publication_group: None | Unset | UUID = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,6 +87,14 @@ class RoutingFindingView:
         else:
             promotion = self.promotion
 
+        publication_group: None | str | Unset
+        if isinstance(self.publication_group, Unset):
+            publication_group = UNSET
+        elif isinstance(self.publication_group, UUID):
+            publication_group = str(self.publication_group)
+        else:
+            publication_group = self.publication_group
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -102,6 +114,8 @@ class RoutingFindingView:
             field_dict["inline_reason"] = inline_reason
         if promotion is not UNSET:
             field_dict["promotion"] = promotion
+        if publication_group is not UNSET:
+            field_dict["publication_group"] = publication_group
 
         return field_dict
 
@@ -164,6 +178,23 @@ class RoutingFindingView:
 
         promotion = _parse_promotion(d.pop("promotion", UNSET))
 
+        def _parse_publication_group(data: object) -> None | Unset | UUID:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                publication_group_type_0 = UUID(data)
+
+                return publication_group_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UUID, data)
+
+        publication_group = _parse_publication_group(d.pop("publication_group", UNSET))
+
         routing_finding_view = cls(
             finding_id=finding_id,
             inline_limit_exceeded=inline_limit_exceeded,
@@ -174,6 +205,7 @@ class RoutingFindingView:
             floor_reason=floor_reason,
             inline_reason=inline_reason,
             promotion=promotion,
+            publication_group=publication_group,
         )
 
         routing_finding_view.additional_properties = d
