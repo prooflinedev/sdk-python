@@ -159,6 +159,8 @@ from .run_now_refusal_view_type_11 import RunNowRefusalViewType11
 from .run_now_refused import RunNowRefused
 from .run_now_request import RunNowRequest
 from .run_now_response import RunNowResponse
+from .scan_request_body import ScanRequestBody
+from .scan_response import ScanResponse
 from .specialist_assessment_execution import SpecialistAssessmentExecution
 from .specialist_execution_view import SpecialistExecutionView
 from .specialist_output_projection import SpecialistOutputProjection
@@ -342,6 +344,8 @@ __all__ = (
     "RunNowRefused",
     "RunNowRequest",
     "RunNowResponse",
+    "ScanRequestBody",
+    "ScanResponse",
     "SpecialistAssessmentExecution",
     "SpecialistExecutionView",
     "SpecialistOutputProjection",
