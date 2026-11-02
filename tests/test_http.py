@@ -1054,17 +1054,19 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
 
 
 @MODES
-async def test_retry_after_is_bounded_by_wait_deadline(mode: str) -> None:
+async def test_retry_after_is_bounded_by_wait_deadline(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
     with Server(
-        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "2"})
+        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "20"})
     ) as server:
         async with session(mode, server.url) as client:
-            started = time.monotonic()
-            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.05)
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=10)
             assert result.status == "TIMED_OUT"
             assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
-            assert time.monotonic() - started < 0.5
         assert len(server.requests) == 1
+        assert clock.delays == [10]
 
 
 @MODES
