@@ -32,7 +32,7 @@ from ._generated.models import (
 from ._transport import VERSION as __version__
 from ._transport import ProoflineError
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
-from .exports import ExportDataset, ExportFormat, ExportPage
+from .exports import ExportDataset, ExportFormat, ExportPage, ExportWriter
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
 
 __all__ = [
@@ -51,6 +51,7 @@ __all__ = [
     "ExportDataset",
     "ExportFormat",
     "ExportPage",
+    "ExportWriter",
     "FileReviewRequest",
     "FileReviewResponse",
     "PatchReviewRequest",

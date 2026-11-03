@@ -47,6 +47,24 @@ with ProoflineClient() as client:
     # Continue with cursor=page.next_cursor when it is not None.
 ```
 
+Use `ExportWriter` to combine pages in a text stream. It writes CSV headers once
+and refuses changes to the format or column order before writing that page.
+It retains the original record content and separates records across pages,
+including when a page has no final newline. The caller owns and closes the stream.
+
+```python
+from proofline import ExportWriter
+
+with open("reviews.csv", "w", encoding="utf-8", newline="") as stream:
+    writer = ExportWriter(stream)
+    writer.write_page(page)
+    # Fetch the next page with the same filters, then call write_page again.
+```
+
+`ExportWriter` also accepts pages fetched with `AsyncProoflineClient`. Writing to
+the text stream is synchronous. A write error propagates to the caller; use a
+fresh output file when restarting an interrupted export.
+
 ## Coverage uploads
 
 Use a repository-restricted token with `coverage:write` and current repository write
