@@ -10,6 +10,7 @@ from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
     from ..models.change_attribution_view import ChangeAttributionView
+    from ..models.check_file import CheckFile
 
 
 T = TypeVar("T", bound="CustomerCheck")
@@ -19,6 +20,9 @@ T = TypeVar("T", bound="CustomerCheck")
 class CustomerCheck:
     """
     Attributes:
+        files (list[CheckFile]): The files World cited as evidence for this result, once each in
+             World's order, with the revision World read each at. Empty when World
+             cited no file, and on results recorded before World cited files.
         lifecycle (Literal['GATING'] | Literal['QUARANTINED'] | Literal['RETIRED'] | Literal['SHADOW'] |
             Literal['UNKNOWN']): World's lifecycle disclosure for the evaluator version that answered, as
              the receipt recorded it. A deployment gate counts only `GATING` results
@@ -43,6 +47,7 @@ class CustomerCheck:
              verdict names none of these reasons.
     """
 
+    files: list[CheckFile]
     lifecycle: (
         Literal["GATING"]
         | Literal["QUARANTINED"]
@@ -66,6 +71,11 @@ class CustomerCheck:
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.change_attribution_view import ChangeAttributionView  # noqa: PLC0415
+
+        files = []
+        for files_item_data in self.files:
+            files_item = files_item_data.to_dict()
+            files.append(files_item)
 
         lifecycle: (
             Literal["GATING"]
@@ -116,6 +126,7 @@ class CustomerCheck:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
+                "files": files,
                 "lifecycle": lifecycle,
                 "name": name,
                 "outcome": outcome,
@@ -135,8 +146,15 @@ class CustomerCheck:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.change_attribution_view import ChangeAttributionView  # noqa: PLC0415
+        from ..models.check_file import CheckFile  # noqa: PLC0415
 
         d = dict(src_dict)
+        files = []
+        _files = d.pop("files")
+        for files_item_data in _files:
+            files_item = CheckFile.from_dict(files_item_data)
+
+            files.append(files_item)
 
         def _parse_lifecycle(
             data: object,
@@ -301,6 +319,7 @@ class CustomerCheck:
         unresolved_reason = _parse_unresolved_reason(d.pop("unresolved_reason", UNSET))
 
         customer_check = cls(
+            files=files,
             lifecycle=lifecycle,
             name=name,
             outcome=outcome,

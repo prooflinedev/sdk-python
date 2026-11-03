@@ -19,6 +19,7 @@ from .change_diagram_kind_view import ChangeDiagramKindView
 from .change_diagram_outcome_type_0 import ChangeDiagramOutcomeType0
 from .change_diagram_view import ChangeDiagramView
 from .change_summary import ChangeSummary
+from .check_file import CheckFile
 from .ci_failure_attribution import CiFailureAttribution
 from .ci_failure_line import CiFailureLine
 from .code_assessment_status_type_0 import CodeAssessmentStatusType0
@@ -202,6 +203,7 @@ __all__ = (
     "ChangeDiagramOutcomeType0",
     "ChangeDiagramView",
     "ChangeSummary",
+    "CheckFile",
     "CiFailureAttribution",
     "CiFailureLine",
     "CodeAssessmentStatusType0",

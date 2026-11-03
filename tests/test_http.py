@@ -792,6 +792,16 @@ async def test_wait_retains_evidence_gaps_after_running_review(
                 "name": "synthetic-check",
                 "outcome": "UNRESOLVED",
                 "lifecycle": "SHADOW",
+                "files": [
+                    {
+                        "revision": "PROPOSED_CODE_REVISION",
+                        "path": {"untrusted_text": "<b>deploy</b>.yml"},
+                    },
+                    {
+                        "revision": "BASE_CODE_REVISION",
+                        "path": {"untrusted_text": "deploy.yml"},
+                    },
+                ],
                 "unresolved_reason": "UNSUPPORTED",
                 "detail": PRIVATE,
             }
@@ -812,6 +822,11 @@ async def test_wait_retains_evidence_gaps_after_running_review(
         assert gap.checks[0].unresolved_reason == "UNSUPPORTED"
         assert gap.checks[0].detail == PRIVATE
         assert gap.checks[0].lifecycle == "SHADOW"
+        files = result.review.assessments[0].checks.families[0].files
+        assert [(file.revision, file.path.untrusted_text) for file in files] == [
+            ("PROPOSED_CODE_REVISION", "<b>deploy</b>.yml"),
+            ("BASE_CODE_REVISION", "deploy.yml"),
+        ]
         assert PRIVATE not in repr(result) + repr(gap)
         assert clock.delays == [5, 10]
 
@@ -927,7 +942,12 @@ async def test_completion_uses_all_declared_lifecycles_and_recorded_checks(
             body = review()
             body["finding_count"] = 1
             body["assessments"][0]["findings"] = [finding()]
-            check = {"name": "family", "outcome": check_outcome, "lifecycle": lifecycle}
+            check = {
+                "name": "family",
+                "outcome": check_outcome,
+                "lifecycle": lifecycle,
+                "files": [],
+            }
             if check_outcome == "UNRESOLVED":
                 check["unresolved_reason"] = "REGENERATE_SCENARIO"
             body["assessments"][0]["checks"]["families"] = [check]
