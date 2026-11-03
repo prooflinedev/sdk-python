@@ -7,7 +7,7 @@ import io
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 
 import httpx
 
@@ -25,6 +25,46 @@ class ExportPage:
     version: int
     settled_until: str
     next_cursor: str | None
+
+
+class ExportWriter:
+    """Write consecutive export pages to a caller owned text stream.
+
+    CSV headers are emitted once. Format and CSV schema changes are refused
+    before the offending page is written. The stream remains open.
+    """
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self._format: ExportFormat | None = None
+        self._columns: list[str] | None = None
+
+    def write_page(self, page: ExportPage) -> None:
+        """Append a page, omitting repeated headers and adding a final newline if needed."""
+        if page.format not in ("csv", "ndjson"):
+            raise ValueError("Export format must be csv or ndjson.")
+        if self._format is not None and page.format != self._format:
+            raise ValueError("Export pages must use the same format.")
+        text = page.text
+        columns = None
+        if page.format == "csv":
+            source = io.StringIO(text, newline="")
+            try:
+                columns = next(csv.reader(source, strict=True))
+            except (StopIteration, csv.Error):
+                raise ValueError("CSV export page must contain a valid header.") from None
+            if not columns or len(set(columns)) != len(columns):
+                raise ValueError("CSV export page must contain unique column names.")
+            if self._columns is not None:
+                if columns != self._columns:
+                    raise ValueError("CSV export pages must use the same columns in order.")
+                text = source.read()
+        if text and not text.endswith("\n" if page.format == "ndjson" else ("\n", "\r")):
+            # A final record may have no newline. Separate the next page.
+            text += "\n"
+        self._stream.write(text)
+        self._format = page.format
+        self._columns = columns
 
 
 def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
