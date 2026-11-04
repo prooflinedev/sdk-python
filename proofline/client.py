@@ -33,6 +33,7 @@ from ._generated.api.default import (
     request_file_review,
     request_patch_review,
     request_review,
+    request_scan,
     rerun_review,
     start_agent_session,
     stop_review,
@@ -65,6 +66,8 @@ from ._generated.models.review_routing_view_type_2 import ReviewRoutingViewType2
 from ._generated.models.review_summary import ReviewSummary
 from ._generated.models.run_now_request import RunNowRequest
 from ._generated.models.run_now_response import RunNowResponse
+from ._generated.models.scan_request_body import ScanRequestBody
+from ._generated.models.scan_response import ScanResponse
 from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
@@ -442,6 +445,17 @@ class ProoflineClient:
             body=body,
         )
 
+    def request_scan(
+        self, organization_id: UUID, repository_id: UUID, *, body: ScanRequestBody
+    ) -> ScanResponse:
+        return self._call(
+            request_scan.sync_detailed,
+            ScanResponse,
+            organization_id,
+            repository_id,
+            body=body,
+        )
+
     def stop_review(self, organization_id: UUID, review_id: UUID) -> StopResponse:
         return self._call(stop_review.sync_detailed, StopResponse, organization_id, review_id)
 
@@ -792,6 +806,17 @@ class AsyncProoflineClient:
         return await self._call(
             request_file_review.asyncio_detailed,
             FileReviewResponse,
+            organization_id,
+            repository_id,
+            body=body,
+        )
+
+    async def request_scan(
+        self, organization_id: UUID, repository_id: UUID, *, body: ScanRequestBody
+    ) -> ScanResponse:
+        return await self._call(
+            request_scan.asyncio_detailed,
+            ScanResponse,
             organization_id,
             repository_id,
             body=body,

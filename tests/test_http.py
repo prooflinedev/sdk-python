@@ -41,6 +41,8 @@ from proofline import (
     RunNowMode,
     RunNowRequest,
     RunNowResponse,
+    ScanRequestBody,
+    ScanResponse,
     StopResponse,
     UploadedReport,
     _sync_http,
@@ -391,6 +393,37 @@ async def test_local_and_commit_reviews_post_their_subject_and_decode_the_review
             result = await call(client, operation, ORG, REPOSITORY, body=body)
             assert isinstance(result, response_model)
             assert (result.review_id, result.existing) == (REVIEW, True)
+        assert len(server.requests) == 1
+
+
+@MODES
+async def test_revision_scans_post_the_pinned_request_and_decode_unavailable(mode: str) -> None:
+    body = ScanRequestBody(request_id=REVIEW, commit_sha="a" * 40, budget_credits=50)
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.method == "POST"
+        assert request.path == f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}/scans"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        assert json.loads(request.body) == {
+            "request_id": str(REVIEW),
+            "commit_sha": "a" * 40,
+            "budget_credits": 50,
+        }
+        return Reply(
+            body={
+                "resolution_id": str(REVIEW),
+                "review_id": None,
+                "outcome": "REPOSITORY_UNAVAILABLE",
+            }
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "request_scan", ORG, REPOSITORY, body=body)
+            assert isinstance(result, ScanResponse)
+            assert result.resolution_id == REVIEW
+            assert result.review_id is None
+            assert result.outcome == "REPOSITORY_UNAVAILABLE"
         assert len(server.requests) == 1
 
 
