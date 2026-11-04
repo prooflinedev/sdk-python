@@ -33,6 +33,9 @@ class CustomerCodeAssessment:
                never a verdict on
                 the change: only `COMPLETED` says the assessment covered what it read.
            completed_at (datetime.datetime | None | Unset): When the code assessment ended. Null while it has not.
+           coverage_details (list[str] | Unset): Recorded check coverage counts and fixed cancellation causes, without
+               source text.
+                Absent coverage does not establish that every check ran.
            incompleteness_kind (None | str | Unset): Why an `INCOMPLETE` code assessment is incomplete: `NOT_CONFIGURED`,
                 `POLICY_EXCLUDED`, `EVIDENCE_UNAVAILABLE`, `HYPOTHESES_UNRESOLVED` or
                 `MODEL_BUDGET_EXHAUSTED`. Null otherwise.
@@ -45,6 +48,7 @@ class CustomerCodeAssessment:
     id: UUID
     status: CodeAssessmentStatusType0 | Literal["EXCLUDED"]
     completed_at: datetime.datetime | None | Unset = UNSET
+    coverage_details: list[str] | Unset = UNSET
     incompleteness_kind: None | str | Unset = UNSET
     started_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -75,6 +79,10 @@ class CustomerCodeAssessment:
         else:
             completed_at = self.completed_at
 
+        coverage_details: list[str] | Unset = UNSET
+        if not isinstance(self.coverage_details, Unset):
+            coverage_details = self.coverage_details
+
         incompleteness_kind: None | str | Unset
         if isinstance(self.incompleteness_kind, Unset):
             incompleteness_kind = UNSET
@@ -102,6 +110,8 @@ class CustomerCodeAssessment:
         )
         if completed_at is not UNSET:
             field_dict["completed_at"] = completed_at
+        if coverage_details is not UNSET:
+            field_dict["coverage_details"] = coverage_details
         if incompleteness_kind is not UNSET:
             field_dict["incompleteness_kind"] = incompleteness_kind
         if started_at is not UNSET:
@@ -164,6 +174,8 @@ class CustomerCodeAssessment:
 
         completed_at = _parse_completed_at(d.pop("completed_at", UNSET))
 
+        coverage_details = cast(list[str], d.pop("coverage_details", UNSET))
+
         def _parse_incompleteness_kind(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -197,6 +209,7 @@ class CustomerCodeAssessment:
             id=id,
             status=status,
             completed_at=completed_at,
+            coverage_details=coverage_details,
             incompleteness_kind=incompleteness_kind,
             started_at=started_at,
         )
