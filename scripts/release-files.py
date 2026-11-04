@@ -14,7 +14,7 @@ from pathlib import Path
 PACKAGE = "proofline-sdk"
 
 
-def published(version):
+def published(version: str) -> dict[str, str]:
     try:
         url = f"https://pypi.org/pypi/{PACKAGE}/{version}/json"
         with urllib.request.urlopen(url, timeout=30) as response:
@@ -28,14 +28,14 @@ def published(version):
     return {file["filename"]: file["digests"]["sha256"] for file in release["urls"]}
 
 
-def missing(expected, released):
+def missing(expected: dict[str, str], released: dict[str, str]) -> list[str]:
     for name, digest in released.items():
         if expected.get(name) != digest:
             raise ValueError(f"PyPI has unexpected content for {name}")
     return sorted(expected.keys() - released.keys())
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version")
     parser.add_argument("artifacts", type=Path)
