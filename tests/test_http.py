@@ -28,6 +28,7 @@ from proofline import (
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
+    ExportPage,
     FileReviewRequest,
     FileReviewResponse,
     PatchReviewRequest,
@@ -92,6 +93,13 @@ async def collect(client: Client, **kwargs: Any) -> list[Any]:
     iterator = client.iter_reviews(ORG, **kwargs)
     if hasattr(iterator, "__aiter__"):
         return [item async for item in iterator]
+    return list(iterator)
+
+
+async def collect_pages(client: Client, dataset: str, **kwargs: Any) -> list[ExportPage]:
+    iterator = client.iter_export_pages(ORG, dataset, **kwargs)
+    if hasattr(iterator, "__aiter__"):
+        return [export async for export in iterator]
     return list(iterator)
 
 
@@ -1390,6 +1398,86 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
             with pytest.raises(ProoflineError) as caught:
                 await call(client, "export_reviews", ORG, "findings", cursor="refused", **kwargs)
             assert caught.value.status == 404
+
+
+@MODES
+async def test_export_iteration_keeps_the_window_and_refuses_cycles_or_bounds(mode: str) -> None:
+    kwargs = {
+        "from_time": "2026-10-01T00:00:00Z",
+        "to_time": "2026-10-25T00:00:00Z",
+        "format": "csv",
+        "group_by": "severity",
+    }
+
+    def csv_reply(cursor: str | None) -> Reply:
+        headers = {
+            "Content-Type": "text/csv",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+        }
+        if cursor is not None:
+            headers["X-Proofline-Export-Next-Cursor"] = cursor
+        return Reply(body=b"dataset_version,severity\r\n1,high\r\n", headers=headers)
+
+    def respond(request: Request, index: int) -> Reply:
+        query = parse_qs(urlsplit(request.path).query)
+        assert request.path.startswith(f"/api/v1/organizations/{ORG}/exports/finding_outcomes?")
+        assert query["from"] == ["2026-10-01T00:00:00Z"]
+        assert query["to"] == ["2026-10-25T00:00:00Z"]
+        assert query["format"] == ["csv"]
+        assert query["group_by"] == ["severity"]
+        assert query.get("cursor") == ([f"cursor-{index - 1}"] if index else None)
+        headers = {
+            "Content-Type": "text/csv",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+        }
+        if index < 2:
+            headers["X-Proofline-Export-Next-Cursor"] = f"cursor-{index}"
+        return Reply(
+            body=f"dataset_version,severity\r\n1,page-{index}\r\n".encode(), headers=headers
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            exports = await collect_pages(client, "finding_outcomes", **kwargs)
+            assert [export.rows[0]["severity"] for export in exports] == [
+                "page-0",
+                "page-1",
+                "page-2",
+            ]
+            assert exports[0].text.startswith("dataset_version,severity\r\n")
+            assert [export.next_cursor for export in exports] == ["cursor-0", "cursor-1", None]
+            assert exports[-1].settled_until == "2026-10-25T00:00:00Z"
+        assert len(server.requests) == 3
+
+    with Server(lambda request, index: csv_reply("repeated")) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await collect_pages(client, "finding_outcomes", **kwargs)
+            assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+        assert len(server.requests) == 2
+
+    with Server(lambda request, index: csv_reply("seeded")) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await collect_pages(client, "finding_outcomes", cursor="seeded", **kwargs)
+            assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+        assert len(server.requests) == 1
+
+    with Server(lambda request, index: csv_reply(f"cursor-{index}")) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await collect_pages(client, "finding_outcomes", max_pages=2, **kwargs)
+            assert raised.value.detail == "Export pagination reached the configured bound."
+        assert len(server.requests) == 2
+
+    with Server(lambda request, index: csv_reply(None)) as server:
+        async with session(mode, server.url) as client:
+            for bound in (0, 1_001):
+                with pytest.raises(ValueError):
+                    await collect_pages(client, "finding_outcomes", max_pages=bound, **kwargs)
+        assert server.requests == []
 
 
 @MODES
