@@ -51,6 +51,29 @@ with ProoflineClient() as client:
     # Continue with cursor=page.next_cursor when it is not None.
 ```
 
+`iter_export_pages` runs that loop for one window and yields every page while it
+follows the signed cursors, keeping the dataset, window, format and grouping fixed.
+It stops at the last page, refuses a cursor it has already received and raises
+`ProoflineError` when `max_pages` (100 by default, at most 1000) is reached.
+`AsyncProoflineClient` exposes the same helper for `async for`.
+
+```python
+import os
+from uuid import UUID
+
+with ProoflineClient() as client:
+    rows = [
+        row
+        for export in client.iter_export_pages(
+            UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+            "findings",
+            from_time="2026-10-01T00:00:00Z",
+            to_time="2026-10-25T00:00:00Z",
+        )
+        for row in export.rows
+    ]
+```
+
 ## Coverage uploads
 
 Use a repository-restricted token with `coverage:write` and current repository write

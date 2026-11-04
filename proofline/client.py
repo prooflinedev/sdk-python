@@ -180,10 +180,32 @@ def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
     return cursor
 
 
-def _pagination_limit() -> ProoflineError:
+def _pagination_limit(subject: str = "Review") -> ProoflineError:
     return ProoflineError(
-        0, "urn:proofline:sdk:pagination-limit", "Review pagination reached the configured bound."
+        0,
+        "urn:proofline:sdk:pagination-limit",
+        f"{subject} pagination reached the configured bound.",
     )
+
+
+def _export_limits(max_pages: int) -> None:
+    if not 1 <= max_pages <= 1_000:
+        raise ValueError("Export iteration requires max_pages 1..1000.")
+
+
+def _export_cursor(page: ExportPage, seen: set[str]) -> str | None:
+    """A missing continuation ends the window; a repeated one is refused."""
+    cursor = page.next_cursor
+    if not cursor:
+        return None
+    if cursor in seen:
+        raise ProoflineError(
+            0,
+            "urn:proofline:sdk:invalid-pagination",
+            "The export page has no new continuation cursor.",
+        )
+    seen.add(cursor)
+    return cursor
 
 
 class ProoflineClient:
@@ -490,6 +512,44 @@ class ProoflineClient:
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
+
+    def iter_export_pages(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        group_by: str | None = None,
+        cursor: str | None = None,
+        max_pages: int = 100,
+    ) -> Iterator[ExportPage]:
+        """Read every export page of one window by following signed cursors.
+
+        The window, format and grouping stay fixed across the requests, so a
+        continuation only changes the cursor. Iteration stops at the last page,
+        refuses a repeated cursor and stops at the configured page bound.
+        """
+        _export_limits(max_pages)
+        seen: set[str] = set()
+        if cursor:
+            seen.add(cursor)
+        for _ in range(max_pages):
+            page = self.export_reviews(
+                organization_id,
+                dataset,
+                from_time=from_time,
+                to_time=to_time,
+                format=format,
+                cursor=cursor,
+                group_by=group_by,
+            )
+            yield page
+            cursor = _export_cursor(page, seen)
+            if cursor is None:
+                return
+        raise _pagination_limit("Export")
 
     def wait_for_review(
         self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
@@ -849,6 +909,44 @@ class AsyncProoflineClient:
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
+
+    async def iter_export_pages(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        group_by: str | None = None,
+        cursor: str | None = None,
+        max_pages: int = 100,
+    ) -> AsyncIterator[ExportPage]:
+        """Read every export page of one window by following signed cursors.
+
+        The window, format and grouping stay fixed across the requests, so a
+        continuation only changes the cursor. Iteration stops at the last page,
+        refuses a repeated cursor and stops at the configured page bound.
+        """
+        _export_limits(max_pages)
+        seen: set[str] = set()
+        if cursor:
+            seen.add(cursor)
+        for _ in range(max_pages):
+            page = await self.export_reviews(
+                organization_id,
+                dataset,
+                from_time=from_time,
+                to_time=to_time,
+                format=format,
+                cursor=cursor,
+                group_by=group_by,
+            )
+            yield page
+            cursor = _export_cursor(page, seen)
+            if cursor is None:
+                return
+        raise _pagination_limit("Export")
 
     async def wait_for_review(
         self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
