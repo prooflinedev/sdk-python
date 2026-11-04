@@ -25,6 +25,10 @@ coroutines. The [SDK guide](https://proofline.sh/docs/sdks/) and
 Licensed under the Apache License, Version 2.0. The generated models under
 `proofline/_generated` carry the MIT license of the generator templates.
 
+## Contributing
+
+This repository distributes the Proofline Python SDK. The public OpenAPI contract generates the client and models in `proofline/_generated/`. Open an issue for changes to the contract or generated code. Pull requests are welcome for the hand-written client in `proofline/client.py`, transport and helpers outside `_generated/`, and tests in `tests/`.
+
 ## Exports
 
 `export_reviews` reads one CSV or NDJSON page through the existing bounded transport.
