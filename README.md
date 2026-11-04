@@ -47,6 +47,25 @@ with ProoflineClient() as client:
     # Continue with cursor=page.next_cursor when it is not None.
 ```
 
+`iter_export_pages` follows the continuation cursors and yields each page of one
+export. It stops at the last page and raises `ProoflineError` when the page bound
+is reached, a cursor repeats or the settled horizon changes between pages.
+
+```python
+from datetime import UTC, datetime
+from uuid import UUID
+
+with ProoflineClient() as client:
+    pages = client.iter_export_pages(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]), "reviews",
+        from_time=datetime(2026, 10, 1, tzinfo=UTC),
+        to_time=datetime(2026, 10, 25, tzinfo=UTC),
+    )
+    for page in pages:
+        for row in page.rows:
+            print(row["review_id"], row["status"])
+```
+
 ## Coverage uploads
 
 Use a repository-restricted token with `coverage:write` and current repository write
