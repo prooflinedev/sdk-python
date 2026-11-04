@@ -16,7 +16,8 @@ PACKAGE = "proofline-sdk"
 
 def published(version):
     try:
-        with urllib.request.urlopen(f"https://pypi.org/pypi/{PACKAGE}/{version}/json", timeout=30) as response:
+        url = f"https://pypi.org/pypi/{PACKAGE}/{version}/json"
+        with urllib.request.urlopen(url, timeout=30) as response:
             release = json.load(response)
     except urllib.error.HTTPError as error:
         if error.code == 404:
