@@ -1,13 +1,15 @@
-"""Bounded export pages, with their original text and continuation metadata."""
+"""Export requests and bounded export pages with their text and continuation metadata."""
 
 from __future__ import annotations
 
 import csv
 import io
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Any, Literal, get_args
+from uuid import UUID
 
 import httpx
 
@@ -15,6 +17,9 @@ from ._transport import ProoflineError
 
 ExportDataset = Literal["reviews", "finding_outcomes", "finding_validations", "spend", "findings"]
 ExportFormat = Literal["csv", "ndjson"]
+ExportTime = str | datetime
+_DATASETS: frozenset[str] = frozenset(get_args(ExportDataset))
+_MEDIA_TYPES: Mapping[ExportFormat, str] = {"csv": "text/csv", "ndjson": "application/x-ndjson"}
 
 
 @dataclass(frozen=True)
@@ -27,11 +32,53 @@ class ExportPage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True)
+class ExportRequest:
+    path: str
+    params: dict[str, str]
+    headers: dict[str, str]
+
+
+def export_request(
+    organization_id: UUID,
+    dataset: ExportDataset,
+    *,
+    from_time: ExportTime,
+    to_time: ExportTime,
+    format: ExportFormat,
+    cursor: str | None,
+    group_by: str | None,
+) -> ExportRequest:
+    if dataset not in _DATASETS:
+        raise ValueError("Unknown export dataset.")
+    if format not in _MEDIA_TYPES:
+        raise ValueError("Export format must be csv or ndjson.")
+    if cursor == "":
+        raise ValueError("The export cursor must be nonempty.")
+    params = {"from": export_time(from_time), "to": export_time(to_time), "format": format}
+    if cursor is not None:
+        params["cursor"] = cursor
+    if group_by is not None:
+        params["group_by"] = group_by
+    return ExportRequest(
+        f"/api/v1/organizations/{organization_id}/exports/{dataset}",
+        params,
+        {"Accept": _MEDIA_TYPES[format]},
+    )
+
+
+def export_time(value: ExportTime) -> str:
+    if isinstance(value, str):
+        return value
+    if value.utcoffset() is None:
+        raise ValueError("Export window datetimes must be timezone-aware.")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
     try:
-        media = "text/csv" if format == "csv" else "application/x-ndjson"
         if (
-            response.headers.get("content-type", "").split(";")[0].strip() != media
+            response.headers.get("content-type", "").split(";")[0].strip() != _MEDIA_TYPES[format]
             or response.headers.get("x-proofline-export-version") != "1"
         ):
             raise ValueError

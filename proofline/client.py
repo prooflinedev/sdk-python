@@ -69,7 +69,14 @@ from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._transport import ProoflineError
-from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
+from .exports import (
+    ExportDataset,
+    ExportFormat,
+    ExportPage,
+    ExportTime,
+    decode_export,
+    export_request,
+)
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
@@ -171,18 +178,14 @@ def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
         return None
     cursor = page.next_cursor
     if not isinstance(cursor, str) or not cursor or cursor in seen:
-        raise ProoflineError(
-            0,
-            "urn:proofline:sdk:invalid-pagination",
-            "The review page has no new continuation cursor.",
-        )
+        raise _invalid_pagination()
     seen.add(cursor)
     return cursor
 
 
 def _pagination_limit() -> ProoflineError:
     return ProoflineError(
-        0, "urn:proofline:sdk:pagination-limit", "Review pagination reached the configured bound."
+        0, "urn:proofline:sdk:pagination-limit", "Pagination reached the configured bound."
     )
 
 
@@ -251,39 +254,57 @@ class ProoflineClient:
         except Exception:
             raise _malformed() from None
 
+    def iter_export_pages(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: ExportTime,
+        to_time: ExportTime,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+        max_pages: int = 100,
+    ) -> Iterator[ExportPage]:
+        pager = _ExportPager(cursor, max_pages)
+        while True:
+            page = self.export_reviews(
+                organization_id,
+                dataset,
+                from_time=from_time,
+                to_time=to_time,
+                format=format,
+                cursor=pager.cursor,
+                group_by=group_by,
+            )
+            pager.accept(page)
+            yield page
+            if not pager.advance(page):
+                return
+
     def export_reviews(
         self,
         organization_id: UUID,
         dataset: ExportDataset,
         *,
-        from_time: str,
-        to_time: str,
+        from_time: ExportTime,
+        to_time: ExportTime,
         format: ExportFormat = "ndjson",
         cursor: str | None = None,
         group_by: str | None = None,
     ) -> ExportPage:
         """Read one export page. Repeat with next_cursor and the same filters."""
-        if dataset not in (
-            "reviews",
-            "finding_outcomes",
-            "finding_validations",
-            "spend",
-            "findings",
-        ):
-            raise ValueError("Unknown export dataset.")
-        if format not in ("csv", "ndjson"):
-            raise ValueError("Export format must be csv or ndjson.")
-        params = {"from": from_time, "to": to_time, "format": format}
-        if cursor is not None:
-            params["cursor"] = cursor
-        if group_by is not None:
-            params["group_by"] = group_by
+        request = export_request(
+            organization_id,
+            dataset,
+            from_time=from_time,
+            to_time=to_time,
+            format=format,
+            cursor=cursor,
+            group_by=group_by,
+        )
         try:
-            response = self._http.get(
-                f"/api/v1/organizations/{organization_id}/exports/{dataset}",
-                params=params,
-                headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
-            )
+            response = self._http.get(request.path, params=request.params, headers=request.headers)
             return decode_export(response, format)
         except httpx.HTTPError as error:
             raise _network(error) from None
@@ -585,38 +606,58 @@ class AsyncProoflineClient:
         except Exception:
             raise _malformed() from None
 
+    async def iter_export_pages(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: ExportTime,
+        to_time: ExportTime,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+        max_pages: int = 100,
+    ) -> AsyncIterator[ExportPage]:
+        pager = _ExportPager(cursor, max_pages)
+        while True:
+            page = await self.export_reviews(
+                organization_id,
+                dataset,
+                from_time=from_time,
+                to_time=to_time,
+                format=format,
+                cursor=pager.cursor,
+                group_by=group_by,
+            )
+            pager.accept(page)
+            yield page
+            if not pager.advance(page):
+                return
+
     async def export_reviews(
         self,
         organization_id: UUID,
         dataset: ExportDataset,
         *,
-        from_time: str,
-        to_time: str,
+        from_time: ExportTime,
+        to_time: ExportTime,
         format: ExportFormat = "ndjson",
         cursor: str | None = None,
         group_by: str | None = None,
     ) -> ExportPage:
         """Read one export page. Repeat with next_cursor and the same filters."""
-        if dataset not in (
-            "reviews",
-            "finding_outcomes",
-            "finding_validations",
-            "spend",
-            "findings",
-        ):
-            raise ValueError("Unknown export dataset.")
-        if format not in ("csv", "ndjson"):
-            raise ValueError("Export format must be csv or ndjson.")
-        params = {"from": from_time, "to": to_time, "format": format}
-        if cursor is not None:
-            params["cursor"] = cursor
-        if group_by is not None:
-            params["group_by"] = group_by
+        request = export_request(
+            organization_id,
+            dataset,
+            from_time=from_time,
+            to_time=to_time,
+            format=format,
+            cursor=cursor,
+            group_by=group_by,
+        )
         try:
             response = await self._http.get(
-                f"/api/v1/organizations/{organization_id}/exports/{dataset}",
-                params=params,
-                headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
+                request.path, params=request.params, headers=request.headers
             )
             return decode_export(response, format)
         except httpx.HTTPError as error:
@@ -877,3 +918,43 @@ class AsyncProoflineClient:
             return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)
+
+
+class _ExportPager:
+    def __init__(self, cursor: str | None, max_pages: int) -> None:
+        if not 1 <= max_pages <= 1_000:
+            raise ValueError("Export pagination requires max_pages 1..1000.")
+        self.cursor = cursor
+        self._seen = set() if cursor is None else {cursor}
+        self._remaining = max_pages
+        self._horizon: str | None = None
+
+    def accept(self, page: ExportPage) -> None:
+        if self._horizon is not None and page.settled_until != self._horizon:
+            raise _horizon_changed()
+        self._horizon = page.settled_until
+
+    def advance(self, page: ExportPage) -> bool:
+        self._remaining -= 1
+        cursor = page.next_cursor
+        if cursor is None:
+            return False
+        if not cursor or cursor in self._seen:
+            raise _invalid_pagination()
+        if not self._remaining:
+            raise _pagination_limit()
+        self._seen.add(cursor)
+        self.cursor = cursor
+        return True
+
+
+def _horizon_changed() -> ProoflineError:
+    return ProoflineError(
+        0, "urn:proofline:sdk:invalid-response", "The export settled horizon changed between pages."
+    )
+
+
+def _invalid_pagination() -> ProoflineError:
+    return ProoflineError(
+        0, "urn:proofline:sdk:invalid-pagination", "The page has no new continuation cursor."
+    )

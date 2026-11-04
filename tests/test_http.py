@@ -11,7 +11,7 @@ import time
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -28,6 +28,8 @@ from proofline import (
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
+    ExportDataset,
+    ExportPage,
     FileReviewRequest,
     FileReviewResponse,
     PatchReviewRequest,
@@ -71,6 +73,7 @@ from .http_server import Reply, Request, Server
 
 Client = ProoflineClient | AsyncProoflineClient
 MODES = pytest.mark.parametrize("mode", ["sync", "async"])
+HORIZON = "2026-10-25T00:00:00Z"
 
 
 @asynccontextmanager
@@ -93,6 +96,44 @@ async def collect(client: Client, **kwargs: Any) -> list[Any]:
     if hasattr(iterator, "__aiter__"):
         return [item async for item in iterator]
     return list(iterator)
+
+
+async def collect_exports(
+    client: Client, pages: list[ExportPage], dataset: ExportDataset = "findings", **kwargs: Any
+) -> None:
+    window: dict[str, Any] = {"from_time": "2026-10-01T00:00:00Z", "to_time": HORIZON}
+    iterator = client.iter_export_pages(ORG, dataset, **{**window, **kwargs})
+    if hasattr(iterator, "__aiter__"):
+        async for page in iterator:
+            pages.append(page)
+    else:
+        for page in iterator:
+            pages.append(page)
+
+
+def export_reply(
+    index: int,
+    *,
+    cursor: str | None = None,
+    horizon: str = HORIZON,
+    status: int = 200,
+    is_csv: bool = False,
+) -> Reply:
+    if status != 200:
+        return Reply(status=status, body={"detail": "not found"})
+    headers = {
+        "Content-Type": "text/csv" if is_csv else "application/x-ndjson",
+        "X-Proofline-Export-Version": "1",
+        "X-Proofline-Export-Settled-Until": horizon,
+    }
+    if cursor is not None:
+        headers["X-Proofline-Export-Next-Cursor"] = cursor
+    body = (
+        f"dataset_version,page\r\n1,{index}\r\n"
+        if is_csv
+        else f'{{"dataset_version":1,"page":{index}}}\n'
+    )
+    return Reply(body=body.encode(), headers=headers)
 
 
 class Clock:
@@ -1390,6 +1431,153 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
             with pytest.raises(ProoflineError) as caught:
                 await call(client, "export_reviews", ORG, "findings", cursor="refused", **kwargs)
             assert caught.value.status == 404
+
+
+@MODES
+async def test_export_iteration_repeats_the_query_until_the_last_page(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        query = parse_qs(urlsplit(request.path).query)
+        assert request.path.startswith(f"/api/v1/organizations/{ORG}/exports/finding_outcomes?")
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        assert request.headers["Accept"] == "text/csv"
+        assert query["from"] == ["2026-10-01T00:00:00Z"]
+        assert query["to"] == ["2026-10-25T00:00:00.500000Z"]
+        assert query["format"] == ["csv"]
+        assert query["group_by"] == ["severity"]
+        assert query.get("cursor") == (["opaque/+cursor"] if index == 1 else None)
+        return export_reply(index, cursor="opaque/+cursor" if index == 0 else None, is_csv=True)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            pages: list[ExportPage] = []
+            await collect_exports(
+                client,
+                pages,
+                "finding_outcomes",
+                from_time=datetime(2026, 10, 1, 2, tzinfo=timezone(timedelta(hours=2))),
+                to_time=datetime(2026, 10, 25, 0, 0, 0, 500_000, tzinfo=UTC),
+                format="csv",
+                group_by="severity",
+            )
+        assert [page.rows[0]["page"] for page in pages] == ["0", "1"]
+        assert [page.text.count("dataset_version,page") for page in pages] == [1, 1]
+        assert [page.settled_until for page in pages] == [HORIZON, HORIZON]
+        assert pages[1].next_cursor is None
+        assert len(server.requests) == 2
+        assert "cursor=opaque%2F%2Bcursor" in server.requests[1].path
+
+
+@MODES
+async def test_export_iteration_refuses_cycles_bounds_horizon_drift_and_problems(
+    mode: str,
+) -> None:
+    with Server(lambda request, index: export_reply(index)) as server:
+        async with session(mode, server.url) as client:
+            pages: list[ExportPage] = []
+            await collect_exports(client, pages)
+            assert len(pages) == 1
+        assert len(server.requests) == 1
+    with Server(lambda request, index: export_reply(index, cursor="repeated")) as server:
+        async with session(mode, server.url) as client:
+            pages = []
+            with pytest.raises(ProoflineError) as raised:
+                await collect_exports(client, pages)
+            assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+            assert len(pages) == 2
+            pages = []
+            with pytest.raises(ProoflineError) as raised:
+                await collect_exports(client, pages, cursor="repeated")
+            assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+            assert len(pages) == 1
+        queries = [parse_qs(urlsplit(request.path).query) for request in server.requests]
+        assert [query.get("cursor") for query in queries] == [None, ["repeated"], ["repeated"]]
+    with Server(lambda request, index: export_reply(index, cursor="")) as server:
+        async with session(mode, server.url) as client:
+            pages = []
+            with pytest.raises(ProoflineError) as raised:
+                await collect_exports(client, pages)
+            assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+            assert len(pages) == 1
+        assert len(server.requests) == 1
+    with Server(lambda request, index: export_reply(index, cursor=str(index))) as server:
+        async with session(mode, server.url) as client:
+            pages = []
+            with pytest.raises(ProoflineError) as raised:
+                await collect_exports(client, pages, max_pages=2)
+            assert raised.value.type == "urn:proofline:sdk:pagination-limit"
+            assert len(pages) == 2
+        assert len(server.requests) == 2
+    drifted = "2026-10-25T00:05:00Z"
+    with Server(
+        lambda request, index: export_reply(
+            index, cursor=str(index), horizon=HORIZON if index == 0 else drifted
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            pages = []
+            with pytest.raises(ProoflineError) as raised:
+                await collect_exports(client, pages)
+            assert raised.value.type == "urn:proofline:sdk:invalid-response"
+            assert len(pages) == 1
+        assert len(server.requests) == 2
+    with Server(
+        lambda request, index: export_reply(index, cursor="next", status=200 if index == 0 else 404)
+    ) as server:
+        async with session(mode, server.url) as client:
+            pages = []
+            with pytest.raises(ProoflineError) as raised:
+                await collect_exports(client, pages)
+            assert raised.value.status == 404
+            assert len(pages) == 1
+        assert len(server.requests) == 2
+
+
+@MODES
+async def test_export_windows_serialize_aware_datetimes_and_refuse_bad_arguments(
+    mode: str,
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        query = parse_qs(urlsplit(request.path).query)
+        assert query["from"] == ["2026-10-01T00:00:00Z"]
+        assert query["to"] == ["2026-10-24T22:00:00Z"]
+        return export_reply(index)
+
+    aware = datetime(2026, 10, 1, tzinfo=UTC)
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            page = await call(
+                client,
+                "export_reviews",
+                ORG,
+                "findings",
+                from_time=aware,
+                to_time=datetime(2026, 10, 25, tzinfo=timezone(timedelta(hours=2))),
+            )
+            assert page.settled_until == HORIZON
+        assert len(server.requests) == 1
+    with Server(lambda request, index: export_reply(index)) as server:
+        async with session(mode, server.url) as client:
+            for max_pages in [0, 1_001]:
+                with pytest.raises(ValueError):
+                    await collect_exports(client, [], max_pages=max_pages)
+            with pytest.raises(ValueError):
+                await collect_exports(client, [], cursor="")
+            naive = datetime(2026, 10, 1)
+            with pytest.raises(ValueError):
+                await collect_exports(client, [], from_time=naive)
+            with pytest.raises(ValueError):
+                await collect_exports(client, [], to_time=naive)
+            refusals: list[tuple[str, dict[str, Any]]] = [
+                ("nonsense", {}),
+                ("findings", {"format": "xml"}),
+                ("findings", {"cursor": ""}),
+                ("findings", {"from_time": naive}),
+            ]
+            for dataset, refused in refusals:
+                query = {"from_time": aware, "to_time": HORIZON, **refused}
+                with pytest.raises(ValueError):
+                    await call(client, "export_reviews", ORG, dataset, **query)
+        assert server.requests == []
 
 
 @MODES
