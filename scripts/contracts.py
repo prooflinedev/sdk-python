@@ -29,7 +29,13 @@ def main() -> None:
             "The generated JSON operations must match the twenty-one public JSON token routes."
         )
     tree = ast.parse((ROOT / "proofline/client.py").read_text())
-    helpers = {"close", "aclose", "iter_reviews", "wait_for_review"}
+    helpers = {
+        "close",
+        "aclose",
+        "iter_reviews",
+        "iter_pull_request_reviews",
+        "wait_for_review",
+    }
     clients = {
         node.name: {
             member.name
