@@ -7,14 +7,8 @@ from .agent_session_prompt_type_0 import AgentSessionPromptType0
 from .agent_session_prompt_type_1 import AgentSessionPromptType1
 from .agent_session_target import AgentSessionTarget
 from .agent_vendor import AgentVendor
-from .approval_gap import ApprovalGap
 from .assessment_projection import AssessmentProjection
-from .attributed_condition_view import AttributedConditionView
 from .author_choice import AuthorChoice
-from .authority import Authority
-from .availability_type_0 import AvailabilityType0
-from .change_attribution_view import ChangeAttributionView
-from .change_count_view import ChangeCountView
 from .change_diagram_kind_view import ChangeDiagramKindView
 from .change_diagram_outcome_type_0 import ChangeDiagramOutcomeType0
 from .change_diagram_view import ChangeDiagramView
@@ -29,7 +23,6 @@ from .comment_reaction import CommentReaction
 from .comment_reaction_view import CommentReactionView
 from .commit_review_request import CommitReviewRequest
 from .commit_review_response import CommitReviewResponse
-from .complete_record_view import CompleteRecordView
 from .coverage_refused import CoverageRefused
 from .coverage_upload_request import CoverageUploadRequest
 from .coverage_upload_response import CoverageUploadResponse
@@ -38,20 +31,15 @@ from .customer_assessment_detail import CustomerAssessmentDetail
 from .customer_check import CustomerCheck
 from .customer_checks import CustomerChecks
 from .customer_code_assessment import CustomerCodeAssessment
-from .customer_decision import CustomerDecision
-from .customer_decision_basis import CustomerDecisionBasis
 from .customer_evidence_ref import CustomerEvidenceRef
 from .customer_finding import CustomerFinding
 from .customer_finding_validation import CustomerFindingValidation
 from .customer_review_detail import CustomerReviewDetail
 from .dataset import Dataset
-from .declared_reach_outcome import DeclaredReachOutcome
-from .declared_reach_view import DeclaredReachView
 from .deep_review_escalation import DeepReviewEscalation
 from .deep_review_escalation_status import DeepReviewEscalationStatus
 from .domain_view import DomainView
 from .earlier_open_finding import EarlierOpenFinding
-from .evidence_view import EvidenceView
 from .export_evidence_kind import ExportEvidenceKind
 from .export_evidence_ref import ExportEvidenceRef
 from .export_finding_lifecycle import ExportFindingLifecycle
@@ -90,14 +78,11 @@ from .finding_rule_revision_view import FindingRuleRevisionView
 from .finding_support import FindingSupport
 from .finding_validations_export_row import FindingValidationsExportRow
 from .findings_export_row import FindingsExportRow
-from .gate_state import GateState
 from .gate_status import GateStatus
 from .local_reverification import LocalReverification
 from .local_reverification_outcome import LocalReverificationOutcome
 from .matched_local_finding import MatchedLocalFinding
 from .not_assessed_view import NotAssessedView
-from .occurrence_capture import OccurrenceCapture
-from .occurrence_question import OccurrenceQuestion
 from .open_finding_counts import OpenFindingCounts
 from .open_item_environment import OpenItemEnvironment
 from .open_items_gap_reason import OpenItemsGapReason
@@ -108,21 +93,16 @@ from .open_items_threads_type_0 import OpenItemsThreadsType0
 from .open_items_threads_type_1 import OpenItemsThreadsType1
 from .open_items_view import OpenItemsView
 from .outcome import Outcome
-from .override import Override
 from .pass_projection import PassProjection
 from .patch_review_request import PatchReviewRequest
 from .patch_review_response import PatchReviewResponse
 from .patch_trigger_source import PatchTriggerSource
 from .patch_verification import PatchVerification
-from .permission_view import PermissionView
 from .plan_projection import PlanProjection
 from .problem import Problem
 from .prose import Prose
 from .prose_outcome_type_0 import ProseOutcomeType0
 from .pull_request_merge_gate import PullRequestMergeGate
-from .reach_gap_view import ReachGapView
-from .reach_step_view import ReachStepView
-from .reached_entity_view import ReachedEntityView
 from .refresh_view import RefreshView
 from .refused_environment import RefusedEnvironment
 from .related_review import RelatedReview
@@ -140,7 +120,6 @@ from .review_routing_view_type_0 import ReviewRoutingViewType0
 from .review_routing_view_type_1 import ReviewRoutingViewType1
 from .review_routing_view_type_2 import ReviewRoutingViewType2
 from .review_summary import ReviewSummary
-from .reviewed_tree_citation_view import ReviewedTreeCitationView
 from .reviews_export_row import ReviewsExportRow
 from .routing_finding_view import RoutingFindingView
 from .rule_source import RuleSource
@@ -160,10 +139,6 @@ from .run_now_refusal_view_type_11 import RunNowRefusalViewType11
 from .run_now_refused import RunNowRefused
 from .run_now_request import RunNowRequest
 from .run_now_response import RunNowResponse
-from .specialist_assessment_execution import SpecialistAssessmentExecution
-from .specialist_execution_view import SpecialistExecutionView
-from .specialist_output_projection import SpecialistOutputProjection
-from .specialist_pass_execution import SpecialistPassExecution
 from .spend_account_kind import SpendAccountKind
 from .spend_export_row import SpendExportRow
 from .start_session import StartSession
@@ -171,8 +146,6 @@ from .stop_response import StopResponse
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
 from .summary_route import SummaryRoute
-from .terraform_plan_view import TerraformPlanView
-from .terraform_roots_view import TerraformRootsView
 from .thread_observation_freshness import ThreadObservationFreshness
 from .thread_observation_view import ThreadObservationView
 from .thread_provider_state import ThreadProviderState
@@ -191,14 +164,8 @@ __all__ = (
     "AgentSessionPromptType1",
     "AgentSessionTarget",
     "AgentVendor",
-    "ApprovalGap",
     "AssessmentProjection",
-    "AttributedConditionView",
     "AuthorChoice",
-    "Authority",
-    "AvailabilityType0",
-    "ChangeAttributionView",
-    "ChangeCountView",
     "ChangeDiagramKindView",
     "ChangeDiagramOutcomeType0",
     "ChangeDiagramView",
@@ -213,7 +180,6 @@ __all__ = (
     "CommentReactionView",
     "CommitReviewRequest",
     "CommitReviewResponse",
-    "CompleteRecordView",
     "CoverageRefused",
     "CoverageUploadRequest",
     "CoverageUploadResponse",
@@ -222,20 +188,15 @@ __all__ = (
     "CustomerCheck",
     "CustomerChecks",
     "CustomerCodeAssessment",
-    "CustomerDecision",
-    "CustomerDecisionBasis",
     "CustomerEvidenceRef",
     "CustomerFinding",
     "CustomerFindingValidation",
     "CustomerReviewDetail",
     "Dataset",
-    "DeclaredReachOutcome",
-    "DeclaredReachView",
     "DeepReviewEscalation",
     "DeepReviewEscalationStatus",
     "DomainView",
     "EarlierOpenFinding",
-    "EvidenceView",
     "ExportEvidenceKind",
     "ExportEvidenceRef",
     "ExportFindingLifecycle",
@@ -274,14 +235,11 @@ __all__ = (
     "FindingsExportRow",
     "FindingSupport",
     "FindingValidationsExportRow",
-    "GateState",
     "GateStatus",
     "LocalReverification",
     "LocalReverificationOutcome",
     "MatchedLocalFinding",
     "NotAssessedView",
-    "OccurrenceCapture",
-    "OccurrenceQuestion",
     "OpenFindingCounts",
     "OpenItemEnvironment",
     "OpenItemsGapReason",
@@ -292,21 +250,16 @@ __all__ = (
     "OpenItemsThreadUnknown",
     "OpenItemsView",
     "Outcome",
-    "Override",
     "PassProjection",
     "PatchReviewRequest",
     "PatchReviewResponse",
     "PatchTriggerSource",
     "PatchVerification",
-    "PermissionView",
     "PlanProjection",
     "Problem",
     "Prose",
     "ProseOutcomeType0",
     "PullRequestMergeGate",
-    "ReachedEntityView",
-    "ReachGapView",
-    "ReachStepView",
     "RefreshView",
     "RefusedEnvironment",
     "RelatedReview",
@@ -317,7 +270,6 @@ __all__ = (
     "ReviewActions",
     "ReviewDepth",
     "ReviewDiffStats",
-    "ReviewedTreeCitationView",
     "ReviewFilters",
     "ReviewOpenItems",
     "ReviewPage",
@@ -344,10 +296,6 @@ __all__ = (
     "RunNowRefused",
     "RunNowRequest",
     "RunNowResponse",
-    "SpecialistAssessmentExecution",
-    "SpecialistExecutionView",
-    "SpecialistOutputProjection",
-    "SpecialistPassExecution",
     "SpendAccountKind",
     "SpendExportRow",
     "StartSession",
@@ -355,8 +303,6 @@ __all__ = (
     "SubjectAuthorization",
     "SubjectView",
     "SummaryRoute",
-    "TerraformPlanView",
-    "TerraformRootsView",
     "ThreadObservationFreshness",
     "ThreadObservationView",
     "ThreadProviderState",

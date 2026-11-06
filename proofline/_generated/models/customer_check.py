@@ -9,7 +9,6 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
-    from ..models.change_attribution_view import ChangeAttributionView
     from ..models.check_file import CheckFile
 
 
@@ -32,11 +31,6 @@ class CustomerCheck:
         outcome (str): The outcome the receipt recorded, which is the outcome a deployment
              gate weighed: `READY`, `BLOCKED`, `UNRESOLVED`, `UNAVAILABLE`,
              `NOT_APPLICABLE` or `NOT_ASKED`. A verdict never rewrites it.
-        change_attribution (ChangeAttributionView | None | Unset): Which conditions behind the outcome the change
-            brought and which were
-             already at the review's base revision. It never changes the outcome:
-             a condition already at the base is pre-existing, not safe. Absent for
-             a check whose evaluator does not compare the two revisions.
         detail (None | str | Unset): Why World refused the check, or otherwise World's recorded explanation
              of the result. Null when neither is recorded.
         evaluated_at (None | str | Unset): When World evaluated this answer. A reused answer is evidence from
@@ -57,7 +51,6 @@ class CustomerCheck:
     )
     name: str
     outcome: str
-    change_attribution: ChangeAttributionView | None | Unset = UNSET
     detail: None | str | Unset = UNSET
     evaluated_at: None | str | Unset = UNSET
     unresolved_reason: (
@@ -70,8 +63,6 @@ class CustomerCheck:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.change_attribution_view import ChangeAttributionView  # noqa: PLC0415
-
         files = []
         for files_item_data in self.files:
             files_item = files_item_data.to_dict()
@@ -89,14 +80,6 @@ class CustomerCheck:
         name = self.name
 
         outcome = self.outcome
-
-        change_attribution: dict[str, Any] | None | Unset
-        if isinstance(self.change_attribution, Unset):
-            change_attribution = UNSET
-        elif isinstance(self.change_attribution, ChangeAttributionView):
-            change_attribution = self.change_attribution.to_dict()
-        else:
-            change_attribution = self.change_attribution
 
         detail: None | str | Unset
         if isinstance(self.detail, Unset):
@@ -132,8 +115,6 @@ class CustomerCheck:
                 "outcome": outcome,
             }
         )
-        if change_attribution is not UNSET:
-            field_dict["change_attribution"] = change_attribution
         if detail is not UNSET:
             field_dict["detail"] = detail
         if evaluated_at is not UNSET:
@@ -145,7 +126,6 @@ class CustomerCheck:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.change_attribution_view import ChangeAttributionView  # noqa: PLC0415
         from ..models.check_file import CheckFile  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -223,23 +203,6 @@ class CustomerCheck:
         name = d.pop("name")
 
         outcome = d.pop("outcome")
-
-        def _parse_change_attribution(data: object) -> ChangeAttributionView | None | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                change_attribution_type_0 = ChangeAttributionView.from_dict(data)
-
-                return change_attribution_type_0
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            return cast(ChangeAttributionView | None | Unset, data)
-
-        change_attribution = _parse_change_attribution(d.pop("change_attribution", UNSET))
 
         def _parse_detail(data: object) -> None | str | Unset:
             if data is None:
@@ -323,7 +286,6 @@ class CustomerCheck:
             lifecycle=lifecycle,
             name=name,
             outcome=outcome,
-            change_attribution=change_attribution,
             detail=detail,
             evaluated_at=evaluated_at,
             unresolved_reason=unresolved_reason,

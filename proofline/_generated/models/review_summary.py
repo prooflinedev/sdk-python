@@ -57,6 +57,9 @@ class ReviewSummary:
              never display text. Absent when GitHub named no author.
         pull_request_author_login (None | str | Unset): Provider display metadata for the pull request author, not the
             rerun requester.
+        pull_request_author_name (None | str | Unset): The author's GitHub profile name, when known. Lead with it; the
+            login
+             is the fallback. Display metadata, never identity.
         pull_request_author_url (None | str | Unset): The author's profile on the deployment's GitHub host. Absent when
             no author login is known.
         pull_request_number (int | None | Unset): The pull request number. Absent for a deployment or patch review.
@@ -99,6 +102,7 @@ class ReviewSummary:
     pull_request_author_avatar_url: None | str | Unset = UNSET
     pull_request_author_github_user_id: int | None | Unset = UNSET
     pull_request_author_login: None | str | Unset = UNSET
+    pull_request_author_name: None | str | Unset = UNSET
     pull_request_author_url: None | str | Unset = UNSET
     pull_request_number: int | None | Unset = UNSET
     pull_request_state: None | str | Unset = UNSET
@@ -184,6 +188,12 @@ class ReviewSummary:
             pull_request_author_login = UNSET
         else:
             pull_request_author_login = self.pull_request_author_login
+
+        pull_request_author_name: None | str | Unset
+        if isinstance(self.pull_request_author_name, Unset):
+            pull_request_author_name = UNSET
+        else:
+            pull_request_author_name = self.pull_request_author_name
 
         pull_request_author_url: None | str | Unset
         if isinstance(self.pull_request_author_url, Unset):
@@ -287,6 +297,8 @@ class ReviewSummary:
             field_dict["pull_request_author_github_user_id"] = pull_request_author_github_user_id
         if pull_request_author_login is not UNSET:
             field_dict["pull_request_author_login"] = pull_request_author_login
+        if pull_request_author_name is not UNSET:
+            field_dict["pull_request_author_name"] = pull_request_author_name
         if pull_request_author_url is not UNSET:
             field_dict["pull_request_author_url"] = pull_request_author_url
         if pull_request_number is not UNSET:
@@ -425,6 +437,17 @@ class ReviewSummary:
             d.pop("pull_request_author_login", UNSET)
         )
 
+        def _parse_pull_request_author_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        pull_request_author_name = _parse_pull_request_author_name(
+            d.pop("pull_request_author_name", UNSET)
+        )
+
         def _parse_pull_request_author_url(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -561,6 +584,7 @@ class ReviewSummary:
             pull_request_author_avatar_url=pull_request_author_avatar_url,
             pull_request_author_github_user_id=pull_request_author_github_user_id,
             pull_request_author_login=pull_request_author_login,
+            pull_request_author_name=pull_request_author_name,
             pull_request_author_url=pull_request_author_url,
             pull_request_number=pull_request_number,
             pull_request_state=pull_request_state,

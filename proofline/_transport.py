@@ -22,7 +22,7 @@ from pydantic import SecretStr
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
 
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 FULL_WEEKDAY = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"

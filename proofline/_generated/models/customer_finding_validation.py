@@ -25,6 +25,8 @@ class CustomerFindingValidation:
         actor_github_user_id (int | None | Unset): The actor's stable GitHub user ID. Null for the automatic decision.
         actor_login (None | str | Unset): The actor's GitHub login, a display label to render as text. Null for
              the automatic decision.
+        actor_name (None | str | Unset): The actor's GitHub profile name, when known. Lead with it; the login
+             is the fallback. Null for the automatic decision.
         covering_author_kind (None | str | Unset): For `ALREADY_COVERED`, `HUMAN` or `BOT`. Null for every other
             decision.
         covering_author_login (None | str | Unset): For `ALREADY_COVERED`, the login of whoever wrote the covering
@@ -42,6 +44,7 @@ class CustomerFindingValidation:
     validation: str
     actor_github_user_id: int | None | Unset = UNSET
     actor_login: None | str | Unset = UNSET
+    actor_name: None | str | Unset = UNSET
     covering_author_kind: None | str | Unset = UNSET
     covering_author_login: None | str | Unset = UNSET
     covering_comment_created_at: datetime.datetime | None | Unset = UNSET
@@ -66,6 +69,12 @@ class CustomerFindingValidation:
             actor_login = UNSET
         else:
             actor_login = self.actor_login
+
+        actor_name: None | str | Unset
+        if isinstance(self.actor_name, Unset):
+            actor_name = UNSET
+        else:
+            actor_name = self.actor_name
 
         covering_author_kind: None | str | Unset
         if isinstance(self.covering_author_kind, Unset):
@@ -106,6 +115,8 @@ class CustomerFindingValidation:
             field_dict["actor_github_user_id"] = actor_github_user_id
         if actor_login is not UNSET:
             field_dict["actor_login"] = actor_login
+        if actor_name is not UNSET:
+            field_dict["actor_name"] = actor_name
         if covering_author_kind is not UNSET:
             field_dict["covering_author_kind"] = covering_author_kind
         if covering_author_login is not UNSET:
@@ -143,6 +154,15 @@ class CustomerFindingValidation:
             return cast(None | str | Unset, data)
 
         actor_login = _parse_actor_login(d.pop("actor_login", UNSET))
+
+        def _parse_actor_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        actor_name = _parse_actor_name(d.pop("actor_name", UNSET))
 
         def _parse_covering_author_kind(data: object) -> None | str | Unset:
             if data is None:
@@ -196,6 +216,7 @@ class CustomerFindingValidation:
             validation=validation,
             actor_github_user_id=actor_github_user_id,
             actor_login=actor_login,
+            actor_name=actor_name,
             covering_author_kind=covering_author_kind,
             covering_author_login=covering_author_login,
             covering_comment_created_at=covering_comment_created_at,
