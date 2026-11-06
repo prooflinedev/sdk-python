@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.metadata
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -18,6 +18,7 @@ RUFF_VERSION = "0.14.3"
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENT = ROOT / "openapi.public.json"
 OUTPUT = ROOT / "proofline" / "_generated"
+HTTP_METHODS = {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
 
 
 def json_operations(document: dict) -> dict:
@@ -26,6 +27,8 @@ def json_operations(document: dict) -> dict:
     for path, item in document["paths"].items():
         operations = {}
         for method, operation in item.items():
+            if method not in HTTP_METHODS:
+                continue
             success: dict = next(
                 (
                     response
@@ -73,7 +76,7 @@ def json_operations(document: dict) -> dict:
                 raise SystemExit("JSON convenience generation requires a named JSON response")
             operations[method] = operation
         if operations:
-            paths[path] = operations
+            paths[path] = {**{k: v for k, v in item.items() if k not in HTTP_METHODS}, **operations}
     return {**document, "paths": paths}
 
 
@@ -82,45 +85,65 @@ def generate(destination: Path) -> None:
         raise SystemExit(f"Generation requires openapi-python-client=={VERSION}.")
     if importlib.metadata.version("ruff") != RUFF_VERSION:
         raise SystemExit(f"Generation requires ruff=={RUFF_VERSION}.")
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     document = json.loads(DOCUMENT.read_text())
+    with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
+        json_document = Path(temporary) / "openapi.json"
+        json_document.write_text(json.dumps(json_operations(document)))
+        generate_json(destination, json_document)
+
+
+def check_version() -> None:
+    document = json.loads(DOCUMENT.read_text())
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     package_version = tuple(map(int, version.split(".")))
     api_version = tuple(map(int, document["info"]["version"].split(".")))
     if package_version[:2] != api_version[:2] or package_version[2] < api_version[2]:
         raise SystemExit(
             "The SDK must follow the public API major/minor and not precede its patch."
         )
-    env = dict(os.environ)
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-    with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
-        json_document = Path(temporary) / "openapi.json"
-        json_document.write_text(json.dumps(json_operations(document)))
-        generate_json(destination, json_document, env)
 
 
-def generate_json(destination: Path, document: Path, env: dict) -> None:
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from openapi_python_client.cli import app; app()",
-            "generate",
-            "--path",
-            str(document),
-            "--config",
-            str(ROOT / "generator.json"),
-            "--custom-template-path",
-            str(ROOT / "templates"),
-            "--meta",
-            "none",
-            "--fail-on-warning",
-            "--output-path",
-            str(destination),
-        ],
-        check=True,
-        cwd=ROOT,
-        env=env,
+def generate_json(destination: Path, document: Path) -> None:
+    from openapi_python_client import Config, GeneratorData, GeneratorError, MetaType, Project
+    from openapi_python_client.config import ConfigFile
+
+    config = Config.from_sources(
+        ConfigFile.load_from_path(ROOT / "generator.json"),
+        MetaType.NONE,
+        document,
+        "utf-8",
+        False,
+        destination,
     )
+    data = GeneratorData.from_dict(json.loads(document.read_bytes()), config=config)
+    if isinstance(data, GeneratorError):
+        raise SystemExit(data)
+    project = Project(openapi=data, config=config, custom_template_path=ROOT / "templates")
+    if errors := project.build():
+        raise SystemExit(errors)
+
+    # Existing public adapters keep their signatures, pagination and stream behavior.
+    clients = ast.parse((ROOT / "proofline/client.py").read_bytes())
+    custom = {
+        cls.name: {
+            method.name
+            for method in cls.body
+            if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for cls in clients.body
+        if isinstance(cls, ast.ClassDef)
+    }
+    endpoints = [
+        (tag, endpoint)
+        for tag, group in sorted(data.endpoint_collections_by_tag.items())
+        for endpoint in sorted(group.endpoints, key=lambda operation: operation.name)
+    ]
+    facade = project.env.get_template("operations.py.jinja").render(
+        endpoints=endpoints,
+        sync=custom["ProoflineClient"],
+        asynchronous=custom["AsyncProoflineClient"],
+    )
+    (destination / "api/operations.py").write_text(facade)
     body = json.loads(document.read_text())["paths"][
         "/api/v1/organizations/{org_id}/repositories/{repo_id}/pull-requests/{number}/review"
     ]["post"].get("requestBody")
@@ -184,6 +207,7 @@ def main() -> None:
         generated = Path(temporary) / "generated"
         generate(generated)
         if args.check:
+            check_version()
             if files(generated) != files(OUTPUT):
                 raise SystemExit("The generated Python API differs; run scripts/generate.py.")
         else:

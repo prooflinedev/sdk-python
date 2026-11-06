@@ -8,10 +8,12 @@ import logging
 import socket
 import threading
 import time
+import tomllib
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -124,6 +126,8 @@ class Clock:
 async def test_all_public_operations_use_generated_models_and_scoped_paths(
     mode: str, terraform: Any
 ) -> None:
+    metadata = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    package_version = tomllib.loads(metadata.read_text())["project"]["version"]
     prefix = f"/api/v1/organizations/{ORG}"
     paths = [
         ("GET", f"{prefix}/reviews", page(), ReviewPage),
@@ -281,7 +285,7 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(
         assert len({request.peer_port for request in server.requests}) == 1
         for request in server.requests:
             assert request.headers["Authorization"] == f"Bearer {TOKEN}"
-            assert request.headers["User-Agent"] == "proofline-python/1.0.3"
+            assert request.headers["User-Agent"] == f"proofline-python/{package_version}"
             assert request.headers["Accept-Encoding"] == "identity"
             assert "Cookie" not in request.headers
             assert "Content-Type" not in request.headers
@@ -606,9 +610,11 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with Server(
-        lambda request, index: Reply(429, {"detail": "Rate limit."}, {"Retry-After": "2"})
-        if index == 0
-        else Reply(body=finding())
+        lambda request, index: (
+            Reply(429, {"detail": "Rate limit."}, {"Retry-After": "2"})
+            if index == 0
+            else Reply(body=finding())
+        )
     ) as server:
         started = time.monotonic()
         async with session(mode, server.url) as client:
@@ -627,9 +633,11 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
     monkeypatch.setattr(_transport, "datetime", Calendar)
     header = (instant + timedelta(seconds=2)).strftime("%A, %d-%b-%y %H:%M:%S GMT")
     with Server(
-        lambda request, index: Reply(429, {"detail": "Rate limit."}, {"Retry-After": header})
-        if index == 0
-        else Reply(body=finding())
+        lambda request, index: (
+            Reply(429, {"detail": "Rate limit."}, {"Retry-After": header})
+            if index == 0
+            else Reply(body=finding())
+        )
     ) as server:
         started = time.monotonic()
         async with session(mode, server.url) as client:
@@ -710,9 +718,11 @@ async def test_long_retry_after_is_not_retried_early(
         "Sun, 06 Nov 1994 08:49:37 GMT",
     ]:
         with Server(
-            lambda request, index: Reply(429, {"detail": "Rate limit."}, {"Retry-After": header})
-            if index == 0
-            else Reply(body=finding())
+            lambda request, index: (
+                Reply(429, {"detail": "Rate limit."}, {"Retry-After": header})
+                if index == 0
+                else Reply(body=finding())
+            )
         ) as server:
             async with session(mode, server.url) as client:
                 assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
@@ -792,6 +802,16 @@ async def test_wait_retains_evidence_gaps_after_running_review(
                 "name": "synthetic-check",
                 "outcome": "UNRESOLVED",
                 "lifecycle": "SHADOW",
+                "files": [
+                    {
+                        "revision": "PROPOSED_CODE_REVISION",
+                        "path": {"untrusted_text": "<b>deploy</b>.yml"},
+                    },
+                    {
+                        "revision": "BASE_CODE_REVISION",
+                        "path": {"untrusted_text": "deploy.yml"},
+                    },
+                ],
                 "unresolved_reason": "UNSUPPORTED",
                 "detail": PRIVATE,
             }
@@ -812,6 +832,11 @@ async def test_wait_retains_evidence_gaps_after_running_review(
         assert gap.checks[0].unresolved_reason == "UNSUPPORTED"
         assert gap.checks[0].detail == PRIVATE
         assert gap.checks[0].lifecycle == "SHADOW"
+        files = result.review.assessments[0].checks.families[0].files
+        assert [(file.revision, file.path.untrusted_text) for file in files] == [
+            ("PROPOSED_CODE_REVISION", "<b>deploy</b>.yml"),
+            ("BASE_CODE_REVISION", "deploy.yml"),
+        ]
         assert PRIVATE not in repr(result) + repr(gap)
         assert clock.delays == [5, 10]
 
@@ -927,7 +952,12 @@ async def test_completion_uses_all_declared_lifecycles_and_recorded_checks(
             body = review()
             body["finding_count"] = 1
             body["assessments"][0]["findings"] = [finding()]
-            check = {"name": "family", "outcome": check_outcome, "lifecycle": lifecycle}
+            check = {
+                "name": "family",
+                "outcome": check_outcome,
+                "lifecycle": lifecycle,
+                "files": [],
+            }
             if check_outcome == "UNRESOLVED":
                 check["unresolved_reason"] = "REGENERATE_SCENARIO"
             body["assessments"][0]["checks"]["families"] = [check]
@@ -1054,17 +1084,19 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
 
 
 @MODES
-async def test_retry_after_is_bounded_by_wait_deadline(mode: str) -> None:
+async def test_retry_after_is_bounded_by_wait_deadline(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
     with Server(
-        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "2"})
+        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "20"})
     ) as server:
         async with session(mode, server.url) as client:
-            started = time.monotonic()
-            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.05)
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=10)
             assert result.status == "TIMED_OUT"
             assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
-            assert time.monotonic() - started < 0.5
         assert len(server.requests) == 1
+        assert clock.delays == [10]
 
 
 @MODES

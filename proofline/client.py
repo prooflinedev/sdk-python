@@ -38,6 +38,7 @@ from ._generated.api.default import (
     stop_review,
     upload_coverage_reports,
 )
+from ._generated.api.operations import AsyncOperations, Operations
 from ._generated.client import AuthenticatedClient
 from ._generated.models.agent_session import AgentSession
 from ._generated.models.agent_session_prompt_type_0 import AgentSessionPromptType0
@@ -118,22 +119,8 @@ def _decoded(
     expected: type[T] | _ReviewRoutingModels | _FindingFixPromptModels | _AgentSessionPromptModels,
 ) -> T:
     if not isinstance(response.parsed, expected):
-        raise _malformed()
+        raise _transport.invalid_response()
     return cast(T, response.parsed)
-
-
-def _malformed() -> ProoflineError:
-    return ProoflineError(
-        0, "urn:proofline:sdk:invalid-response", "Proofline returned an invalid API response."
-    )
-
-
-def _network(error: httpx.HTTPError) -> ProoflineError:
-    if isinstance(error, httpx.TimeoutException):
-        return _transport.timeout_error()
-    return ProoflineError(
-        0, "urn:proofline:sdk:transport-unavailable", "Could not reach the Proofline API."
-    )
 
 
 def _configuration(
@@ -164,10 +151,10 @@ def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
 
 def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
     if not isinstance(page.truncated, bool):
-        raise _malformed()
+        raise _transport.invalid_response()
     if not page.truncated:
         if isinstance(page.next_cursor, str) and page.next_cursor:
-            raise _malformed()
+            raise _transport.invalid_response()
         return None
     cursor = page.next_cursor
     if not isinstance(cursor, str) or not cursor or cursor in seen:
@@ -186,7 +173,7 @@ def _pagination_limit() -> ProoflineError:
     )
 
 
-class ProoflineClient:
+class ProoflineClient(Operations):
     """Synchronous typed HTTP operations.
 
     Name resolution, connection, TLS and socket operations stop at the configured
@@ -242,14 +229,8 @@ class ProoflineClient:
         *args: object,
         **kwargs: object,
     ) -> T:
-        try:
+        with _transport.operation_errors():
             return _decoded(operation(*args, client=self._api, **kwargs), expected)
-        except ProoflineError:
-            raise
-        except httpx.HTTPError as error:
-            raise _network(error) from None
-        except Exception:
-            raise _malformed() from None
 
     def export_reviews(
         self,
@@ -286,7 +267,7 @@ class ProoflineClient:
             )
             return decode_export(response, format)
         except httpx.HTTPError as error:
-            raise _network(error) from None
+            raise _transport.network_error(error) from None
 
     def list_reviews(self, organization_id: UUID, **filters: Unpack[ReviewFilters]) -> ReviewPage:
         return self._call(list_reviews.sync_detailed, ReviewPage, organization_id, **filters)
@@ -526,7 +507,7 @@ class ProoflineClient:
             _transport.DEADLINE.reset(deadline)
 
 
-class AsyncProoflineClient:
+class AsyncProoflineClient(AsyncOperations):
     def __init__(
         self,
         token: str | SecretStr | None = None,
@@ -576,14 +557,8 @@ class AsyncProoflineClient:
         *args: object,
         **kwargs: object,
     ) -> T:
-        try:
+        with _transport.operation_errors():
             return _decoded(await operation(*args, client=self._api, **kwargs), expected)
-        except ProoflineError:
-            raise
-        except httpx.HTTPError as error:
-            raise _network(error) from None
-        except Exception:
-            raise _malformed() from None
 
     async def export_reviews(
         self,
@@ -620,7 +595,7 @@ class AsyncProoflineClient:
             )
             return decode_export(response, format)
         except httpx.HTTPError as error:
-            raise _network(error) from None
+            raise _transport.network_error(error) from None
 
     async def list_reviews(
         self, organization_id: UUID, **filters: Unpack[ReviewFilters]

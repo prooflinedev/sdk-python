@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import ast
 import json
+import sys
 from pathlib import Path
 
-from generate import json_operations
+from generate import HTTP_METHODS, json_operations
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,34 +18,27 @@ def main() -> None:
         operation["operationId"]
         for item in json_operations(document)["paths"].values()
         for method, operation in item.items()
-        if method in {"get", "post", "put", "patch", "delete"}
+        if method in HTTP_METHODS
     }
     generated = {
         path.stem
-        for path in (ROOT / "proofline/_generated/api/default").glob("*.py")
+        for path in (ROOT / "proofline/_generated/api").glob("*/*.py")
         if path.name != "__init__.py"
     }
-    if declared != generated or len(declared) != 21:
-        raise SystemExit(
-            "The generated JSON operations must match the twenty-one public JSON token routes."
-        )
-    tree = ast.parse((ROOT / "proofline/client.py").read_text())
-    helpers = {"close", "aclose", "iter_reviews", "wait_for_review"}
-    clients = {
-        node.name: {
-            member.name
-            for member in node.body
-            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and not member.name.startswith("_")
-            and member.name not in helpers
+    if declared != generated:
+        raise SystemExit("Generated JSON operations differ from the public contract.")
+    sys.path.insert(0, str(ROOT))
+    from proofline import AsyncProoflineClient, ProoflineClient
+
+    for client in (ProoflineClient, AsyncProoflineClient):
+        helpers = {"close", "aclose", "iter_reviews", "wait_for_review"}
+        exposed = {
+            name
+            for name in dir(client)
+            if not name.startswith("_") and name not in helpers and callable(getattr(client, name))
         }
-        for node in tree.body
-        if isinstance(node, ast.ClassDef)
-        and node.name in {"ProoflineClient", "AsyncProoflineClient"}
-    }
-    public = declared | {"export_reviews"}
-    if clients != {"ProoflineClient": public, "AsyncProoflineClient": public}:
-        raise SystemExit("Both client facades must expose the JSON operations and metadata export.")
+        if exposed != declared | {"export_reviews"}:
+            raise SystemExit(f"{client.__name__} operations differ from the public contract.")
     prohibited = {"safe", "passed", "clean"}
     for path in (ROOT / "proofline").rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):

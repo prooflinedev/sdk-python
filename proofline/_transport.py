@@ -8,6 +8,7 @@ import os
 import re
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Generator, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -21,7 +22,7 @@ from pydantic import SecretStr
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
 
-VERSION = "1.0.3"
+VERSION = "2.0.0"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 FULL_WEEKDAY = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
@@ -96,6 +97,32 @@ def base_url(value: str) -> str:
     except (ValueError, httpx.InvalidURL):
         raise ValueError("Use an HTTPS origin, or HTTP with a literal loopback address.") from None
     return value.rstrip("/")
+
+
+def invalid_response() -> ProoflineError:
+    return ProoflineError(
+        0, "urn:proofline:sdk:invalid-response", "Proofline returned an invalid API response."
+    )
+
+
+def network_error(error: httpx.HTTPError) -> ProoflineError:
+    if isinstance(error, httpx.TimeoutException):
+        return timeout_error()
+    return ProoflineError(
+        0, "urn:proofline:sdk:transport-unavailable", "Could not reach the Proofline API."
+    )
+
+
+@contextmanager
+def operation_errors() -> Iterator[None]:
+    try:
+        yield
+    except ProoflineError:
+        raise
+    except httpx.HTTPError as error:
+        raise network_error(error) from None
+    except Exception:
+        raise invalid_response() from None
 
 
 def timeout_error() -> ProoflineError:

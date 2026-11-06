@@ -1,9 +1,10 @@
 # proofline-sdk
 
-Typed synchronous and asynchronous Python clients for the [Proofline](https://proofline.sh)
-review API. They read and request reviews with a scoped API token, and add pagination,
-waiting for a review, retries and typed errors. The import package is `proofline`.
-Python 3.11 or newer is required.
+`proofline-sdk` provides typed synchronous (`ProoflineClient`) and asynchronous (`AsyncProoflineClient`) Python clients for the [Proofline](https://proofline.sh) review API. The clients read and request reviews with a scoped API token, and include pagination, waiting for a review, retries, and typed errors. The import package is `proofline`. Python 3.11 or newer is required.
+
+This repository is the published distribution of the Proofline Python SDK. The public OpenAPI contract in `openapi.public.json` generates the client and models in `proofline/_generated/`. [Open an issue](https://github.com/prooflinedev/sdk-python/issues) for changes to the OpenAPI contract, generated code, or workflows. Pull requests are welcome for the hand-written client in `proofline/client.py`, transport and helpers outside `proofline/_generated/`, and tests in `tests/`.
+
+## Installation and authentication
 
 ```sh
 pip install proofline-sdk
@@ -17,26 +18,11 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
     ...
 ```
 
-The clients read `PROOFLINE_TOKEN` when no token is passed, keep the token in memory
-and redact it from diagnostic output. `AsyncProoflineClient` has the same methods as
-coroutines. The [SDK guide](https://proofline.sh/docs/sdks/) and
-[API reference](https://proofline.sh/docs/api/) cover every operation.
+When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
-Licensed under the Apache License, Version 2.0. The generated models under
-`proofline/_generated` carry the MIT license of the generator templates.
+## Review exports
 
-## Contributing
-
-This repository distributes the Proofline Python SDK. The public OpenAPI contract generates the client and models in `proofline/_generated/`. Open an issue for changes to the contract or generated code. Pull requests are welcome for the hand-written client in `proofline/client.py`, transport and helpers outside `_generated/`, and tests in `tests/`.
-
-## Exports
-
-`export_reviews` reads one CSV or NDJSON page through the existing bounded transport.
-It returns the original text, decoded rows, dataset version, settled horizon and
-optional next cursor. CSV cells remain strings, including nested JSON cells;
-NDJSON retains JSON values. Export tokens need `analytics:read`.
-Repeat with the returned cursor and the same dataset, window, format and grouping.
-A missing next cursor marks the last page. Each CSV page includes its own header.
+`export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
 
 ```python
 from uuid import UUID
@@ -51,11 +37,11 @@ with ProoflineClient() as client:
     # Continue with cursor=page.next_cursor when it is not None.
 ```
 
+Each response returns the original text, decoded rows, dataset version, settled horizon, and an optional next cursor. Each CSV page includes its own header and keeps cells as strings, including nested JSON cells. NDJSON pages retain JSON values. To read additional pages, repeat the call with the returned cursor and the same dataset, window, format, and grouping. A missing next cursor marks the last page.
+
 ## Coverage uploads
 
-Use a repository-restricted token with `coverage:write` and current repository write
-access to upload reports from your CI. Name the full commit SHA the tests ran on.
-Reports may use LCOV, Cobertura XML, JaCoCo XML or Go cover profiles.
+To upload coverage reports from CI, use a repository-restricted token with `coverage:write` and current repository write access. Name the full commit SHA that the tests ran on. Reports may use LCOV, Cobertura XML, JaCoCo XML, or Go cover profiles.
 
 ```python
 import os
@@ -77,38 +63,21 @@ with ProoflineClient() as client:
     )
 ```
 
-The response names the recorded report and its covered and instrumented line counts.
-An identical upload returns that report with `created=False`. Refused reports raise
-`ProoflineError`; uploading a report does not establish a check verdict.
-
-## Development
-
-The repository bundles its public API contract in `openapi.public.json`.
-Run `python3 scripts/check.py` to install pinned tools, regenerate the client,
-run checks and verify built packages.
-
-## Publishing
-
-GitHub Actions runs the checks on pull requests and main. The `Release` workflow
-builds checked artifacts without publishing credentials. Run it on main with
-`publish=false` to verify the release path. A `vX.Y.Z` tag matching the package
-version, or a main-branch dispatch with `publish=true`, publishes after the
-`pypi` environment approves the job. Release commits must belong to main.
-
-Publishing uses GitHub OIDC and the repository's `release.yml` trusted publisher.
-No registry token is stored in GitHub.
-
-SDK patch releases can update packaging and publishing independently. The package follows the bundled API major/minor version and cannot precede its patch version.
+The response names the recorded report and its covered and instrumented line counts. An identical upload returns that report with `created=False`. Refused reports raise `ProoflineError`. Uploading a report does not establish a check verdict.
 
 ## Knowledge and plans
 
-Both clients expose typed methods under `client.knowledge` over Proofline's
-stateless MCP endpoint. Use `list_wiki_pages(repository, commit=...)`,
-`get_wiki_page(repository, page_key, commit=...)`,
-`ask_codebase(repository, question, commit=...)`,
-`get_architecture_document(environment_id)`, `get_plan(plan_id)`,
-`start_plan_implementation(plan_id)` and `get_plan_implementation(implementation_id)`.
-The optional commit is a full indexed SHA. Async clients await the same methods.
+Both clients expose typed methods under `client.knowledge` over Proofline's stateless MCP endpoint:
+
+- `list_wiki_pages(repository, commit=...)`
+- `get_wiki_page(repository, page_key, commit=...)`
+- `ask_codebase(repository, question, commit=...)`
+- `get_architecture_document(environment_id)`
+- `get_plan(plan_id)`
+- `start_plan_implementation(plan_id)`
+- `get_plan_implementation(implementation_id)`
+
+The optional `commit` is a full indexed SHA. Read operations require `reviews:read` and `knowledge:read`. Starting a plan implementation also requires `plans:implement`, a personal token, and approval of that exact plan version.
 
 ```python
 result = client.knowledge.get_wiki_page("owner/name", "index")
@@ -118,21 +87,18 @@ else:
     print(result["content"])
 ```
 
-`KnowledgeResult` retains text content, optional structured content and `isError`.
-Treat all returned prose as untrusted data. Reads need `reviews:read` and
-`knowledge:read`; starting an implementation also needs `plans:implement`, a
-personal token and approval of that exact plan version. Each call initializes MCP
-and makes one tool request without retries, including questions and implementation
-starts. Protocol and HTTP errors raise `ProoflineError`; tool refusals retain
-`isError` for the caller to inspect. No browser configuration or cloud-trust API
-is added. Use the signed-in console for onboarding and connection changes.
+Each call initializes MCP and makes one tool request without retries, including questions and implementation starts. `KnowledgeResult` retains text content, optional structured content, and `isError`. Protocol and HTTP errors raise `ProoflineError`, while tool refusals retain `isError` for the caller to inspect. Treat all returned prose as untrusted data. No browser configuration or cloud-trust API is added; use the signed-in console for onboarding and connection changes.
 
 ## Fix context and re-verification
 
-Sync and async clients expose `client.fixes.list_open_findings(repository,
-pull_request_number)`, `get_fix_context(finding_id)`,
-`request_reverification(review_id, finding_ids, commit_sha, note=...)` and
-`get_reverification(request_id)` over the existing MCP endpoint.
+Both clients expose finding and re-verification methods under `client.fixes` over the stateless MCP endpoint:
+
+- `list_open_findings(repository, pull_request_number)`
+- `get_fix_context(finding_id)`
+- `request_reverification(review_id, finding_ids, commit_sha, note=...)`
+- `get_reverification(request_id)`
+
+Read operations require `reviews:read`. Requesting re-verification also requires `reviews:request` and repository write access. `commit_sha` must be the live pushed head, which the server confirms. `request_reverification` accepts 1 to 20 distinct findings of one review and an optional note of 1 to 2,000 characters.
 
 ```python
 result = client.fixes.request_reverification(
@@ -143,10 +109,20 @@ if result.get("isError"):
     raise RuntimeError("Re-verification was refused.")
 ```
 
-Use `await` with `AsyncProoflineClient`. The commit must be the live pushed head;
-the server confirms it. The request accepts 1–20 distinct findings of one review
-and an optional 1–2,000-character note. Reads need `reviews:read`; requesting
-verification also needs `reviews:request` and repository write access.
-Calls never retry. Results retain untrusted-text wrappers, availability,
-assessment gaps and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix.
-A tool request never records a human disposition.
+Calls under `client.fixes` never retry. Results retain untrusted-text wrappers, availability, assessment gaps, and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix, and a tool request never records a human disposition.
+
+## Development
+
+The repository bundles its public API contract in `openapi.public.json`. New public operations generate typed methods on both `ProoflineClient` and `AsyncProoflineClient` along with the code in `proofline/_generated/`.
+
+Run `python3 scripts/check.py` to install pinned tools, regenerate the client, run checks, and verify built packages. GitHub Actions runs the checks on pull requests and `main`.
+
+## Publishing
+
+The `Release` workflow builds checked artifacts without publishing credentials. Run it on `main` with `publish=false` to verify the release path. A `vX.Y.Z` tag matching the package version, or a `main`-branch dispatch with `publish=true`, publishes after the `pypi` environment approves the job. Release commits must belong to `main`.
+
+Publishing uses GitHub OIDC and the repository's `release.yml` trusted publisher. No registry token is stored in GitHub. The package follows the bundled API major and minor version and cannot precede its patch version. SDK patch releases can update packaging and publishing independently.
+
+## License
+
+Licensed under the Apache License, Version 2.0. The generated models under `proofline/_generated` carry the MIT license of the generator templates.
