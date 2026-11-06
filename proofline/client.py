@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 from asyncio import sleep as async_sleep
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from asyncio import to_thread
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from time import monotonic, sleep
 from types import TracebackType
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
@@ -70,6 +71,7 @@ from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._transport import ProoflineError
+from .coverage import PathInput, coverage_request
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
@@ -411,6 +413,19 @@ class ProoflineClient(Operations):
             repository_id,
             body=body,
         )
+
+    def upload_coverage_files(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        paths: Iterable[PathInput],
+        *,
+        tested_sha: str | None = None,
+        root: PathInput | None = None,
+    ) -> CoverageUploadResponse:
+        """Upload coverage report files; ``tested_sha`` defaults to ``GITHUB_SHA``."""
+        body = coverage_request(paths, tested_sha=tested_sha, root=root)
+        return self.upload_coverage_reports(organization_id, repository_id, body=body)
 
     def request_file_review(
         self, organization_id: UUID, repository_id: UUID, *, body: FileReviewRequest
@@ -760,6 +775,19 @@ class AsyncProoflineClient(AsyncOperations):
             repository_id,
             body=body,
         )
+
+    async def upload_coverage_files(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        paths: Iterable[PathInput],
+        *,
+        tested_sha: str | None = None,
+        root: PathInput | None = None,
+    ) -> CoverageUploadResponse:
+        """Upload coverage report files; ``tested_sha`` defaults to ``GITHUB_SHA``."""
+        body = await to_thread(coverage_request, paths, tested_sha=tested_sha, root=root)
+        return await self.upload_coverage_reports(organization_id, repository_id, body=body)
 
     async def request_file_review(
         self, organization_id: UUID, repository_id: UUID, *, body: FileReviewRequest
