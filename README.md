@@ -63,6 +63,17 @@ with ProoflineClient() as client:
     )
 ```
 
+To skip reading the files yourself, pass their paths to `upload_coverage_files`. Each report is named by its path relative to `root` (the current directory by default), with forward slashes, and `tested_sha` defaults to `GITHUB_SHA` when it is not passed. A missing or malformed commit raises `ValueError` before any request is sent.
+
+```
+with ProoflineClient() as client:
+    report = client.upload_coverage_files(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        UUID(os.environ["PROOFLINE_REPOSITORY_ID"]),
+        ["python/lcov.info", "web/lcov.info"],
+    )
+```
+
 The response names the recorded report and its covered and instrumented line counts. An identical upload returns that report with `created=False`. Refused reports raise `ProoflineError`. Uploading a report does not establish a check verdict.
 
 ## Knowledge and plans
