@@ -46,8 +46,9 @@ class CustomerReviewDetail:
         finding_count (int): How many findings this review's assessments recorded, across all of them.
         id (UUID): The review's identifier.
         kind (str): `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, a review of local changes
-             sent as a patch, `COMMIT`, a review of pushed commits, or `FILES`,
-             complete selected files at one pushed commit.
+             sent as a patch, `COMMIT`, a review of pushed commits, `FILES`,
+             complete selected files at one pushed commit, or `MERGE_GROUP`, the
+             commit GitHub's merge queue built for a group of pull requests.
         public_key (str): The review's stable public address: `rev_` followed by its identifier without hyphens.
         publication (str): Whether the review reached the pull request: `PUBLISHED`, `WITHHELD`,
              `PUBLICATION_REQUESTED` or `PUBLICATION_REFUSED`. A review run from
@@ -122,6 +123,10 @@ class CustomerReviewDetail:
         merge_gate (None | PullRequestMergeGate | Unset): The deterministic policy for this exact repository/head, when
             opted in.
              Its captured review owner and GitHub bypass remain separate history.
+        merge_group_pull_request_numbers (list[int] | Unset): For a `MERGE_GROUP` review, the pull requests GitHub
+            queued in the
+             group, in number order. Absent for every other kind, and until
+             Proofline has read the group's members.
         open_items (None | OpenItemsView | Unset): What Proofline still has open for the reviewed head, counted from the
              current finding decisions. Absent while the review is `PENDING` or
              `RUNNING`.
@@ -222,6 +227,7 @@ class CustomerReviewDetail:
     is_deep_review: bool | Unset = UNSET
     local_reverifications: list[LocalReverification] | Unset = UNSET
     merge_gate: None | PullRequestMergeGate | Unset = UNSET
+    merge_group_pull_request_numbers: list[int] | Unset = UNSET
     open_items: None | OpenItemsView | Unset = UNSET
     open_items_observation: None | ReviewOpenItems | Unset = UNSET
     publication_detail: None | str | Unset = UNSET
@@ -429,6 +435,10 @@ class CustomerReviewDetail:
             merge_gate = self.merge_gate.to_dict()
         else:
             merge_gate = self.merge_gate
+
+        merge_group_pull_request_numbers: list[int] | Unset = UNSET
+        if not isinstance(self.merge_group_pull_request_numbers, Unset):
+            merge_group_pull_request_numbers = self.merge_group_pull_request_numbers
 
         open_items: dict[str, Any] | None | Unset
         if isinstance(self.open_items, Unset):
@@ -675,6 +685,8 @@ class CustomerReviewDetail:
             field_dict["local_reverifications"] = local_reverifications
         if merge_gate is not UNSET:
             field_dict["merge_gate"] = merge_gate
+        if merge_group_pull_request_numbers is not UNSET:
+            field_dict["merge_group_pull_request_numbers"] = merge_group_pull_request_numbers
         if open_items is not UNSET:
             field_dict["open_items"] = open_items
         if open_items_observation is not UNSET:
@@ -1026,6 +1038,10 @@ class CustomerReviewDetail:
             return cast(None | PullRequestMergeGate | Unset, data)
 
         merge_gate = _parse_merge_gate(d.pop("merge_gate", UNSET))
+
+        merge_group_pull_request_numbers = cast(
+            list[int], d.pop("merge_group_pull_request_numbers", UNSET)
+        )
 
         def _parse_open_items(data: object) -> None | OpenItemsView | Unset:
             if data is None:
@@ -1408,6 +1424,7 @@ class CustomerReviewDetail:
             is_deep_review=is_deep_review,
             local_reverifications=local_reverifications,
             merge_gate=merge_gate,
+            merge_group_pull_request_numbers=merge_group_pull_request_numbers,
             open_items=open_items,
             open_items_observation=open_items_observation,
             publication_detail=publication_detail,

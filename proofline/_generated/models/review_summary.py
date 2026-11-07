@@ -28,8 +28,9 @@ class ReviewSummary:
         finding_count (int): How many findings this review's assessments recorded, across all of them.
         id (UUID): The review's identifier.
         kind (str): `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, a review of local changes
-             sent as a patch, `COMMIT`, a review of pushed commits, or `FILES`,
-             complete selected files at one pushed commit.
+             sent as a patch, `COMMIT`, a review of pushed commits, `FILES`,
+             complete selected files at one pushed commit, or `MERGE_GROUP`, the
+             commit GitHub's merge queue built for a group of pull requests.
         public_key (str): The review's stable public address: `rev_` followed by its identifier without hyphens.
         publication (str): Whether the review reached the pull request: `PUBLISHED`, `WITHHELD`,
              `PUBLICATION_REQUESTED` or `PUBLICATION_REFUSED`. A review run from
@@ -48,6 +49,10 @@ class ReviewSummary:
              which is not a commit. Absent when the review recorded none.
         head_commit_url (None | str | Unset): The exact revision reviewed. A commit URL, never a branch URL: the
              branch moves, the reviewed input does not. Absent for a patch review.
+        merge_group_pull_request_numbers (list[int] | Unset): For a `MERGE_GROUP` review, the pull requests GitHub
+            queued in the
+             group, in number order. Absent for every other kind, and until
+             Proofline has read the group's members.
         publication_detail (None | str | Unset): Why a publication was refused, or how one failed. Server text.
         pull_request_author_avatar_url (None | str | Unset): Provider-supplied avatar URL. Login-derived `.png` URLs do
             not work for
@@ -98,6 +103,7 @@ class ReviewSummary:
     current_head_commit_sha: None | str | Unset = UNSET
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
+    merge_group_pull_request_numbers: list[int] | Unset = UNSET
     publication_detail: None | str | Unset = UNSET
     pull_request_author_avatar_url: None | str | Unset = UNSET
     pull_request_author_github_user_id: int | None | Unset = UNSET
@@ -164,6 +170,10 @@ class ReviewSummary:
             head_commit_url = UNSET
         else:
             head_commit_url = self.head_commit_url
+
+        merge_group_pull_request_numbers: list[int] | Unset = UNSET
+        if not isinstance(self.merge_group_pull_request_numbers, Unset):
+            merge_group_pull_request_numbers = self.merge_group_pull_request_numbers
 
         publication_detail: None | str | Unset
         if isinstance(self.publication_detail, Unset):
@@ -289,6 +299,8 @@ class ReviewSummary:
             field_dict["head_commit_sha"] = head_commit_sha
         if head_commit_url is not UNSET:
             field_dict["head_commit_url"] = head_commit_url
+        if merge_group_pull_request_numbers is not UNSET:
+            field_dict["merge_group_pull_request_numbers"] = merge_group_pull_request_numbers
         if publication_detail is not UNSET:
             field_dict["publication_detail"] = publication_detail
         if pull_request_author_avatar_url is not UNSET:
@@ -394,6 +406,10 @@ class ReviewSummary:
             return cast(None | str | Unset, data)
 
         head_commit_url = _parse_head_commit_url(d.pop("head_commit_url", UNSET))
+
+        merge_group_pull_request_numbers = cast(
+            list[int], d.pop("merge_group_pull_request_numbers", UNSET)
+        )
 
         def _parse_publication_detail(data: object) -> None | str | Unset:
             if data is None:
@@ -580,6 +596,7 @@ class ReviewSummary:
             current_head_commit_sha=current_head_commit_sha,
             head_commit_sha=head_commit_sha,
             head_commit_url=head_commit_url,
+            merge_group_pull_request_numbers=merge_group_pull_request_numbers,
             publication_detail=publication_detail,
             pull_request_author_avatar_url=pull_request_author_avatar_url,
             pull_request_author_github_user_id=pull_request_author_github_user_id,
