@@ -1162,17 +1162,42 @@ async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
             if status == 200:
                 assert raised.value.type == "urn:proofline:sdk:invalid-response"
 
-    # The deadline leaves a loaded worker time to deliver the request, and the
-    # server holds its headers well past the deadline.
-    with Server(lambda request, index: Reply(status, body, header_pause=1.0)) as server:
-        async with session(mode, server.url) as client:
-            started = time.monotonic()
-            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
-            assert result.status == "TIMED_OUT"
-            assert result.review is None
-            assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
-            assert time.monotonic() - started < 0.8
-        assert len(server.requests) == 1
+    # The headers wait far past a deadline that leaves time to connect and send. The
+    # client counts its own attempts, so the no-retry proof needs no scheduler timing.
+    attempts = 0
+    with monkeypatch.context() as patch:
+        sync_request = _sync_http.Transport.handle_request
+        async_request = httpx.AsyncHTTPTransport.handle_async_request
+
+        def count_sync(transport: _sync_http.Transport, request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return sync_request(transport, request)
+
+        async def count_async(
+            transport: httpx.AsyncHTTPTransport, request: httpx.Request
+        ) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return await async_request(transport, request)
+
+        patch.setattr(_sync_http.Transport, "handle_request", count_sync)
+        patch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", count_async)
+        with Server(lambda request, index: Reply(status, body, header_pause=2.0)) as server:
+            async with session(mode, server.url) as client:
+                started = time.monotonic()
+                result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
+                assert result.status == "TIMED_OUT"
+                assert result.review is None
+                assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+                assert time.monotonic() - started < 1.5
+            assert attempts == 1
+            # The request was sent before the header wait, so the server reads it
+            # even after the client gives up.
+            recorded = time.monotonic() + 5
+            while not server.requests and time.monotonic() < recorded:
+                time.sleep(0.01)
+            assert len(server.requests) == 1
 
 
 @MODES
