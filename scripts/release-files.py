@@ -12,6 +12,10 @@ import urllib.request
 from pathlib import Path
 
 PACKAGE = "proofline-sdk"
+# PyPI's CDN caches the version page for up to 15 minutes (Cache-Control: max-age=900),
+# so a page fetched before or during the upload can stay stale that long.
+PROPAGATION_SECONDS = 20 * 60
+POLL_SECONDS = 30
 
 
 def published(version: str) -> dict[str, str]:
@@ -55,13 +59,22 @@ def main() -> None:
             shutil.copyfile(args.artifacts / name, args.pending / name)
         print(len(names))
         return
-    for attempt in range(6):
-        names = missing(expected, published(args.version))
-        if not names:
-            return
-        if attempt < 5:
-            time.sleep(5)
-    sys.exit("PyPI is missing " + ", ".join(names))
+    deadline = time.monotonic() + PROPAGATION_SECONDS
+    while True:
+        try:
+            names = missing(expected, published(args.version))
+        except OSError as error:
+            # A server error, timeout or dropped connection means PyPI does not serve it yet.
+            if isinstance(error, urllib.error.HTTPError) and error.code < 500:
+                raise
+            problem = f"PyPI lookup failed: {error}"
+        else:
+            if not names:
+                return
+            problem = "PyPI is missing " + ", ".join(names)
+        if time.monotonic() >= deadline:
+            sys.exit(problem)
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":

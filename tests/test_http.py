@@ -1162,14 +1162,16 @@ async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
             if status == 200:
                 assert raised.value.type == "urn:proofline:sdk:invalid-response"
 
-    with Server(lambda request, index: Reply(status, body, header_pause=0.2)) as server:
+    # The deadline leaves a loaded worker time to deliver the request, and the
+    # server holds its headers well past the deadline.
+    with Server(lambda request, index: Reply(status, body, header_pause=1.0)) as server:
         async with session(mode, server.url) as client:
             started = time.monotonic()
-            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.05)
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
             assert result.status == "TIMED_OUT"
             assert result.review is None
             assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
-            assert time.monotonic() - started < 0.5
+            assert time.monotonic() - started < 0.8
         assert len(server.requests) == 1
 
 
