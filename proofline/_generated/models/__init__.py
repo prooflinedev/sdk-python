@@ -139,6 +139,8 @@ from .run_now_refusal_view_type_11 import RunNowRefusalViewType11
 from .run_now_refused import RunNowRefused
 from .run_now_request import RunNowRequest
 from .run_now_response import RunNowResponse
+from .scan_request_body import ScanRequestBody
+from .scan_response import ScanResponse
 from .spend_account_kind import SpendAccountKind
 from .spend_export_row import SpendExportRow
 from .start_session import StartSession
@@ -296,6 +298,8 @@ __all__ = (
     "RunNowRefused",
     "RunNowRequest",
     "RunNowResponse",
+    "ScanRequestBody",
+    "ScanResponse",
     "SpendAccountKind",
     "SpendExportRow",
     "StartSession",
