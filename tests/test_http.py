@@ -22,6 +22,7 @@ import pytest
 from pydantic import SecretStr
 
 from proofline import (
+    AgentSessionOutcome,
     AsyncProoflineClient,
     CommitReviewRequest,
     CommitReviewResponse,
@@ -63,6 +64,7 @@ from .fixtures import (
     REPOSITORY,
     REVIEW,
     TOKEN,
+    agent_session,
     assessment,
     code_assessment,
     finding,
@@ -1533,3 +1535,141 @@ async def test_fixes_preserve_unavailable_context_and_never_retry(mode: str) -> 
             with pytest.raises(ProoflineError):
                 await invoke("request_reverification", str(REVIEW), [str(REVIEW)], "a" * 40)
             assert len(observed) == 5
+
+
+@MODES
+async def test_wait_for_agent_session_follows_done_and_redacts_untrusted_summary(
+    mode: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = Clock(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    finished = agent_session("FINISHED", done=True)
+    finished["untrusted_vendor_summary"] = PRIVATE
+    finished["pull_request_url"] = "https://github.com/repo/name/pull/99"
+    responses = [
+        agent_session("REQUESTED", done=False),
+        agent_session("FINISHED", done=False),
+        finished,
+    ]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_agent_session", ORG, REVIEW, timeout=100)
+        assert isinstance(result, AgentSessionOutcome)
+        assert result.status == "FINISHED"
+        assert result.reason is None
+        assert result.session is not None
+        assert result.session.id == REVIEW
+        assert result.session.untrusted_vendor_summary == PRIVATE
+        assert result.session.pull_request_url == "https://github.com/repo/name/pull/99"
+        assert PRIVATE not in repr(result)
+        assert clock.delays == [5, 10]
+        assert len(server.requests) == 3
+
+    cases: list[tuple[dict[str, Any], str, str | None]] = []
+    for status in ("FAILED", "REFUSED", "HEAD_MOVED", "UNKNOWN"):
+        body = agent_session(status, done=True)
+        if status == "FAILED":
+            body["cause"] = "VENDOR_ERROR"
+        elif status == "HEAD_MOVED":
+            body["observed_head_sha"] = "b" * 40
+        cases.append((body, status, None))
+    cases.append(
+        (
+            agent_session("RUNNING", done=True),
+            "UNKNOWN",
+            "The agent session ended without a terminal status.",
+        )
+    )
+    cases.append(
+        (
+            agent_session("FUTURE_VENDOR_STATE", done=True),
+            "UNKNOWN",
+            "The agent session ended with an unrecognized status.",
+        )
+    )
+    with Server(lambda request, index: Reply(body=cases[index][0])) as server:
+        async with session(mode, server.url) as client:
+            for _, expected_status, expected_reason in cases:
+                result = await call(client, "wait_for_agent_session", ORG, REVIEW)
+                assert result.status == expected_status
+                assert result.reason == expected_reason
+    assert PRIVATE not in caplog.text and TOKEN not in caplog.text
+
+
+@MODES
+async def test_wait_for_agent_session_timeout_and_invalid_shapes(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    unsettled = agent_session("FINISHED", done=False)
+    with Server(lambda request, index: Reply(body=unsettled)) as server:
+        async with session(mode, server.url) as client:
+            for invalid_timeout in (-1.0, float("nan"), float("inf")):
+                with pytest.raises(ValueError):
+                    await call(
+                        client, "wait_for_agent_session", ORG, REVIEW, timeout=invalid_timeout
+                    )
+            result = await call(client, "wait_for_agent_session", ORG, REVIEW, timeout=0)
+            assert result.status == "TIMED_OUT"
+            assert result.session is None
+            assert result.reason == "No agent session result is available."
+            assert server.requests == []
+            result = await call(client, "wait_for_agent_session", ORG, REVIEW, timeout=260)
+            assert result.status == "TIMED_OUT"
+            assert result.session is not None
+            assert result.session.id == REVIEW
+            assert result.session.status == "FINISHED"
+            assert result.session.done is False
+            assert result.reason == "The agent session did not finish before the timeout."
+        assert clock.delays == [5, 10, 20, 40, 60, 60, 60, 5]
+        assert len(server.requests) == 8
+
+    clock.delays.clear()
+    with Server(
+        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "20"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_agent_session", ORG, REVIEW, timeout=10)
+            assert result.status == "TIMED_OUT"
+            assert result.session is None
+        assert len(server.requests) == 1
+        assert clock.delays == [10]
+
+    with Server(lambda request, index: Reply(403, {"detail": PRIVATE})) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as forbidden:
+                await call(client, "wait_for_agent_session", ORG, REVIEW, timeout=10)
+            assert forbidden.value.status == 403
+        assert len(server.requests) == 1
+
+    invalid_bodies: list[dict[str, Any]] = []
+    wrong_id = agent_session("FINISHED", done=True)
+    wrong_id["id"] = str(ASSESSMENT)
+    invalid_bodies.append(wrong_id)
+    for field, value in [
+        ("done", "false"),
+        ("attempt", 0),
+        ("attempt", True),
+        ("status", ""),
+        ("untrusted_vendor_summary", [PRIVATE, 42]),
+        ("cause", 42),
+    ]:
+        bad = agent_session("FINISHED", done=True)
+        bad[field] = value
+        invalid_bodies.append(bad)
+    for target_field, target_value in [
+        ("github_repository_id", 0),
+        ("pull_request_number", True),
+        ("head_sha", ""),
+        ("repository_full_name", ""),
+    ]:
+        bad_target = agent_session("FINISHED", done=True)
+        bad_target["target"][target_field] = target_value
+        invalid_bodies.append(bad_target)
+    with Server(lambda request, index: Reply(body=invalid_bodies[index])) as server:
+        async with session(mode, server.url) as client:
+            for _ in invalid_bodies:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, "wait_for_agent_session", ORG, REVIEW)
+                assert raised.value.type == "urn:proofline:sdk:invalid-response"
+                assert PRIVATE not in repr(raised.value) + raised.value.detail

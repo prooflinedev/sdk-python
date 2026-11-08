@@ -33,10 +33,18 @@ from ._transport import VERSION as __version__
 from ._transport import ProoflineError
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
-from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .outcomes import (
+    AgentSessionOutcome,
+    AgentSessionStatus,
+    AssessmentGap,
+    CheckGap,
+    ReviewOutcome,
+)
 
 __all__ = [
     "AgentSession",
+    "AgentSessionOutcome",
+    "AgentSessionStatus",
     "AgentVendor",
     "AssessmentGap",
     "AsyncProoflineClient",

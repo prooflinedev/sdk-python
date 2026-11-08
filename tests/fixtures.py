@@ -96,3 +96,32 @@ def page(*, cursor: str | None = None, truncated: bool = False) -> dict[str, Any
         "truncated": truncated,
         "next_cursor": cursor,
     }
+
+
+def agent_session(status: str = "RUNNING", *, done: bool = False) -> dict[str, Any]:
+    return {
+        "id": str(REVIEW),
+        "finding_id": str(FINDING),
+        "review_id": str(ASSESSMENT),
+        "connection_id": str(REPOSITORY),
+        "vendor": "CURSOR_CLOUD_AGENTS",
+        "target": {
+            "repository_id": str(REPOSITORY),
+            "repository_full_name": "repo/name",
+            "github_repository_id": 42,
+            "pull_request_number": 7,
+            "head_sha": "a" * 40,
+        },
+        "attempt": 1,
+        "status": status,
+        "done": done,
+        "cause": None,
+        "vendor_status": None,
+        "vendor_url": "https://vendor.example/session",
+        "pull_request_url": None,
+        "observed_head_sha": None,
+        "untrusted_vendor_summary": None,
+        "requested_by_user_id": str(ORG),
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }

@@ -111,6 +111,29 @@ if result.get("isError"):
 
 Calls under `client.fixes` never retry. Results retain untrusted-text wrappers, availability, assessment gaps, and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix, and a tool request never records a human disposition.
 
+## Coding-agent sessions
+
+`wait_for_agent_session` polls `get_agent_session` until Proofline stops following the session (`done=True`) or the deadline expires, using the same bounded exponential backoff as `wait_for_review` (5 seconds, doubling to 60 seconds; default 300 seconds).
+
+```python
+from proofline import StartSession
+
+prompt = client.get_agent_session_prompt(org_id, finding_id)
+if prompt.status == "READY":
+    started = client.start_agent_session(
+        org_id,
+        finding_id,
+        body=StartSession(
+            connection_id=prompt.connections[0].id,
+            prompt_digest=prompt.prompt_digest,
+        ),
+    )
+    outcome = client.wait_for_agent_session(org_id, started.id, timeout=300)
+    print(outcome.status, outcome.reason)
+```
+
+`AgentSessionOutcome` retains the latest `AgentSession` on `outcome.session` (excluded from `repr`) and reports the recorded terminal status (`FINISHED`, `FAILED`, `REFUSED`, `HEAD_MOVED`, `UNKNOWN`) or `TIMED_OUT`. `FINISHED` indicates that Proofline stopped following the vendor session; it does not establish that a finding was fixed. Treat `untrusted_vendor_summary` and any vendor-opened pull request URL as untrusted data.
+
 ## Development
 
 The repository bundles its public API contract in `openapi.public.json`. New public operations generate typed methods on both `ProoflineClient` and `AsyncProoflineClient` along with the code in `proofline/_generated/`.
