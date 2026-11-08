@@ -73,7 +73,7 @@ from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
-from .outcomes import ReviewOutcome, outcome
+from .outcomes import AgentSessionOutcome, ReviewOutcome, agent_session_outcome, outcome
 
 T = TypeVar("T")
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
@@ -506,6 +506,39 @@ class ProoflineClient(Operations):
         finally:
             _transport.DEADLINE.reset(deadline)
 
+    def wait_for_agent_session(
+        self, organization_id: UUID, session_id: UUID, *, timeout: float = 300
+    ) -> AgentSessionOutcome:
+        """Wait until Proofline finishes following an agent session or return TIMED_OUT."""
+
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(
+                "The agent session timeout must be a finite nonnegative number of seconds."
+            )
+        last: AgentSession | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = self.get_agent_session(organization_id, session_id)
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                result = agent_session_outcome(last, session_id=session_id)
+                if result is not None:
+                    return result
+                sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            return agent_session_outcome(
+                last, "TIMED_OUT", session_id=session_id
+            ) or AgentSessionOutcome("TIMED_OUT", reason="No agent session result is available.")
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
 
 class AsyncProoflineClient(AsyncOperations):
     def __init__(
@@ -850,5 +883,36 @@ class AsyncProoflineClient(AsyncOperations):
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
             return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
+    async def wait_for_agent_session(
+        self, organization_id: UUID, session_id: UUID, *, timeout: float = 300
+    ) -> AgentSessionOutcome:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(
+                "The agent session timeout must be a finite nonnegative number of seconds."
+            )
+        last: AgentSession | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = await self.get_agent_session(organization_id, session_id)
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                result = agent_session_outcome(last, session_id=session_id)
+                if result is not None:
+                    return result
+                await async_sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            return agent_session_outcome(
+                last, "TIMED_OUT", session_id=session_id
+            ) or AgentSessionOutcome("TIMED_OUT", reason="No agent session result is available.")
         finally:
             _transport.DEADLINE.reset(deadline)
