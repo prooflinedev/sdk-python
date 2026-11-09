@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from ._generated.models.customer_code_assessment import CustomerCodeAssessment
 from ._generated.models.customer_review_detail import CustomerReviewDetail
+from ._generated.models.open_items_view import OpenItemsView
 from ._generated.types import Unset
 from ._transport import ProoflineError
 
 OutcomeStatus = Literal["COMPLETED", "INCOMPLETE", "FAILED", "STOPPED", "TIMED_OUT"]
+SeverityThreshold = Literal["WARNING", "SERIOUS"]
+GateResult = Literal["REACHED", "NOT_REACHED", "NOT_COMPLETE", "UNAVAILABLE"]
+# Least severe first.
+SEVERITIES: tuple[SeverityThreshold, ...] = ("WARNING", "SERIOUS")
 COMPLETE_CHECKS = frozenset(("READY", "BLOCKED", "NOT_APPLICABLE"))
 COMPLETE_LIFECYCLES = frozenset(("GATING", "SHADOW", "QUARANTINED", "RETIRED"))
 _KNOWN_ASSESSMENTS = frozenset(
@@ -47,6 +52,57 @@ class ReviewOutcome:
     gaps: tuple[AssessmentGap, ...] = field(default=(), repr=False)
     reason: str | None = None
 
+    def gate(self, fail_on: SeverityThreshold) -> GateResult:
+        """Measure the review against a severity threshold as `proofline ci review --fail-on`.
+
+        Completeness decides first. A review that is incomplete, failed or stopped is
+        NOT_COMPLETE whatever it found, and a wait that timed out is UNAVAILABLE. A
+        completed review REACHES the threshold when the server counts an open finding at
+        or above it, or when a complete CODE assessment of the review's own commits holds
+        an unresolved finding at or above it. Dismissed findings and unexpired risk
+        acceptances are not open. A severity this SDK does not know reaches every
+        threshold. Without the server's open-finding counts the threshold cannot be
+        measured, which is UNAVAILABLE and never NOT_REACHED.
+        """
+        if fail_on not in SEVERITIES:
+            raise ValueError("fail_on must be WARNING or SERIOUS.")
+        if self.status == "TIMED_OUT":
+            return "UNAVAILABLE"
+        if self.status != "COMPLETED":
+            return "NOT_COMPLETE"
+        if self.review is None:
+            return "UNAVAILABLE"
+        counts = self.review.open_items
+        if not isinstance(counts, OpenItemsView):
+            return "UNAVAILABLE"
+        count = counts.serious_findings if fail_on == "SERIOUS" else counts.open_findings
+        if type(count) is not int or count < 0:
+            return "UNAVAILABLE"
+        # Complete environments complete a review even beside a partial CODE assessment,
+        # whose findings are not its whole result. CODE findings have no recorded
+        # decisions, so their lifecycle and severity decide.
+        code = _recorded_code(self.review)
+        findings = (
+            code.findings
+            if code is not None
+            and code.status == "COMPLETED"
+            and not text(code.incompleteness_kind)
+            else []
+        )
+        if count > 0 or any(
+            finding.lifecycle_state != "RESOLVED" and _reaches(finding.severity, fail_on)
+            for finding in findings
+        ):
+            return "REACHED"
+        return "NOT_REACHED"
+
+
+def _reaches(severity: object, threshold: SeverityThreshold) -> bool:
+    # An unknown severity, which a newer server can send, is never read as below a threshold.
+    if severity not in SEVERITIES:
+        return True
+    return SEVERITIES.index(cast(SeverityThreshold, severity)) >= SEVERITIES.index(threshold)
+
 
 def text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
@@ -68,6 +124,11 @@ def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | N
     # A CODE result cannot replace a missing ENV result or its check receipts.
     if review.assessment_count != 0 or review.assessments:
         return None
+    return _recorded_code(review)
+
+
+def _recorded_code(review: CustomerReviewDetail) -> CustomerCodeAssessment | None:
+    """The CODE record of this review's own commits with published findings, or None."""
     code = review.code_assessment
     if (
         not isinstance(code, CustomerCodeAssessment)

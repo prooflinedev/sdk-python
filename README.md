@@ -20,6 +20,29 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Failing a job on open findings
+
+`ReviewOutcome.gate(fail_on)` measures a review against a `WARNING` or `SERIOUS` threshold with the rules of `proofline ci review --fail-on`, so a Python pipeline can fail the same way the CLI does.
+
+```python
+import sys
+
+outcome = client.wait_for_review(organization_id, review_id)
+result = outcome.gate(fail_on="SERIOUS")
+if result != "NOT_REACHED":
+    print(f"Proofline: {result}, {outcome.review_url}")
+    sys.exit({"REACHED": 3, "NOT_COMPLETE": 2, "UNAVAILABLE": 4}[result])
+```
+
+- `REACHED`: the completed review has an open finding at or above the threshold.
+- `NOT_REACHED`: the completed review has none.
+- `NOT_COMPLETE`: the review is incomplete, failed, or stopped, whatever it found.
+- `UNAVAILABLE`: the wait timed out, or the completed review lacks the server's open-finding counts, so the threshold cannot be measured.
+
+The server counts open findings from their current decisions, so dismissed findings and unexpired risk acceptances do not count. A code-only finding counts while it is not `RESOLVED` and its complete CODE assessment is of the review's own commits. A severity the SDK does not know reaches every threshold. The exit codes above are the CLI's.
+
+The threshold is the caller's, as with `--fail-on`, and applies to any review. An organization that opts in to a merge gate instead gets the server's frozen `ALLOW` or `BLOCK` decision for a pull request head in `outcome.review.merge_gate`, which is null otherwise.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
