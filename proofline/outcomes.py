@@ -14,6 +14,10 @@ from ._transport import ProoflineError
 OutcomeStatus = Literal["COMPLETED", "INCOMPLETE", "FAILED", "STOPPED", "TIMED_OUT"]
 COMPLETE_CHECKS = frozenset(("READY", "BLOCKED", "NOT_APPLICABLE"))
 COMPLETE_LIFECYCLES = frozenset(("GATING", "SHADOW", "QUARANTINED", "RETIRED"))
+_KNOWN_ASSESSMENTS = frozenset(
+    ("PENDING", "RUNNING", "COMPLETED", "INCOMPLETE", "FAILED", "STOPPED", "SUPERSEDED", "EXCLUDED")
+)
+_WITHHELD_MARKER = "[withheld: environment value]"
 
 
 @dataclass(frozen=True)
@@ -29,7 +33,7 @@ class CheckGap:
 class AssessmentGap:
     assessment_id: UUID | None
     status: str
-    reason_codes: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = field(default=(), repr=False)
     incompleteness_kind: str | None = None
     release_evidence_gap: str | None = field(default=None, repr=False)
     checks: tuple[CheckGap, ...] = field(default=(), repr=False)
@@ -74,6 +78,14 @@ def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | N
         or code.status not in ("PENDING", "RUNNING", "COMPLETED", "INCOMPLETE", "EXCLUDED")
         or not _optional_text(code.incompleteness_kind)
     ):
+        return None
+    for recorded, actual in (
+        (review.head_commit_sha, code.head_commit_sha),
+        (review.base_commit_sha, code.base_commit_sha),
+    ):
+        if isinstance(recorded, str) and recorded.lower() != actual.lower():
+            return None
+    if any(finding.risk_domain == _WITHHELD_MARKER for finding in code.findings):
         return None
     return code
 
@@ -143,18 +155,20 @@ def outcome(
                 AssessmentGap(
                     code.id,
                     code.status,
-                    () if kind else ("CODE_ASSESSMENT_STATE_UNAVAILABLE",),
+                    (kind,) if kind else ("CODE_ASSESSMENT_STATE_UNAVAILABLE",),
                     kind,
                 )
             )
-    elif review.assessment_count != len(review.assessments):
-        gaps.append(AssessmentGap(None, "UNKNOWN", ("ASSESSMENT_HISTORY_UNAVAILABLE",)))
     for assessment in review.assessments:
         reasons = (
             tuple(assessment.reason_codes) if isinstance(assessment.reason_codes, list) else ()
         )
         kind = text(assessment.incompleteness_kind)
         evidence = text(assessment.release_evidence_gap)
+        if kind:
+            reasons = (*reasons, kind)
+        if evidence:
+            reasons = (*reasons, evidence)
         checks = tuple(
             CheckGap(
                 check.name,
@@ -166,17 +180,22 @@ def outcome(
             for check in assessment.checks.families
             if check.outcome not in COMPLETE_CHECKS or check.lifecycle not in COMPLETE_LIFECYCLES
         )
-        if (
-            not assessment.checks.receipt_recorded
-            or assessment.checks.status not in COMPLETE_CHECKS
-        ):
-            reasons = (*reasons, "CHECK_RECEIPT_UNAVAILABLE")
+        if not assessment.checks.receipt_recorded:
+            reasons = (*reasons, "CHECK_RECEIPT_ABSENT")
+        elif assessment.checks.status not in COMPLETE_CHECKS or checks:
+            reasons = (*reasons, "CHECKS_UNRESOLVED")
         if assessment.status != "COMPLETED" or reasons or kind or evidence or checks:
             if not reasons and not kind and not evidence and not checks:
-                reasons = ("ASSESSMENT_STATE_UNAVAILABLE",)
+                reasons = (
+                    "ASSESSMENT_RESULT_UNAVAILABLE"
+                    if assessment.status in _KNOWN_ASSESSMENTS
+                    else "UNKNOWN_ASSESSMENT_STATUS",
+                )
             gaps.append(
                 AssessmentGap(assessment.id, assessment.status, reasons, kind, evidence, checks)
             )
+    if review.assessment_count != len(review.assessments):
+        gaps.append(AssessmentGap(None, "UNKNOWN", ("ASSESSMENT_HISTORY_UNAVAILABLE",)))
     if forced is not None:
         status = forced
     elif review.status in ("PENDING", "RUNNING"):

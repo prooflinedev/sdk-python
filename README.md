@@ -65,9 +65,29 @@ with ProoflineClient() as client:
 
 The response names the recorded report and its covered and instrumented line counts. An identical upload returns that report with `created=False`. Refused reports raise `ProoflineError`. Uploading a report does not establish a check verdict.
 
+## MCP organization selection
+
+With an MCP OAuth credential approved for several organizations, discover its currently authorized targets with `client.mcp.list_organizations()`. It returns a `KnowledgeResult`; inspect `isError` before reading `structuredContent["data"]["organizations"]`. Each entry contains `organization_id`, `github_login`, and `scopes`.
+
+Pass the chosen UUID string as the optional keyword `organization_id` on any `knowledge` or `fixes` method:
+
+```python
+organizations = client.mcp.list_organizations()
+if organizations.get("isError"):
+    raise RuntimeError("Organization discovery was refused.")
+print(organizations["structuredContent"]["data"]["organizations"])
+# Set organization_id to the UUID of the organization you intend to use.
+result = client.fixes.get_fix_context(finding_id, organization_id=organization_id)
+result = client.knowledge.get_wiki_page(
+    "owner/name", "index", organization_id=organization_id,
+)
+```
+
+The async client exposes the same helpers with `await`. Selection applies only to that call, including concurrent calls on one client. A single-organization credential can omit the keyword. An ambiguous omission retains the server's `ORGANIZATION_REQUIRED` tool refusal; a foreign or revoked target retains `NOT_AUTHORIZED` and `isError`. The SDK chooses no default and never retries a tool call. Discovery and targeting use MCP only; an MCP OAuth credential cannot call the REST API. Each organization's scopes and repository restrictions still apply.
+
 ## Knowledge and plans
 
-Both clients expose typed methods under `client.knowledge` over Proofline's stateless MCP endpoint:
+Both clients expose typed methods under `client.knowledge` over Proofline's stateless MCP endpoint. Every method accepts the optional `organization_id` keyword described above:
 
 - `list_wiki_pages(repository, commit=...)`
 - `get_wiki_page(repository, page_key, commit=...)`
@@ -91,7 +111,7 @@ Each call initializes MCP and makes one tool request without retries, including 
 
 ## Fix context and re-verification
 
-Both clients expose finding and re-verification methods under `client.fixes` over the stateless MCP endpoint:
+Both clients expose finding and re-verification methods under `client.fixes` over the stateless MCP endpoint. Every method accepts the optional `organization_id` keyword described above:
 
 - `list_open_findings(repository, pull_request_number)`
 - `get_fix_context(finding_id)`

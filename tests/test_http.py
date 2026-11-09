@@ -6,6 +6,8 @@ import inspect
 import json
 import logging
 import socket
+import subprocess
+import sys
 import threading
 import time
 import tomllib
@@ -16,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+from uuid import UUID
 
 import httpx
 import pytest
@@ -73,6 +76,7 @@ from .http_server import Reply, Request, Server
 
 Client = ProoflineClient | AsyncProoflineClient
 MODES = pytest.mark.parametrize("mode", ["sync", "async"])
+STRUCTURED_QUERY = '(status:COMPLETED OR status:FAILED) AND -author:"release bot"'
 
 
 @asynccontextmanager
@@ -209,11 +213,21 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
     with Server(respond) as server:
         async with session(mode, server.url) as client:
             calls = [
-                ("list_reviews", (ORG,), {"limit": 7, "repository": REPOSITORY}),
+                (
+                    "list_reviews",
+                    (ORG,),
+                    {"limit": 7, "repository": REPOSITORY, "query": STRUCTURED_QUERY},
+                ),
                 (
                     "list_pull_request_reviews",
                     (ORG, "repo/name", 42),
-                    {"filters": {"repository": REPOSITORY, "search": "text & space"}},
+                    {
+                        "filters": {
+                            "repository": REPOSITORY,
+                            "search": "text & space",
+                            "query": STRUCTURED_QUERY,
+                        }
+                    },
                 ),
                 ("get_pull_request_review", (ORG, "repo/name", 42, 3), {}),
                 ("get_deployment_review", (ORG, "key/with?query"), {}),
@@ -261,10 +275,12 @@ async def test_all_public_operations_use_generated_models_and_scoped_paths(mode:
         assert parse_qs(urlsplit(server.requests[0].path).query) == {
             "limit": ["7"],
             "repository": [str(REPOSITORY)],
+            "query": [STRUCTURED_QUERY],
         }
         assert parse_qs(urlsplit(server.requests[1].path).query) == {
             "repository": [str(REPOSITORY)],
             "search": ["text & space"],
+            "query": [STRUCTURED_QUERY],
         }
 
     bodies = [
@@ -794,7 +810,7 @@ async def test_wait_retains_evidence_gaps_after_running_review(
         assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
         gap = result.gaps[0]
         assert gap.assessment_id == ASSESSMENT
-        assert gap.reason_codes == ("WORLD_UNAVAILABLE", "CHECK_RECEIPT_UNAVAILABLE")
+        assert gap.reason_codes == ("WORLD_UNAVAILABLE", "WORLD", PRIVATE, "CHECKS_UNRESOLVED")
         assert gap.incompleteness_kind == "WORLD"
         assert gap.release_evidence_gap == PRIVATE
         assert gap.checks[0].unresolved_reason == "UNSUPPORTED"
@@ -846,7 +862,7 @@ async def test_code_only_outcomes_retain_recorded_kind_and_env_precedence(
                     assert result.gaps[0].incompleteness_kind == kind
                     assert result.gaps[0].checks == ()
                     if kind:
-                        assert result.gaps[0].reason_codes == ()
+                        assert result.gaps[0].reason_codes == (kind,)
                 else:
                     assert expected == "COMPLETED"
                 assert PRIVATE not in repr(result)
@@ -1315,10 +1331,14 @@ def test_sync_transport_connects_to_each_resolved_address_under_the_original_hos
 @MODES
 async def test_cursor_pagination_preserves_filters_and_refuses_cycles_or_bounds(mode: str) -> None:
     def respond(request: Request, index: int) -> Reply:
+        assert urlsplit(request.path).path == f"/api/v1/organizations/{ORG}/reviews"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         query = parse_qs(urlsplit(request.path).query)
         assert query["repository"] == [str(REPOSITORY)]
         assert query["status"] == ["COMPLETED"]
         assert query["limit"] == ["2"]
+        assert query["query"] == [STRUCTURED_QUERY]
+        assert query["search"] == ["text & space"]
         if index == 0:
             assert "cursor" not in query
         else:
@@ -1330,7 +1350,14 @@ async def test_cursor_pagination_preserves_filters_and_refuses_cycles_or_bounds(
     with Server(respond) as server:
         async with session(mode, server.url) as client:
             items = await collect(
-                client, page_size=2, filters={"repository": REPOSITORY, "status": "COMPLETED"}
+                client,
+                page_size=2,
+                filters={
+                    "repository": REPOSITORY,
+                    "status": "COMPLETED",
+                    "query": STRUCTURED_QUERY,
+                    "search": "text & space",
+                },
             )
             assert [item.id for item in items] == [REVIEW, REVIEW]
         assert len(server.requests) == 2
@@ -1533,3 +1560,249 @@ async def test_fixes_preserve_unavailable_context_and_never_retry(mode: str) -> 
             with pytest.raises(ProoflineError):
                 await invoke("request_reverification", str(REVIEW), [str(REVIEW)], "a" * 40)
             assert len(observed) == 5
+
+
+@MODES
+async def test_shared_review_outcome_contract(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    Clock(monkeypatch)
+    fixture = json.loads((Path(__file__).parent / "fixtures/review-outcomes.json").read_text())
+    for case in fixture["cases"]:
+        body = case["review"]
+        pending = case["outcome"] is None
+        settled = next(
+            item["review"] for item in fixture["cases"] if item["name"] == "review-completed"
+        )
+        with Server(
+            lambda request, index: Reply(body=settled if pending and index else body)
+        ) as server:
+            async with session(mode, server.url) as client:
+                result = await call(client, "wait_for_review", ORG, UUID(body["id"]))
+            assert result.status == ("COMPLETED" if pending else case["outcome"]), case["name"]
+            assert len(server.requests) == (2 if pending else 1), case["name"]
+            assert [
+                {
+                    "assessment_id": str(gap.assessment_id) if gap.assessment_id else None,
+                    "reason_codes": list(gap.reason_codes),
+                }
+                for gap in result.gaps
+            ] == case["gaps"], case["name"]
+
+
+@MODES
+async def test_mcp_per_call_organizations_and_refusals(mode: str) -> None:
+    first, second, foreign = (str(ORG), str(REVIEW), str(ASSESSMENT))
+    admitted = [first, second]
+    observed: list[dict[str, Any]] = []
+    concurrent = False
+    overlap = threading.Barrier(2)
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.path == "/mcp"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        body = json.loads(request.body)
+        if body["method"] == "initialize":
+            return Reply(
+                body={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-11-25"}}
+            )
+        assert request.headers["MCP-Protocol-Version"] == "2025-11-25"
+        if body["method"] == "notifications/initialized":
+            return Reply(status=202, body=b"")
+        params = body["params"]
+        observed.append(params)
+        if params["name"] == "list_organizations":
+            assert params["arguments"] == {}
+            result: dict[str, Any] = {
+                "content": [],
+                "structuredContent": {
+                    "ok": True,
+                    "data": {"organizations": [{"organization_id": value} for value in admitted]},
+                },
+            }
+        else:
+            if concurrent:
+                # Neither response completes until both tool calls have arrived.
+                overlap.wait(timeout=5)
+            target = params["arguments"].get("organization_id")
+            code = (
+                "ORGANIZATION_REQUIRED"
+                if target is None
+                else "NOT_AUTHORIZED"
+                if target not in admitted
+                else None
+            )
+            payload = (
+                {
+                    "ok": False,
+                    "error": {"code": code, "message": "Target refused", "retryable": False},
+                }
+                if code
+                else {"ok": True, "data": {"organization_id": target}}
+            )
+            result = {
+                "isError": code is not None,
+                "content": [{"type": "text", "text": json.dumps(payload)}],
+                "structuredContent": payload,
+            }
+        return Reply(body={"jsonrpc": "2.0", "id": 2, "result": result})
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+
+            async def invoke(group: str, name: str, *args: Any, **kwargs: Any) -> Any:
+                result = getattr(getattr(client, group), name)(*args, **kwargs)
+                return await result if inspect.isawaitable(result) else result
+
+            discovery = await invoke("mcp", "list_organizations")
+            assert discovery["structuredContent"]["data"]["organizations"] == [
+                {"organization_id": first},
+                {"organization_id": second},
+            ]
+            cases = [
+                (
+                    "knowledge",
+                    "list_wiki_pages",
+                    ("owner/name",),
+                    {"commit": "a" * 40},
+                    {"repository": "owner/name", "commit": "a" * 40},
+                ),
+                (
+                    "knowledge",
+                    "get_wiki_page",
+                    ("owner/name", "index"),
+                    {},
+                    {"repository": "owner/name", "page_key": "index"},
+                ),
+                (
+                    "knowledge",
+                    "ask_codebase",
+                    ("owner/name", "How?"),
+                    {},
+                    {"repository": "owner/name", "question": "How?"},
+                ),
+                (
+                    "knowledge",
+                    "get_architecture_document",
+                    (str(REVIEW),),
+                    {},
+                    {"environment_id": str(REVIEW)},
+                ),
+                ("knowledge", "get_plan", (str(REVIEW),), {}, {"plan_id": str(REVIEW)}),
+                (
+                    "knowledge",
+                    "start_plan_implementation",
+                    (str(REVIEW),),
+                    {},
+                    {"plan_id": str(REVIEW)},
+                ),
+                (
+                    "knowledge",
+                    "get_plan_implementation",
+                    (str(REVIEW),),
+                    {},
+                    {"implementation_id": str(REVIEW)},
+                ),
+                (
+                    "fixes",
+                    "list_open_findings",
+                    ("owner/name", 7),
+                    {},
+                    {"repository": "owner/name", "pull_request_number": 7},
+                ),
+                ("fixes", "get_fix_context", (str(REVIEW),), {}, {"finding_id": str(REVIEW)}),
+                (
+                    "fixes",
+                    "request_reverification",
+                    (str(REVIEW), [str(REVIEW)], "a" * 40),
+                    {"note": "fixed"},
+                    {
+                        "review_id": str(REVIEW),
+                        "finding_ids": [str(REVIEW)],
+                        "commit_sha": "a" * 40,
+                        "note": "fixed",
+                    },
+                ),
+                ("fixes", "get_reverification", (str(REVIEW),), {}, {"request_id": str(REVIEW)}),
+            ]
+            for group, name, args, kwargs, expected in cases:
+                for target in (first, second):
+                    answer = await invoke(group, name, *args, **kwargs, organization_id=target)
+                    assert answer["structuredContent"]["data"]["organization_id"] == target
+                    assert observed[-1] == {
+                        "name": name,
+                        "arguments": {**expected, "organization_id": target},
+                    }
+
+            if mode == "async":
+                concurrent = True
+                answers = await asyncio.gather(
+                    invoke("knowledge", "get_plan", str(REVIEW), organization_id=first),
+                    invoke("fixes", "get_fix_context", str(REVIEW), organization_id=second),
+                )
+                concurrent = False
+                assert [
+                    answer["structuredContent"]["data"]["organization_id"] for answer in answers
+                ] == [first, second]
+
+            async def refused(target: str | None, code: str) -> None:
+                before = len(observed)
+                kwargs = {} if target is None else {"organization_id": target}
+                answer = await invoke(
+                    "fixes",
+                    "request_reverification",
+                    str(REVIEW),
+                    [str(REVIEW)],
+                    "a" * 40,
+                    **kwargs,
+                )
+                assert answer["isError"] is True
+                assert answer["structuredContent"]["error"]["code"] == code
+                assert json.loads(answer["content"][0]["text"]) == answer["structuredContent"]
+                assert len(observed) == before + 1
+                assert observed[-1]["arguments"].get("organization_id") == target
+                assert ("organization_id" in observed[-1]["arguments"]) == (target is not None)
+
+            # An earlier explicit target must never become an implicit default.
+            await refused(None, "ORGANIZATION_REQUIRED")
+            await refused(foreign, "NOT_AUTHORIZED")
+            admitted.remove(first)
+            await refused(first, "NOT_AUTHORIZED")
+            remaining = await invoke("mcp", "list_organizations")
+            assert remaining["structuredContent"]["data"]["organizations"] == [
+                {"organization_id": second}
+            ]
+            answer = await invoke("fixes", "get_fix_context", str(REVIEW), organization_id=second)
+            assert answer["structuredContent"]["data"]["organization_id"] == second
+        assert len(server.requests) == len(observed) * 3
+
+
+def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> None:
+    # Compile consumer code through the public entry point; dynamic HTTP tests
+    # cannot catch a missing keyword in just one sync/async method signature.
+    lines = ["from proofline import ProoflineClient, AsyncProoflineClient, KnowledgeResult"]
+    calls = [
+        'knowledge.list_wiki_pages("owner/name", commit="a" * 40)',
+        'knowledge.get_wiki_page("owner/name", "index")',
+        'knowledge.ask_codebase("owner/name", "How?")',
+        'knowledge.get_architecture_document("environment-id")',
+        'knowledge.get_plan("plan-id")',
+        'knowledge.start_plan_implementation("plan-id")',
+        'knowledge.get_plan_implementation("implementation-id")',
+        'fixes.list_open_findings("owner/name", 7)',
+        'fixes.get_fix_context("finding-id")',
+        'fixes.request_reverification("review-id", ["finding-id"], "a" * 40, note="fixed")',
+        'fixes.get_reverification("request-id")',
+    ]
+    for prefix, kind, wait in [
+        ("", "ProoflineClient", ""),
+        ("async ", "AsyncProoflineClient", "await "),
+    ]:
+        lines.append(f"{prefix}def use_{kind}(client: {kind}) -> None:")
+        lines.append(f"    result: KnowledgeResult = {wait}client.mcp.list_organizations()")
+        for expression in calls:
+            lines.append(f"    result = {wait}client.{expression}")
+            targeted = expression[:-1] + ', organization_id="00000000-0000-7000-8000-000000000001")'
+            lines.append(f"    result = {wait}client.{targeted}")
+    fixture = tmp_path / "mcp_types.py"
+    fixture.write_text("\n".join(lines))
+    # Use the same mypy configuration as the SDK qualification gate.
+    subprocess.run([sys.executable, "-m", "mypy", str(fixture)], check=True)

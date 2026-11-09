@@ -9,16 +9,18 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import proofline
-from proofline import AsyncProoflineClient, ProoflineClient, SecretStr
+from proofline import AsyncProoflineClient, ProoflineClient, ReviewFilters, SecretStr
 
 ORG = UUID("00000000-0000-4000-8000-000000000001")
 REVIEW = UUID("00000000-0000-4000-8000-000000000002")
 ASSESSMENT = UUID("00000000-0000-4000-8000-000000000003")
 FINDING = UUID("00000000-0000-4000-8000-000000000004")
 TOKEN = "pln_synthetic_installed_package_token"
+QUERY = '(status:COMPLETED OR status:FAILED) AND -author:"release bot"'
 
 
 def main() -> None:
@@ -27,6 +29,7 @@ def main() -> None:
     package_version = importlib.metadata.version("proofline-sdk")
     assert proofline.__version__ == package_version
     calls: list[str] = []
+    filters: ReviewFilters = {"query": QUERY}
     finding = {
         "id": str(FINDING),
         "severity": "HIGH",
@@ -82,6 +85,18 @@ def main() -> None:
             assert self.headers["User-Agent"] == f"proofline-python/{package_version}"
             calls.append(self.path)
             body = finding if "/findings/" in self.path else review
+            path = urlsplit(self.path)
+            if path.path in (
+                f"/api/v1/organizations/{ORG}/reviews",
+                f"/api/v1/organizations/{ORG}/reviews/pr/repo%2Fname/42",
+            ):
+                assert parse_qs(path.query)["query"] == [QUERY]
+                assert "search" not in parse_qs(path.query)
+                body = {
+                    "filters": {"repositories": [], "environments": [], "authors": []},
+                    "items": [],
+                    "truncated": False,
+                }
             payload = json.dumps(body).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -96,6 +111,10 @@ def main() -> None:
 
     async def asynchronous() -> None:
         async with AsyncProoflineClient(SecretStr(TOKEN), base_url=url) as client:
+            assert (await client.list_reviews(ORG, query=QUERY)).items == []
+            history = await client.list_pull_request_reviews(ORG, "repo/name", 42, filters=filters)
+            assert history.items == []
+            assert [item async for item in client.iter_reviews(ORG, filters=filters)] == []
             assert (await client.get_finding(ORG, FINDING)).id == FINDING
             result = await client.wait_for_review(ORG, REVIEW, timeout=2)
             assert result.status == "INCOMPLETE"
@@ -104,13 +123,17 @@ def main() -> None:
 
     try:
         with ProoflineClient(SecretStr(TOKEN), base_url=url) as client:
+            assert client.list_reviews(ORG, query=QUERY).items == []
+            history = client.list_pull_request_reviews(ORG, "repo/name", 42, filters=filters)
+            assert history.items == []
+            assert list(client.iter_reviews(ORG, filters=filters)) == []
             assert client.get_finding(ORG, FINDING).id == FINDING
             result = client.wait_for_review(ORG, REVIEW, timeout=2)
             assert result.status == "INCOMPLETE"
             assert result.gaps[0].reason_codes[0] == "WORLD_UNAVAILABLE"
             assert TOKEN not in repr(client)
         asyncio.run(asynchronous())
-        assert len(calls) == 4
+        assert len(calls) == 10
     finally:
         server.shutdown()
         server.server_close()

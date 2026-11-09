@@ -95,7 +95,11 @@ class McpTools:
     def __init__(self, http: httpx.Client) -> None:
         self._http = http
 
-    def _call(self, name: str, args: dict[str, Any]) -> KnowledgeResult:
+    def _call(
+        self, name: str, args: dict[str, Any], *, organization_id: str | None = None
+    ) -> KnowledgeResult:
+        if organization_id is not None:
+            args = {**args, "organization_id": organization_id}
         call = _body("tools/call", {"name": name, "arguments": args}, 2)
         frames = [
             (
@@ -140,7 +144,11 @@ class AsyncMcpTools:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
 
-    async def _call(self, name: str, args: dict[str, Any]) -> KnowledgeResult:
+    async def _call(
+        self, name: str, args: dict[str, Any], *, organization_id: str | None = None
+    ) -> KnowledgeResult:
+        if organization_id is not None:
+            args = {**args, "organization_id": organization_id}
         call = _body("tools/call", {"name": name, "arguments": args}, 2)
         frames = [
             (
@@ -177,3 +185,17 @@ class AsyncMcpTools:
             if identity == 1 and result.get("protocolVersion") != PROTOCOL:
                 raise _refused()
         return _result(result)
+
+
+class McpClient(McpTools):
+    """Discover the organizations currently authorized for this MCP credential."""
+
+    def list_organizations(self) -> KnowledgeResult:
+        return self._call("list_organizations", {})
+
+
+class AsyncMcpClient(AsyncMcpTools):
+    """Discover the organizations currently authorized for this MCP credential."""
+
+    async def list_organizations(self) -> KnowledgeResult:
+        return await self._call("list_organizations", {})

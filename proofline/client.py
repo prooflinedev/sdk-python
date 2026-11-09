@@ -69,6 +69,7 @@ from ._generated.models.run_now_response import RunNowResponse
 from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
+from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
@@ -109,6 +110,7 @@ class ReviewFilters(TypedDict, total=False):
     findings: str | None
     kind: str | None
     limit: int | None
+    query: str | None
     repository: UUID | None
     search: str | None
     status: str | None
@@ -202,6 +204,7 @@ class ProoflineClient(Operations):
             transport=_transport.RetryTransport(self._api.token, timeout),
         )
         self._api.set_httpx_client(self._http)
+        self.mcp = McpClient(self._http)
         self.knowledge = KnowledgeClient(self._http)
         self.fixes = FixesClient(self._http)
 
@@ -530,6 +533,7 @@ class AsyncProoflineClient(AsyncOperations):
             transport=_transport.AsyncRetryTransport(self._api.token, timeout),
         )
         self._api.set_async_httpx_client(self._http)
+        self.mcp = AsyncMcpClient(self._http)
         self.knowledge = AsyncKnowledgeClient(self._http)
         self.fixes = AsyncFixesClient(self._http)
 
