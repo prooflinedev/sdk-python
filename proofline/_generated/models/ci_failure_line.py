@@ -14,7 +14,7 @@ T = TypeVar("T", bound="CiFailureLine")
 
 @_attrs_define
 class CiFailureLine:
-    """One failed CI job as the Check states it.
+    """One failed CI job in the observation.
 
     Attributes:
         attribution (CiFailureAttribution): What the control plane records as a failure's cause.

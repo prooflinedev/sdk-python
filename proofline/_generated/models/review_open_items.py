@@ -44,8 +44,8 @@ class ReviewOpenItems:
         review_status (OpenItemsReviewStatus):
         threads (OpenItemsThreadsType0 | OpenItemsThreadsType1):
         ci_failures (list[CiFailureLine] | Unset): Failed CI jobs diagnosed on the reviewed head, the newest diagnosed
-             attempt of each run, in diagnosis order. The Check states each one;
-             none is a Proofline open item. Absent when no job was diagnosed.
+             attempt of each run, in diagnosis order. The pull-request Check counts
+             them; none is a Proofline open item. Absent when no job was diagnosed.
         ci_failures_omitted (int | Unset): Diagnosed failed CI jobs on the reviewed head beyond `ci_failures`.
         ci_runs_pending (int | Unset): Failed CI run attempts on the reviewed head whose diagnosis is queued
              or running, so none of their jobs has a line yet.
