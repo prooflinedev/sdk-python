@@ -59,7 +59,7 @@ Each response returns the original text, decoded rows, dataset version, settled 
 
 ## Coverage uploads
 
-To upload coverage reports from CI, use a repository-restricted token with `coverage:write` and current repository write access. Name the full commit SHA that the tests ran on. Reports may use LCOV, Cobertura XML, JaCoCo XML, or Go cover profiles.
+To upload coverage reports from CI, use a repository-restricted token with `coverage:write` and current repository write access. Name the full commit SHA that the tests ran on. Send 1 to 50 LCOV, Cobertura XML, JaCoCo XML, or Go cover reports in a JSON body of at most 30 MiB.
 
 ```python
 import os
