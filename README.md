@@ -20,6 +20,24 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Errors and refusals
+
+A refused request raises `ProoflineError` with the server problem's `status`, `type`, `title` and `detail`. When a review request creates nothing, the error also carries `refusal`, whose `reason` names the setting to change, such as `NO_LINKED_ENVIRONMENT` or `ENVIRONMENT_NOT_READY`, and `repository_name`. `RunNowRefusal` names the type of `refusal`. A refusal that does not match the public contract keeps its status, `title` and `detail` with the type `urn:proofline:sdk:invalid-response` and no `refusal`. The token is redacted from every text field, and `repr` and `str` show only the status.
+
+```python
+from proofline import ProoflineError
+
+try:
+    client.request_review(organization_id, repository_id, 12)
+except ProoflineError as error:
+    if error.refusal is None:
+        raise
+    if error.refusal.reason == "NO_LINKED_ENVIRONMENT":
+        print(f"Link an environment to {error.repository_name}.")
+    else:
+        print(error.detail)
+```
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.

@@ -30,7 +30,7 @@ from ._generated.models import (
     UploadedReport,
 )
 from ._transport import VERSION as __version__
-from ._transport import ProoflineError
+from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
@@ -65,6 +65,7 @@ __all__ = [
     "ReviewOutcome",
     "ReviewPage",
     "RunNowMode",
+    "RunNowRefusal",
     "RunNowRequest",
     "RunNowResponse",
     "SecretStr",

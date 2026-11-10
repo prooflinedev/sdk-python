@@ -56,6 +56,7 @@ from proofline import client as client_module
 from proofline._generated.models.finding_fix_prompt_type_0 import FindingFixPromptType0
 from proofline._generated.models.finding_fix_prompt_type_1 import FindingFixPromptType1
 from proofline._generated.types import UNSET
+from proofline._transport import REFUSAL_SHAPES
 
 from .fixtures import (
     ASSESSMENT,
@@ -434,7 +435,11 @@ async def test_coverage_upload_preserves_reports_commit_and_server_refusal(mode:
                 assert (result.covered_lines, result.instrumented_lines) == (1, 2)
             with pytest.raises(ProoflineError) as refused:
                 await call(client, "upload_coverage_reports", ORG, REPOSITORY, body=body)
-            assert refused.value.status == 422
+            error = refused.value
+            assert (error.status, error.type) == (422, "about:blank")
+            assert error.title == "unprocessable coverage upload"
+            assert error.detail == "The coverage upload was refused."
+            assert (error.refusal, error.repository_name) == (None, None)
         assert len(server.requests) == 3
 
 
@@ -517,6 +522,164 @@ async def test_review_reads_preserve_summary_and_exact_code_identity(
                     assert summary.prose.headline == "[withheld] <script>literal text</script>"
                     assert summary.prose.paragraphs == ["Moves the request handler."]
                     assert summary.prose.notable_paths == ["src/new.py"]
+
+
+CONTRACT = json.loads((Path(__file__).parents[1] / "openapi.public.json").read_text())
+REFUSAL_VARIANTS = CONTRACT["components"]["schemas"]["RunNowRefusalView"]["oneOf"]
+ENVIRONMENT = {
+    "id": str(ASSESSMENT),
+    "external_key": "production",
+    "display_name": "Production",
+    "status": "PENDING",
+}
+COMMIT = CommitReviewRequest(base_commit_sha="b" * 40, head_commit_sha="c" * 40)
+REVIEW_REQUESTS = {
+    "request_review": (42,),
+    "request_patch_review": (),
+    "request_file_review": (),
+    "request_commit_review": (),
+}
+
+
+def review_request(name: str) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    bodies = {
+        "request_review": UNSET,
+        "request_patch_review": PatchReviewRequest(
+            base_commit_sha="b" * 40, patch="diff --git a/x b/x\n"
+        ),
+        "request_file_review": FileReviewRequest(commit_sha="c" * 40, paths=["src/main.py"]),
+        "request_commit_review": COMMIT,
+    }
+    return (ORG, REPOSITORY, *REVIEW_REQUESTS[name]), {"body": bodies[name]}
+
+
+def refusal_view(variant: dict[str, Any]) -> dict[str, Any]:
+    view: dict[str, Any] = {"reason": variant["properties"]["reason"]["const"]}
+    for name in variant["required"]:
+        if name == "environment":
+            view[name] = dict(ENVIRONMENT, display_name=f"{PRIVATE} {TOKEN}")
+        elif name == "detail":
+            view[name] = f"Configuration names {TOKEN}."
+    return view
+
+
+def refused(view: Any) -> dict[str, Any]:
+    return {
+        "title": "invalid request",
+        "status": 400,
+        "detail": f"Nothing was created for {TOKEN}.",
+        "repository_name": "api",
+        "refusal": view,
+    }
+
+
+@MODES
+@pytest.mark.parametrize(
+    "variant", REFUSAL_VARIANTS, ids=[v["properties"]["reason"]["const"] for v in REFUSAL_VARIANTS]
+)
+async def test_review_requests_return_each_documented_refusal(
+    mode: str, variant: dict[str, Any]
+) -> None:
+    view = refusal_view(variant)
+    with Server(
+        lambda request, index: Reply(
+            400, refused(view), {"Content-Type": "application/problem+json"}
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            for name in REVIEW_REQUESTS:
+                args, kwargs = review_request(name)
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, name, *args, **kwargs)
+                error = raised.value
+                assert (error.status, error.type) == (400, "about:blank")
+                assert error.title == "invalid request"
+                assert error.detail == "Nothing was created for [redacted]."
+                assert error.repository_name == "api"
+                assert error.refusal is not None
+                assert error.refusal.reason == view["reason"]
+                decoded = error.refusal.to_dict()
+                assert TOKEN not in json.dumps(decoded)
+                if "environment" in view:
+                    assert decoded["environment"]["display_name"] == f"{PRIVATE} [redacted]"
+                diagnostic = repr(error) + str(error) + "".join(traceback.format_exception(error))
+                assert PRIVATE not in diagnostic and TOKEN not in diagnostic
+        assert len(server.requests) == len(REVIEW_REQUESTS)
+
+
+@MODES
+@pytest.mark.parametrize(
+    "body",
+    [
+        refused({"reason": "NOT_A_DOCUMENTED_REASON"}),
+        refused({"reason": "ENVIRONMENT_REVIEWS_OFF"}),
+        refused("NO_LINKED_ENVIRONMENT"),
+        dict(refused({"reason": "NO_LINKED_ENVIRONMENT"}), repository_name=7),
+        {k: v for k, v in refused({"reason": "NO_LINKED_ENVIRONMENT"}).items() if k != "detail"},
+        refused({"reason": "INVALID_DELIVERY_CONFIGURATION", "detail": 7, "environment": 7}),
+        refused({"reason": "INVALID_DELIVERY_CONFIGURATION", "detail": "d", "environment": 7}),
+        refused({"reason": "ENVIRONMENT_REVIEWS_OFF", "environment": dict(ENVIRONMENT, id=7)}),
+        refused(
+            {
+                "reason": "INVALID_DELIVERY_CONFIGURATION",
+                "detail": "d",
+                "environment": dict(ENVIRONMENT, id="not-a-uuid"),
+            }
+        ),
+        refused({"reason": "ENVIRONMENT_REVIEWS_OFF", "environment": dict(ENVIRONMENT, id="x")}),
+        refused(
+            {"reason": "ENVIRONMENT_NOT_READY", "environment": ENVIRONMENT, "status_detail": 7}
+        ),
+    ],
+    ids=[
+        "unknown-reason",
+        "missing-environment",
+        "untyped-refusal",
+        "repository-name",
+        "detail",
+        "numeric-delivery-fields",
+        "numeric-delivery-environment",
+        "environment-field",
+        "delivery-environment-id",
+        "required-environment-id",
+        "status-detail",
+    ],
+)
+async def test_malformed_refusal_keeps_fixed_sdk_problem_type(
+    mode: str, body: dict[str, Any]
+) -> None:
+    with Server(lambda request, index: Reply(400, body)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "request_commit_review", ORG, REPOSITORY, body=COMMIT)
+            error = raised.value
+            assert (error.status, error.type) == (400, "urn:proofline:sdk:invalid-response")
+            assert error.title == "invalid request"
+            assert (error.refusal, error.repository_name) == (None, None)
+            assert TOKEN not in error.detail
+
+
+def test_every_documented_refusal_reason_has_a_field_check() -> None:
+    reasons = {variant["properties"]["reason"]["const"] for variant in REFUSAL_VARIANTS}
+    assert set(REFUSAL_SHAPES) == reasons
+
+
+@MODES
+async def test_problem_without_detail_keeps_status_and_title(mode: str) -> None:
+    with Server(
+        lambda request, index: Reply(
+            500, {"title": "internal error", "status": 500, "detail": None}
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "get_finding", ORG, FINDING)
+            error = raised.value
+            assert (error.status, error.type, error.title) == (500, "about:blank", "internal error")
+            assert "without a problem document" not in error.detail
+            assert "internal error" in error.detail
+            assert error.refusal is None
+        assert len(server.requests) == 1
 
 
 @MODES

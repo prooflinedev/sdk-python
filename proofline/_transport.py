@@ -7,22 +7,38 @@ import math
 import os
 import re
 from asyncio import sleep as async_sleep
-from collections.abc import AsyncIterator, Generator, Iterator
+from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from time import monotonic, sleep
+from typing import Any, TypeAlias, cast
 from urllib.parse import urlsplit
 
 import anyio
 import httpx
 from pydantic import SecretStr
 
+from ._generated.models import (
+    RefusedEnvironment,
+    RunNowRefusalViewType0,
+    RunNowRefusalViewType1,
+    RunNowRefusalViewType2,
+    RunNowRefusalViewType3,
+    RunNowRefusalViewType4,
+    RunNowRefusalViewType5,
+    RunNowRefusalViewType6,
+    RunNowRefusalViewType7,
+    RunNowRefusalViewType8,
+    RunNowRefusalViewType9,
+    RunNowRefused,
+)
+from ._generated.types import Unset
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
 
-VERSION = "4.0.0"
+VERSION = "5.0.0"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 FULL_WEEKDAY = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
@@ -34,6 +50,19 @@ HTTP_DATES = tuple(
         rf"{FULL_WEEKDAY}, \d{{2}}-{MONTH}-(\d{{2}}) \d{{2}}:\d{{2}}:\d{{2}} GMT",
         rf"{WEEKDAY} {MONTH} [ \d]\d \d{{2}}:\d{{2}}:\d{{2}} \d{{4}}",
     )
+)
+# Each variant has a literal `reason`; the other fields depend on it.
+RunNowRefusal: TypeAlias = (
+    RunNowRefusalViewType0
+    | RunNowRefusalViewType1
+    | RunNowRefusalViewType2
+    | RunNowRefusalViewType3
+    | RunNowRefusalViewType4
+    | RunNowRefusalViewType5
+    | RunNowRefusalViewType6
+    | RunNowRefusalViewType7
+    | RunNowRefusalViewType8
+    | RunNowRefusalViewType9
 )
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
 
@@ -49,12 +78,29 @@ class BearerAuth(httpx.Auth):
 
 
 class ProoflineError(Exception):
-    """An RFC 9457 problem. Inspect detail explicitly; repr contains only status."""
+    """An RFC 9457 problem. Inspect detail explicitly; repr contains only status.
 
-    def __init__(self, status: int, type: str, detail: str) -> None:
+    title names the server's problem class. A refused review request also
+    carries the typed refusal, whose reason names the setting to change, and
+    the repository_name it refers to.
+    """
+
+    def __init__(
+        self,
+        status: int,
+        type: str,
+        detail: str,
+        *,
+        title: str | None = None,
+        refusal: RunNowRefusal | None = None,
+        repository_name: str | None = None,
+    ) -> None:
         self.status = status
         self.type = type
         self.detail = detail
+        self.title = title
+        self.refusal = refusal
+        self.repository_name = repository_name
         super().__init__(f"Proofline request failed (HTTP {status}).")
 
     def __repr__(self) -> str:
@@ -184,21 +230,99 @@ def retry_delay(value: str | None, attempt: int) -> float | None:
     return delay if math.isfinite(delay) and delay <= 60 else None
 
 
+def redacted(value: object, raw: str) -> object:
+    if isinstance(value, str):
+        return value.replace(raw, "[redacted]")
+    if isinstance(value, list):
+        return [redacted(item, raw) for item in value]
+    if isinstance(value, dict):
+        return {key: redacted(item, raw) for key, item in value.items()}
+    return value
+
+
+def environment(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(value.get(key), str) for key in ("id", "external_key", "display_name", "status")
+    )
+
+
+def optional(value: object, check: Callable[[object], bool]) -> bool:
+    return value is None or check(value)
+
+
+def text(value: object) -> bool:
+    return isinstance(value, str)
+
+
+# The generated parser copies reason fields without checking their types, so
+# each documented reason's fields are checked here before a refusal is typed.
+REFUSAL_SHAPES: dict[str, Callable[[dict[str, Any]], bool]] = {
+    "TRIGGER_DISABLED": lambda view: True,
+    "REPOSITORY_DISABLED": lambda view: True,
+    "NO_LINKED_ENVIRONMENT": lambda view: True,
+    "ENVIRONMENT_REVIEWS_OFF": lambda view: environment(view.get("environment")),
+    "ENVIRONMENT_NOT_READY": lambda view: (
+        environment(view.get("environment")) and optional(view.get("status_detail"), text)
+    ),
+    "ENVIRONMENT_EVIDENCE_UNAVAILABLE": lambda view: environment(view.get("environment")),
+    "INVALID_DELIVERY_CONFIGURATION": lambda view: (
+        text(view.get("detail")) and optional(view.get("environment"), environment)
+    ),
+    "PULL_REQUEST_UNKNOWN": lambda view: True,
+    "AUTHOR_HAS_NO_SEAT": lambda view: True,
+    "PULL_REQUEST_CLOSED": lambda view: True,
+}
+
+
 def problem(response: httpx.Response, token: SecretStr) -> ProoflineError:
-    kind = "about:blank"
-    detail = "Proofline returned an HTTP error without a problem document."
     try:
         body = response.json()
-        if isinstance(body, dict):
-            if isinstance(body.get("type"), str):
-                kind = body["type"]
-            if isinstance(body.get("detail"), str):
-                detail = body["detail"]
     except (ValueError, UnicodeError):
-        pass
-    raw = token.get_secret_value()
+        body = None
+    if not isinstance(body, dict):
+        return ProoflineError(
+            response.status_code,
+            "about:blank",
+            "Proofline returned an HTTP error without a problem document.",
+        )
+    body = cast(dict[str, Any], redacted(body, token.get_secret_value()))
+    kind = body["type"] if isinstance(body.get("type"), str) else "about:blank"
+    title = body["title"] if isinstance(body.get("title"), str) else None
+    if isinstance(body.get("detail"), str):
+        detail = body["detail"]
+    elif title is not None:
+        # Logged internal errors omit detail; the problem itself still arrived.
+        detail = f"Proofline returned the problem {title!r} without a detail."
+    else:
+        detail = "Proofline returned an HTTP error without a problem document."
+    if "refusal" not in body:
+        return ProoflineError(response.status_code, kind, detail, title=title)
+    try:
+        view = body["refusal"]
+        shape = isinstance(view, dict) and REFUSAL_SHAPES.get(str(view.get("reason")))
+        if not shape or not shape(view):
+            raise TypeError("refusal fields")
+        refused = RunNowRefused.from_dict(body)
+        if title is None or not isinstance(body.get("detail"), str):
+            raise TypeError("problem fields")
+        if not isinstance(refused.repository_name, str):
+            raise TypeError("repository_name")
+        # The generated optional parser keeps the raw value when a nested
+        # environment does not parse, for example an id that is not a UUID.
+        nested = getattr(refused.refusal, "environment", None)
+        if not isinstance(nested, RefusedEnvironment | Unset | None):
+            raise TypeError("environment")
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return ProoflineError(
+            response.status_code, "urn:proofline:sdk:invalid-response", detail, title=title
+        )
     return ProoflineError(
-        response.status_code, kind.replace(raw, "[redacted]"), detail.replace(raw, "[redacted]")
+        response.status_code,
+        kind,
+        detail,
+        title=title,
+        refusal=refused.refusal,
+        repository_name=refused.repository_name,
     )
 
 
