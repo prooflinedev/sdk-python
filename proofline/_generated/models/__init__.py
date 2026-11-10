@@ -134,8 +134,6 @@ from .run_now_refusal_view_type_6 import RunNowRefusalViewType6
 from .run_now_refusal_view_type_7 import RunNowRefusalViewType7
 from .run_now_refusal_view_type_8 import RunNowRefusalViewType8
 from .run_now_refusal_view_type_9 import RunNowRefusalViewType9
-from .run_now_refusal_view_type_10 import RunNowRefusalViewType10
-from .run_now_refusal_view_type_11 import RunNowRefusalViewType11
 from .run_now_refused import RunNowRefused
 from .run_now_request import RunNowRequest
 from .run_now_response import RunNowResponse
@@ -285,8 +283,6 @@ __all__ = (
     "RunNowMode",
     "RunNowRefusalViewType0",
     "RunNowRefusalViewType1",
-    "RunNowRefusalViewType10",
-    "RunNowRefusalViewType11",
     "RunNowRefusalViewType2",
     "RunNowRefusalViewType3",
     "RunNowRefusalViewType4",
