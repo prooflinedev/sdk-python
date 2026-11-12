@@ -1969,3 +1969,44 @@ def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> No
     fixture.write_text("\n".join(lines))
     # Use the same mypy configuration as the SDK qualification gate.
     subprocess.run([sys.executable, "-m", "mypy", str(fixture)], check=True)
+
+
+@MODES
+async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> None:
+    kwargs = {
+        "from_time": "2026-10-01T00:00:00Z",
+        "to_time": "2026-10-25T00:00:00Z",
+    }
+
+    for separator in ("\x85", "\u2028", "\u2029"):
+        row = {
+            "dataset_version": 1,
+            "claim": f"before{separator}after",
+        }
+        body = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+
+        def respond(request: Request, index: int) -> Reply:
+            return Reply(
+                body=body,
+                headers={
+                    "Content-Type": "application/x-ndjson",
+                    "X-Proofline-Export-Version": "1",
+                    "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+                    "X-Proofline-Export-Next-Cursor": "next-page",
+                },
+            )
+
+        with Server(respond) as server:
+            async with session(mode, server.url) as client:
+                exported = await call(
+                    client,
+                    "export_reviews",
+                    ORG,
+                    "findings",
+                    format="ndjson",
+                    **kwargs,
+                )
+
+                assert len(exported.rows) == 1
+                assert exported.rows[0]["claim"] == row["claim"]
+                assert exported.next_cursor == "next-page"

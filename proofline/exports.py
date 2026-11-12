@@ -48,7 +48,7 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
                 raise ValueError
             rows = [dict(zip(columns, row, strict=True)) for row in records]
         else:
-            rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+            rows = [json.loads(line) for line in text.split("\n") if line.strip()]
         if any(not isinstance(row, dict) or str(row.get("dataset_version")) != "1" for row in rows):
             raise ValueError
         return ExportPage(
