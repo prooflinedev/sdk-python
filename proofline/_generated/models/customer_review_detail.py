@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..models.deep_review_escalation import DeepReviewEscalation
     from ..models.local_reverification import LocalReverification
     from ..models.open_items_view import OpenItemsView
+    from ..models.provider_wait import ProviderWait
     from ..models.pull_request_merge_gate import PullRequestMergeGate
     from ..models.refresh_view import RefreshView
     from ..models.related_review import RelatedReview
@@ -134,6 +135,9 @@ class CustomerReviewDetail:
         open_items_observation (None | ReviewOpenItems | Unset): Dated PR counts with head, evaluated-scope and bounded
             thread proof.
              Absent when that observation is unavailable; scalar counts remain separate.
+        provider_wait (None | ProviderWait | Unset): What holds the review now: GitHub's rate limit, and when it resets.
+             Null unless one of the review's runs waits for it, and once the run
+             continues.
         publication_detail (None | str | Unset): Why a publication was refused, or how one failed. Server text.
         pull_request_author_avatar_url (None | str | Unset): Provider-supplied avatar URL. Login-derived `.png` URLs do
             not work for
@@ -231,6 +235,7 @@ class CustomerReviewDetail:
     merge_group_pull_request_numbers: list[int] | Unset = UNSET
     open_items: None | OpenItemsView | Unset = UNSET
     open_items_observation: None | ReviewOpenItems | Unset = UNSET
+    provider_wait: None | ProviderWait | Unset = UNSET
     publication_detail: None | str | Unset = UNSET
     pull_request_author_avatar_url: None | str | Unset = UNSET
     pull_request_author_github_user_id: int | None | Unset = UNSET
@@ -265,6 +270,7 @@ class CustomerReviewDetail:
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
+        from ..models.provider_wait import ProviderWait  # noqa: PLC0415
         from ..models.pull_request_merge_gate import PullRequestMergeGate  # noqa: PLC0415
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
@@ -456,6 +462,14 @@ class CustomerReviewDetail:
             open_items_observation = self.open_items_observation.to_dict()
         else:
             open_items_observation = self.open_items_observation
+
+        provider_wait: dict[str, Any] | None | Unset
+        if isinstance(self.provider_wait, Unset):
+            provider_wait = UNSET
+        elif isinstance(self.provider_wait, ProviderWait):
+            provider_wait = self.provider_wait.to_dict()
+        else:
+            provider_wait = self.provider_wait
 
         publication_detail: None | str | Unset
         if isinstance(self.publication_detail, Unset):
@@ -692,6 +706,8 @@ class CustomerReviewDetail:
             field_dict["open_items"] = open_items
         if open_items_observation is not UNSET:
             field_dict["open_items_observation"] = open_items_observation
+        if provider_wait is not UNSET:
+            field_dict["provider_wait"] = provider_wait
         if publication_detail is not UNSET:
             field_dict["publication_detail"] = publication_detail
         if pull_request_author_avatar_url is not UNSET:
@@ -755,6 +771,7 @@ class CustomerReviewDetail:
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
         from ..models.local_reverification import LocalReverification  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
+        from ..models.provider_wait import ProviderWait  # noqa: PLC0415
         from ..models.pull_request_merge_gate import PullRequestMergeGate  # noqa: PLC0415
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.related_review import RelatedReview  # noqa: PLC0415
@@ -1079,6 +1096,23 @@ class CustomerReviewDetail:
         open_items_observation = _parse_open_items_observation(
             d.pop("open_items_observation", UNSET)
         )
+
+        def _parse_provider_wait(data: object) -> None | ProviderWait | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                provider_wait_type_0 = ProviderWait.from_dict(data)
+
+                return provider_wait_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | ProviderWait | Unset, data)
+
+        provider_wait = _parse_provider_wait(d.pop("provider_wait", UNSET))
 
         def _parse_publication_detail(data: object) -> None | str | Unset:
             if data is None:
@@ -1428,6 +1462,7 @@ class CustomerReviewDetail:
             merge_group_pull_request_numbers=merge_group_pull_request_numbers,
             open_items=open_items,
             open_items_observation=open_items_observation,
+            provider_wait=provider_wait,
             publication_detail=publication_detail,
             pull_request_author_avatar_url=pull_request_author_avatar_url,
             pull_request_author_github_user_id=pull_request_author_github_user_id,

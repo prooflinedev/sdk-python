@@ -69,7 +69,8 @@ def sync_detailed(
 
     Args:
         org_id (UUID):
-        repository (str):
+        repository (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         run_number (int):
 
@@ -110,7 +111,8 @@ def sync(
 
     Args:
         org_id (UUID):
-        repository (str):
+        repository (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         run_number (int):
 
@@ -146,7 +148,8 @@ async def asyncio_detailed(
 
     Args:
         org_id (UUID):
-        repository (str):
+        repository (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         run_number (int):
 
@@ -185,7 +188,8 @@ async def asyncio(
 
     Args:
         org_id (UUID):
-        repository (str):
+        repository (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         run_number (int):
 

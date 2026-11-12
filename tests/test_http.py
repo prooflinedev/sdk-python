@@ -53,8 +53,10 @@ from proofline import (
     models,
 )
 from proofline import client as client_module
+from proofline._generated.models.export_review_kind import ExportReviewKind
 from proofline._generated.models.finding_fix_prompt_type_0 import FindingFixPromptType0
 from proofline._generated.models.finding_fix_prompt_type_1 import FindingFixPromptType1
+from proofline._generated.models.reviews_export_row import ReviewsExportRow
 from proofline._generated.types import UNSET
 from proofline._transport import REFUSAL_SHAPES
 
@@ -1607,6 +1609,70 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
             with pytest.raises(ProoflineError) as caught:
                 await call(client, "export_reviews", ORG, "findings", cursor="refused", **kwargs)
             assert caught.value.status == 404
+
+
+@MODES
+@pytest.mark.parametrize("format", ["csv", "ndjson"])
+async def test_review_export_retains_every_recorded_kind(mode: str, format: str) -> None:
+    kinds = [
+        "PULL_REQUEST",
+        "DEPLOYMENT",
+        "PATCH",
+        "COMMIT",
+        "FILES",
+        "MERGE_GROUP",
+        "REVISION_SCAN",
+    ]
+    rows = [
+        {
+            "dataset_version": 1,
+            "kind": kind,
+            "created_at": "2026-10-24T00:00:00Z",
+            "organization_id": str(ORG),
+            "review_id": "00000000-0000-7000-8000-000000000002",
+            "status": "COMPLETED",
+            "trigger_origin": "AUTOMATIC",
+        }
+        for kind in kinds
+    ]
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.path.startswith(f"/api/v1/organizations/{ORG}/exports/reviews?")
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        return Reply(
+            body=(
+                (
+                    ",".join(rows[0])
+                    + "\r\n"
+                    + "".join(",".join(map(str, row.values())) + "\r\n" for row in rows)
+                ).encode()
+                if format == "csv"
+                else ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+            ),
+            headers={
+                "Content-Type": "text/csv" if format == "csv" else "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            page = await call(
+                client,
+                "export_reviews",
+                ORG,
+                "reviews",
+                format=format,
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+            )
+            assert [row["kind"] for row in page.rows] == kinds
+            # The generated wire enum must accept the same retained spellings.
+            assert [ExportReviewKind(row["kind"]).value for row in page.rows] == kinds
+            if format == "ndjson":
+                assert [ReviewsExportRow.from_dict(row).kind.value for row in page.rows] == kinds
+            assert page.next_cursor is None
 
 
 @MODES

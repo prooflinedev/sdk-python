@@ -174,7 +174,8 @@ def sync_detailed(
 
     Args:
         org_id (UUID):
-        repository_path (str):
+        repository_path (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
@@ -247,7 +248,8 @@ def sync(
 
     Args:
         org_id (UUID):
-        repository_path (str):
+        repository_path (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
@@ -315,7 +317,8 @@ async def asyncio_detailed(
 
     Args:
         org_id (UUID):
-        repository_path (str):
+        repository_path (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
@@ -386,7 +389,8 @@ async def asyncio(
 
     Args:
         org_id (UUID):
-        repository_path (str):
+        repository_path (str): The repository's name without its owner, or a name it had before a
+            rename.
         pull_request_number (int):
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active

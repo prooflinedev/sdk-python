@@ -102,6 +102,8 @@ from .plan_projection import PlanProjection
 from .problem import Problem
 from .prose import Prose
 from .prose_outcome_type_0 import ProseOutcomeType0
+from .provider_wait import ProviderWait
+from .provider_wait_reason import ProviderWaitReason
 from .pull_request_merge_gate import PullRequestMergeGate
 from .refresh_view import RefreshView
 from .refused_environment import RefusedEnvironment
@@ -259,6 +261,8 @@ __all__ = (
     "Problem",
     "Prose",
     "ProseOutcomeType0",
+    "ProviderWait",
+    "ProviderWaitReason",
     "PullRequestMergeGate",
     "RefreshView",
     "RefusedEnvironment",
