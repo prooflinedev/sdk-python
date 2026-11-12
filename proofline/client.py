@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from inspect import isawaitable
 from time import monotonic, sleep
 from types import TracebackType
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
@@ -476,12 +477,20 @@ class ProoflineClient(Operations):
         raise _pagination_limit()
 
     def wait_for_review(
-        self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        timeout: float = 300,
+        on_update: Callable[[CustomerReviewDetail], None] | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
         A name lookup still running at the deadline returns TIMED_OUT; it never
         reports completion.
+
+        on_update receives each validated poll, including the terminal review.
+        It runs inline within the wait deadline; callback exceptions propagate.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -501,6 +510,10 @@ class ProoflineClient(Operations):
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id)
+                if on_update is not None:
+                    on_update(last)
+                    if (_transport.remaining() or 0) <= 0:
+                        break
                 if result is not None:
                     return result
                 sleep(min(interval, _transport.remaining() or 0))
@@ -830,8 +843,18 @@ class AsyncProoflineClient(AsyncOperations):
         raise _pagination_limit()
 
     async def wait_for_review(
-        self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        timeout: float = 300,
+        on_update: Callable[[CustomerReviewDetail], Awaitable[None] | None] | None = None,
     ) -> ReviewOutcome:
+        """Wait with an optional inline synchronous or asynchronous progress callback.
+
+        on_update receives each validated poll, including the terminal review.
+        Its execution counts toward timeout and its exceptions propagate.
+        """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         url = _review_url(self._base_url, organization_id, review_id)
@@ -849,6 +872,12 @@ class AsyncProoflineClient(AsyncOperations):
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id)
+                if on_update is not None:
+                    update = on_update(last)
+                    if isawaitable(update):
+                        await update
+                    if (_transport.remaining() or 0) <= 0:
+                        break
                 if result is not None:
                     return result
                 await async_sleep(min(interval, _transport.remaining() or 0))

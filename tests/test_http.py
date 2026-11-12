@@ -991,6 +991,104 @@ async def test_wait_retains_evidence_gaps_after_running_review(
 
 
 @MODES
+async def test_wait_progress_reports_validated_polls_without_extra_requests(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    updates: list[CustomerReviewDetail] = []
+    responses = [review("PENDING"), review("RUNNING"), review()]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, on_update=updates.append
+            )
+        assert [update.status for update in updates] == ["PENDING", "RUNNING", "COMPLETED"]
+        assert all(update.id == REVIEW for update in updates)
+        assert result.status == "COMPLETED"
+        assert result.review is updates[-1]
+        assert len(server.requests) == 3
+        assert clock.delays == [5, 10]
+
+
+async def test_async_wait_awaits_progress_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Clock(monkeypatch)
+    updates: list[str] = []
+    responses = [review("RUNNING"), review()]
+
+    async def update(detail: CustomerReviewDetail) -> None:
+        await asyncio.sleep(0)
+        updates.append(detail.status)
+
+    def respond(request: Request, index: int) -> Reply:
+        if index:
+            assert updates == ["RUNNING"]
+        return Reply(body=responses[index])
+
+    with Server(respond) as server:
+        async with session("async", server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, on_update=update)
+        assert updates == ["RUNNING", "COMPLETED"]
+        assert result.status == "COMPLETED"
+        assert clock.delays == [5]
+
+
+@MODES
+async def test_wait_callback_error_propagates_and_restores_deadline(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    previous_deadline = _transport.DEADLINE.get()
+
+    def update(detail: CustomerReviewDetail) -> None:
+        raise RuntimeError("status display failed")
+
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(RuntimeError, match="status display failed"):
+                await call(client, "wait_for_review", ORG, REVIEW, on_update=update)
+            assert _transport.DEADLINE.get() == previous_deadline
+        assert len(server.requests) == 1
+
+
+@MODES
+async def test_wait_progress_obeys_deadline_including_callback_time(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    updates: list[str] = []
+
+    def update(detail: CustomerReviewDetail) -> None:
+        updates.append(detail.status)
+        clock.now += 2
+
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            empty = await call(client, "wait_for_review", ORG, REVIEW, timeout=0, on_update=update)
+            assert empty.status == "TIMED_OUT"
+            assert updates == []
+            assert server.requests == []
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=1, on_update=update)
+        assert result.status == "TIMED_OUT"
+        assert updates == ["RUNNING"]
+        assert len(server.requests) == 1
+        assert clock.delays == []
+
+
+@MODES
+async def test_wait_does_not_publish_invalid_review_to_callback(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    updates: list[CustomerReviewDetail] = []
+    wrong_review = {**review(), "id": str(UUID(int=42))}
+    with Server(lambda request, index: Reply(body=wrong_review)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError):
+                await call(client, "wait_for_review", ORG, REVIEW, on_update=updates.append)
+        assert updates == []
+
+
+@MODES
 async def test_code_only_outcomes_retain_recorded_kind_and_env_precedence(
     mode: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
