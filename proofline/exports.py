@@ -31,7 +31,7 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
     try:
         media = "text/csv" if format == "csv" else "application/x-ndjson"
         if (
-            response.headers.get("content-type", "").split(";")[0].strip() != media
+            response.headers.get("content-type", "").split(";")[0].strip().lower() != media
             or response.headers.get("x-proofline-export-version") != "1"
         ):
             raise ValueError
