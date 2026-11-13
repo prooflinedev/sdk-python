@@ -180,6 +180,11 @@ class ProoflineClient(Operations):
 
     Name resolution, connection, TLS and socket operations stop at the configured
     HTTP timeout and at a wait deadline.
+
+    ``max_retries`` (default 3, ``0`` disables) bounds retries of connections that
+    could not be opened, for any method, and of GET requests answered with 429, 502,
+    503 or 504. Status retries honour ``Retry-After`` up to 60 seconds and otherwise
+    back off exponentially (1s, 2s, 4s, ...). Other methods are never re-sent.
     """
 
     def __init__(
@@ -188,7 +193,9 @@ class ProoflineClient(Operations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        max_retries: int = _transport.DEFAULT_MAX_RETRIES,
     ) -> None:
+        retries = _transport.max_retries(max_retries)
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
         self._http = httpx.Client(
@@ -201,7 +208,7 @@ class ProoflineClient(Operations):
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(self._api.token, timeout, retries),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
@@ -511,13 +518,17 @@ class ProoflineClient(Operations):
 
 
 class AsyncProoflineClient(AsyncOperations):
+    """Asynchronous typed HTTP operations; options match ProoflineClient."""
+
     def __init__(
         self,
         token: str | SecretStr | None = None,
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        max_retries: int = _transport.DEFAULT_MAX_RETRIES,
     ) -> None:
+        retries = _transport.max_retries(max_retries)
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
         self._http = httpx.AsyncClient(
@@ -530,7 +541,7 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(self._api.token, timeout, retries),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)

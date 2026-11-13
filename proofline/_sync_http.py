@@ -11,6 +11,7 @@ import ipaddress
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -121,6 +122,11 @@ class NetworkBackend(httpcore.SyncBackend):
                 return NetworkStream(stream)
         raise failure or httpcore.ConnectError("The host name did not resolve.")
 
+    def sleep(self, seconds: float) -> None:
+        # httpcore sleeps here between connection retries; keep that backoff within the deadline.
+        bounded = bounded_timeout(seconds)
+        time.sleep(seconds if bounded is None else bounded)
+
 
 @contextmanager
 def mapped_errors() -> Iterator[None]:
@@ -146,13 +152,15 @@ class ResponseStream(httpx.SyncByteStream):
 
 
 class Transport(httpx.BaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, retries: int = 0) -> None:
+        # `retries` re-attempts failed connections only, as httpx.HTTPTransport(retries=...) does.
         self._pool = httpcore.ConnectionPool(
             ssl_context=httpcore.default_ssl_context(),
             network_backend=NetworkBackend(),
             max_connections=100,
             max_keepalive_connections=20,
             keepalive_expiry=5,
+            retries=retries,
         )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
