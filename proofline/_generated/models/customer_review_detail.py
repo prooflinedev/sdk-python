@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import UUID
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
+from ..models.incomplete_cause_type_0 import IncompleteCauseType0
 from ..models.patch_trigger_source import PatchTriggerSource
 from ..types import UNSET, Unset
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from ..models.customer_assessment import CustomerAssessment
     from ..models.customer_code_assessment import CustomerCodeAssessment
     from ..models.deep_review_escalation import DeepReviewEscalation
+    from ..models.environment_check import EnvironmentCheck
     from ..models.local_reverification import LocalReverification
     from ..models.open_items_view import OpenItemsView
     from ..models.provider_wait import ProviderWait
@@ -106,6 +108,10 @@ class CustomerReviewDetail:
         diff_stats (None | ReviewDiffStats | Unset): Line totals from this run's pinned comparison. Null until recorded,
             or
              when the provider's changed-file list was incomplete.
+        environments (list[EnvironmentCheck] | Unset): For a pull-request review, each environment its repository linked
+             when the review was created and each environment it assessed, with
+             whether the review checked it and why not. Absent for any other
+             review, and when the repository links no environment.
         fix_generation_enabled (bool | Unset): Whether fix generation is configured for this deployment and
             organization.
              Write authorization is checked again when a fix is requested.
@@ -116,6 +122,11 @@ class CustomerReviewDetail:
              branch moves, the reviewed input does not. Absent for a patch review.
         head_ref (None | str | Unset): The pull request's head branch name as last recorded from GitHub, for
              orientation only. Null when no pull request state is recorded.
+        incomplete_causes (list[IncompleteCauseType0 | Literal['UNKNOWN']] | Unset): Why an `INCOMPLETE` review ended
+            incomplete, as its incomplete
+             assessments recorded it, in name order. `UNKNOWN` alone when none
+             recorded a cause. Absent for every other status, and on reads other
+             than the reviews list and a single review.
         is_deep_review (bool | Unset): Present and true when this run is a Deep Review.
         local_reverifications (list[LocalReverification] | Unset): For a patch review requested with
             `verify_finding_ids`, each finding
@@ -171,8 +182,10 @@ class CustomerReviewDetail:
             repository.
         repository_url (None | str | Unset): The repository on GitHub. Absent when the deployment's web base
              cannot be joined with the stored name.
-        requested_by (ActorView | None | Unset): Who asked for this review, for a review a person requested. Null on
-             automatic reviews and on reviews recorded before requesters were.
+        requested_by (ActorView | None | Unset): Who asked for this review, for the reviews a person asked for: the
+             run-now button, a rerun, a pull request `review` command, or local
+             changes and pushed commits sent from the CLI or an editor. Absent on
+             automatic reviews, and on reviews recorded before requesters were.
         review_comment_url (None | str | Unset): The pull request review Proofline submitted for this review. Null when
              it submitted none.
         review_retracted_at (datetime.datetime | None | Unset): When a submitted pull request review was marked
@@ -225,10 +238,12 @@ class CustomerReviewDetail:
     current_head_commit_sha: None | str | Unset = UNSET
     deep_review_escalation: DeepReviewEscalation | None | Unset = UNSET
     diff_stats: None | ReviewDiffStats | Unset = UNSET
+    environments: list[EnvironmentCheck] | Unset = UNSET
     fix_generation_enabled: bool | Unset = UNSET
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
     head_ref: None | str | Unset = UNSET
+    incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
     is_deep_review: bool | Unset = UNSET
     local_reverifications: list[LocalReverification] | Unset = UNSET
     merge_gate: None | PullRequestMergeGate | Unset = UNSET
@@ -406,6 +421,13 @@ class CustomerReviewDetail:
         else:
             diff_stats = self.diff_stats
 
+        environments: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.environments, Unset):
+            environments = []
+            for environments_item_data in self.environments:
+                environments_item = environments_item_data.to_dict()
+                environments.append(environments_item)
+
         fix_generation_enabled = self.fix_generation_enabled
 
         head_commit_sha: None | str | Unset
@@ -425,6 +447,17 @@ class CustomerReviewDetail:
             head_ref = UNSET
         else:
             head_ref = self.head_ref
+
+        incomplete_causes: list[Literal["UNKNOWN"] | str] | Unset = UNSET
+        if not isinstance(self.incomplete_causes, Unset):
+            incomplete_causes = []
+            for incomplete_causes_item_data in self.incomplete_causes:
+                incomplete_causes_item: Literal["UNKNOWN"] | str
+                if isinstance(incomplete_causes_item_data, IncompleteCauseType0):
+                    incomplete_causes_item = incomplete_causes_item_data.value
+                else:
+                    incomplete_causes_item = incomplete_causes_item_data
+                incomplete_causes.append(incomplete_causes_item)
 
         is_deep_review = self.is_deep_review
 
@@ -686,6 +719,8 @@ class CustomerReviewDetail:
             field_dict["deep_review_escalation"] = deep_review_escalation
         if diff_stats is not UNSET:
             field_dict["diff_stats"] = diff_stats
+        if environments is not UNSET:
+            field_dict["environments"] = environments
         if fix_generation_enabled is not UNSET:
             field_dict["fix_generation_enabled"] = fix_generation_enabled
         if head_commit_sha is not UNSET:
@@ -694,6 +729,8 @@ class CustomerReviewDetail:
             field_dict["head_commit_url"] = head_commit_url
         if head_ref is not UNSET:
             field_dict["head_ref"] = head_ref
+        if incomplete_causes is not UNSET:
+            field_dict["incomplete_causes"] = incomplete_causes
         if is_deep_review is not UNSET:
             field_dict["is_deep_review"] = is_deep_review
         if local_reverifications is not UNSET:
@@ -769,6 +806,7 @@ class CustomerReviewDetail:
         from ..models.customer_assessment import CustomerAssessment  # noqa: PLC0415
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
+        from ..models.environment_check import EnvironmentCheck  # noqa: PLC0415
         from ..models.local_reverification import LocalReverification  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
         from ..models.provider_wait import ProviderWait  # noqa: PLC0415
@@ -998,6 +1036,15 @@ class CustomerReviewDetail:
 
         diff_stats = _parse_diff_stats(d.pop("diff_stats", UNSET))
 
+        _environments = d.pop("environments", UNSET)
+        environments: list[EnvironmentCheck] | Unset = UNSET
+        if _environments is not UNSET:
+            environments = []
+            for environments_item_data in _environments:
+                environments_item = EnvironmentCheck.from_dict(environments_item_data)
+
+                environments.append(environments_item)
+
         fix_generation_enabled = d.pop("fix_generation_enabled", UNSET)
 
         def _parse_head_commit_sha(data: object) -> None | str | Unset:
@@ -1026,6 +1073,36 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         head_ref = _parse_head_ref(d.pop("head_ref", UNSET))
+
+        _incomplete_causes = d.pop("incomplete_causes", UNSET)
+        incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
+        if _incomplete_causes is not UNSET:
+            incomplete_causes = []
+            for incomplete_causes_item_data in _incomplete_causes:
+
+                def _parse_incomplete_causes_item(
+                    data: object,
+                ) -> IncompleteCauseType0 | Literal["UNKNOWN"]:
+                    try:
+                        if not isinstance(data, str):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_0 = IncompleteCauseType0(data)
+
+                        return componentsschemas_incomplete_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not (type(data) is str and data == "UNKNOWN"):
+                        raise TypeError()
+                    componentsschemas_incomplete_cause_type_1 = cast(Literal["UNKNOWN"], data)
+                    if componentsschemas_incomplete_cause_type_1 != "UNKNOWN":
+                        raise ValueError(
+                            f"/components/schemas/IncompleteCause_type_1 must match const 'UNKNOWN', got '{componentsschemas_incomplete_cause_type_1}'"
+                        )
+                    return componentsschemas_incomplete_cause_type_1
+
+                incomplete_causes_item = _parse_incomplete_causes_item(incomplete_causes_item_data)
+
+                incomplete_causes.append(incomplete_causes_item)
 
         is_deep_review = d.pop("is_deep_review", UNSET)
 
@@ -1452,10 +1529,12 @@ class CustomerReviewDetail:
             current_head_commit_sha=current_head_commit_sha,
             deep_review_escalation=deep_review_escalation,
             diff_stats=diff_stats,
+            environments=environments,
             fix_generation_enabled=fix_generation_enabled,
             head_commit_sha=head_commit_sha,
             head_commit_url=head_commit_url,
             head_ref=head_ref,
+            incomplete_causes=incomplete_causes,
             is_deep_review=is_deep_review,
             local_reverifications=local_reverifications,
             merge_gate=merge_gate,

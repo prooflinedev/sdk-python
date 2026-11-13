@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import UUID
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
+from ..models.incomplete_cause_type_0 import IncompleteCauseType0
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.actor_view import ActorView
     from ..models.refresh_view import RefreshView
 
 
@@ -50,6 +52,11 @@ class ReviewSummary:
              which is not a commit. Absent when the review recorded none.
         head_commit_url (None | str | Unset): The exact revision reviewed. A commit URL, never a branch URL: the
              branch moves, the reviewed input does not. Absent for a patch review.
+        incomplete_causes (list[IncompleteCauseType0 | Literal['UNKNOWN']] | Unset): Why an `INCOMPLETE` review ended
+            incomplete, as its incomplete
+             assessments recorded it, in name order. `UNKNOWN` alone when none
+             recorded a cause. Absent for every other status, and on reads other
+             than the reviews list and a single review.
         merge_group_pull_request_numbers (list[int] | Unset): For a `MERGE_GROUP` review, the pull requests GitHub
             queued in the
              group, in number order. Absent for every other kind, and until
@@ -87,6 +94,10 @@ class ReviewSummary:
             repository.
         repository_url (None | str | Unset): The repository on GitHub. Absent when the deployment's web base
              cannot be joined with the stored name.
+        requested_by (ActorView | None | Unset): Who asked for this review, for the reviews a person asked for: the
+             run-now button, a rerun, a pull request `review` command, or local
+             changes and pushed commits sent from the CLI or an editor. Absent on
+             automatic reviews, and on reviews recorded before requesters were.
         run_number (int | None | Unset): One-based, append-only ordinal within one repository pull request.
     """
 
@@ -104,6 +115,7 @@ class ReviewSummary:
     current_head_commit_sha: None | str | Unset = UNSET
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
+    incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
     merge_group_pull_request_numbers: list[int] | Unset = UNSET
     publication_detail: None | str | Unset = UNSET
     pull_request_author_avatar_url: None | str | Unset = UNSET
@@ -120,10 +132,12 @@ class ReviewSummary:
     repository_id: None | Unset | UUID = UNSET
     repository_name: None | str | Unset = UNSET
     repository_url: None | str | Unset = UNSET
+    requested_by: ActorView | None | Unset = UNSET
     run_number: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.actor_view import ActorView  # noqa: PLC0415
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
 
         assessment_count = self.assessment_count
@@ -171,6 +185,17 @@ class ReviewSummary:
             head_commit_url = UNSET
         else:
             head_commit_url = self.head_commit_url
+
+        incomplete_causes: list[Literal["UNKNOWN"] | str] | Unset = UNSET
+        if not isinstance(self.incomplete_causes, Unset):
+            incomplete_causes = []
+            for incomplete_causes_item_data in self.incomplete_causes:
+                incomplete_causes_item: Literal["UNKNOWN"] | str
+                if isinstance(incomplete_causes_item_data, IncompleteCauseType0):
+                    incomplete_causes_item = incomplete_causes_item_data.value
+                else:
+                    incomplete_causes_item = incomplete_causes_item_data
+                incomplete_causes.append(incomplete_causes_item)
 
         merge_group_pull_request_numbers: list[int] | Unset = UNSET
         if not isinstance(self.merge_group_pull_request_numbers, Unset):
@@ -270,6 +295,14 @@ class ReviewSummary:
         else:
             repository_url = self.repository_url
 
+        requested_by: dict[str, Any] | None | Unset
+        if isinstance(self.requested_by, Unset):
+            requested_by = UNSET
+        elif isinstance(self.requested_by, ActorView):
+            requested_by = self.requested_by.to_dict()
+        else:
+            requested_by = self.requested_by
+
         run_number: int | None | Unset
         if isinstance(self.run_number, Unset):
             run_number = UNSET
@@ -300,6 +333,8 @@ class ReviewSummary:
             field_dict["head_commit_sha"] = head_commit_sha
         if head_commit_url is not UNSET:
             field_dict["head_commit_url"] = head_commit_url
+        if incomplete_causes is not UNSET:
+            field_dict["incomplete_causes"] = incomplete_causes
         if merge_group_pull_request_numbers is not UNSET:
             field_dict["merge_group_pull_request_numbers"] = merge_group_pull_request_numbers
         if publication_detail is not UNSET:
@@ -332,6 +367,8 @@ class ReviewSummary:
             field_dict["repository_name"] = repository_name
         if repository_url is not UNSET:
             field_dict["repository_url"] = repository_url
+        if requested_by is not UNSET:
+            field_dict["requested_by"] = requested_by
         if run_number is not UNSET:
             field_dict["run_number"] = run_number
 
@@ -339,6 +376,7 @@ class ReviewSummary:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.actor_view import ActorView  # noqa: PLC0415
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -407,6 +445,36 @@ class ReviewSummary:
             return cast(None | str | Unset, data)
 
         head_commit_url = _parse_head_commit_url(d.pop("head_commit_url", UNSET))
+
+        _incomplete_causes = d.pop("incomplete_causes", UNSET)
+        incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
+        if _incomplete_causes is not UNSET:
+            incomplete_causes = []
+            for incomplete_causes_item_data in _incomplete_causes:
+
+                def _parse_incomplete_causes_item(
+                    data: object,
+                ) -> IncompleteCauseType0 | Literal["UNKNOWN"]:
+                    try:
+                        if not isinstance(data, str):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_0 = IncompleteCauseType0(data)
+
+                        return componentsschemas_incomplete_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not (type(data) is str and data == "UNKNOWN"):
+                        raise TypeError()
+                    componentsschemas_incomplete_cause_type_1 = cast(Literal["UNKNOWN"], data)
+                    if componentsschemas_incomplete_cause_type_1 != "UNKNOWN":
+                        raise ValueError(
+                            f"/components/schemas/IncompleteCause_type_1 must match const 'UNKNOWN', got '{componentsschemas_incomplete_cause_type_1}'"
+                        )
+                    return componentsschemas_incomplete_cause_type_1
+
+                incomplete_causes_item = _parse_incomplete_causes_item(incomplete_causes_item_data)
+
+                incomplete_causes.append(incomplete_causes_item)
 
         merge_group_pull_request_numbers = cast(
             list[int], d.pop("merge_group_pull_request_numbers", UNSET)
@@ -573,6 +641,23 @@ class ReviewSummary:
 
         repository_url = _parse_repository_url(d.pop("repository_url", UNSET))
 
+        def _parse_requested_by(data: object) -> ActorView | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                requested_by_type_0 = ActorView.from_dict(data)
+
+                return requested_by_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(ActorView | None | Unset, data)
+
+        requested_by = _parse_requested_by(d.pop("requested_by", UNSET))
+
         def _parse_run_number(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -597,6 +682,7 @@ class ReviewSummary:
             current_head_commit_sha=current_head_commit_sha,
             head_commit_sha=head_commit_sha,
             head_commit_url=head_commit_url,
+            incomplete_causes=incomplete_causes,
             merge_group_pull_request_numbers=merge_group_pull_request_numbers,
             publication_detail=publication_detail,
             pull_request_author_avatar_url=pull_request_author_avatar_url,
@@ -613,6 +699,7 @@ class ReviewSummary:
             repository_id=repository_id,
             repository_name=repository_name,
             repository_url=repository_url,
+            requested_by=requested_by,
             run_number=run_number,
         )
 
