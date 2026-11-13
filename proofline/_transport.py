@@ -40,6 +40,10 @@ from ._sync_http import Transport as SyncHTTPTransport
 
 VERSION = "5.1.0"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_RETRIES = 3
+MAX_RETRY_DELAY = 60.0
+# Transient statuses a GET is retried on. Other methods are never retried after sending.
+RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 FULL_WEEKDAY = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
 MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
@@ -193,10 +197,21 @@ def limit_timeout(request: httpx.Request) -> None:
     }
 
 
+def max_retries(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("max_retries must be an int.")
+    if value < 0:
+        raise ValueError("max_retries must be zero or a positive integer.")
+    return value
+
+
 def retry_delay(value: str | None, attempt: int) -> float | None:
-    """An invalid or longer Retry-After returns the problem without an early retry."""
+    """An invalid or longer Retry-After returns the problem without an early retry.
+
+    Without Retry-After the delay doubles from one second (1, 2, 4, ...) up to a minute.
+    """
     if value is None:
-        return float(2**attempt)
+        return min(MAX_RETRY_DELAY, 2.0 ** min(attempt, 6))
     value = value.strip()
     if value.isascii() and value.isdigit():
         try:
@@ -227,7 +242,7 @@ def retry_delay(value: str | None, attempt: int) -> float | None:
             delay = max(0.0, (date - now).total_seconds())
         except (ValueError, TypeError, OverflowError):
             return None
-    return delay if math.isfinite(delay) and delay <= 60 else None
+    return delay if math.isfinite(delay) and delay <= MAX_RETRY_DELAY else None
 
 
 def redacted(value: object, raw: str) -> object:
@@ -363,7 +378,7 @@ def check_stream(size: int, status: int, deadline: float) -> None:
     budget = remaining()
     if monotonic() >= deadline or (budget is not None and budget <= 0):
         # Retryable statuses time out as an expired read does; other problems keep their status.
-        if 200 <= status < 300 or status in (429, 503):
+        if 200 <= status < 300 or status in RETRYABLE_STATUSES:
             raise timeout_error()
         raise unreadable_problem(status)
 
@@ -429,13 +444,23 @@ class AsyncDeadlineStream(httpx.AsyncByteStream):
 
 
 class RetryTransport(httpx.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    """Retry failed connections for every method and transient statuses for GET.
+
+    `max_retries` bounds both layers independently: the inner transport re-attempts a
+    connection that could not be opened (no request bytes were sent), and this loop
+    re-sends a GET that got a status in RETRYABLE_STATUSES.
+    """
+
+    def __init__(
+        self, token: SecretStr, timeout: float, max_retries: int = DEFAULT_MAX_RETRIES
+    ) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = SyncHTTPTransport()
+        self._max_retries = max_retries
+        self._inner = SyncHTTPTransport(retries=max_retries)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        for attempt in range(4):
+        for attempt in range(self._max_retries + 1):
             limit_timeout(request)
             deadline = monotonic() + self._timeout
             marker = IO_DEADLINE.set(io_deadline(deadline))
@@ -459,7 +484,7 @@ class RetryTransport(httpx.BaseTransport):
                 response.read()
                 error = problem(response, self._token)
             except httpx.HTTPError:
-                if response.status_code in (429, 503):
+                if response.status_code in RETRYABLE_STATUSES:
                     raise
                 error = unreadable_problem(response.status_code)
             finally:
@@ -467,8 +492,8 @@ class RetryTransport(httpx.BaseTransport):
             delay = retry_delay(response.headers.get("Retry-After"), attempt)
             if (
                 request.method != "GET"
-                or response.status_code not in (429, 503)
-                or attempt == 3
+                or response.status_code not in RETRYABLE_STATUSES
+                or attempt == self._max_retries
                 or delay is None
             ):
                 raise error from None
@@ -480,13 +505,18 @@ class RetryTransport(httpx.BaseTransport):
 
 
 class AsyncRetryTransport(httpx.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    """The asynchronous RetryTransport; `max_retries` bounds the same two layers."""
+
+    def __init__(
+        self, token: SecretStr, timeout: float, max_retries: int = DEFAULT_MAX_RETRIES
+    ) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = httpx.AsyncHTTPTransport()
+        self._max_retries = max_retries
+        self._inner = httpx.AsyncHTTPTransport(retries=max_retries)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        for attempt in range(4):
+        for attempt in range(self._max_retries + 1):
             limit_timeout(request)
             deadline = monotonic() + self._timeout
             try:
@@ -510,7 +540,7 @@ class AsyncRetryTransport(httpx.AsyncBaseTransport):
                 await response.aread()
                 error = problem(response, self._token)
             except httpx.HTTPError:
-                if response.status_code in (429, 503):
+                if response.status_code in RETRYABLE_STATUSES:
                     raise
                 error = unreadable_problem(response.status_code)
             finally:
@@ -518,8 +548,8 @@ class AsyncRetryTransport(httpx.AsyncBaseTransport):
             delay = retry_delay(response.headers.get("Retry-After"), attempt)
             if (
                 request.method != "GET"
-                or response.status_code not in (429, 503)
-                or attempt == 3
+                or response.status_code not in RETRYABLE_STATUSES
+                or attempt == self._max_retries
                 or delay is None
             ):
                 raise error from None

@@ -796,7 +796,7 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
 
 
 @MODES
-@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
 async def test_retry_count_is_bounded_for_rate_limit_and_provider_unavailable(
     mode: str, status: int
 ) -> None:
@@ -838,6 +838,94 @@ async def test_retry_count_is_bounded_for_rate_limit_and_provider_unavailable(
             f"/repositories/{REPOSITORY}/pull-requests/42/review"
         )
         assert json.loads(server.requests[0].body) == {"mode": "FULL"}
+
+
+@MODES
+@pytest.mark.parametrize("max_retries", [0, 1, 5])
+async def test_max_retries_bounds_status_retries(mode: str, max_retries: int) -> None:
+    with Server(
+        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "0"})
+    ) as server:
+        async with session(mode, server.url, max_retries=max_retries) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "get_finding", ORG, FINDING)
+            assert raised.value.status == 503
+        assert len(server.requests) == max_retries + 1
+
+
+@MODES
+async def test_status_retry_without_retry_after_backs_off_exponentially(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(
+        lambda request, index: (
+            Reply(502, {"detail": "Bad gateway."}) if index < 3 else Reply(body=finding())
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
+        assert len(server.requests) == 4
+    assert clock.delays == [1, 2, 4]
+
+
+def test_retry_backoff_is_capped() -> None:
+    assert _transport.retry_delay(None, 5) == 32
+    assert _transport.retry_delay(None, 6) == 60
+    assert _transport.retry_delay(None, 10_000) == 60
+
+
+@pytest.mark.parametrize(
+    ("value", "error"), [(-1, ValueError), (True, TypeError), (1.5, TypeError), ("3", TypeError)]
+)
+@pytest.mark.parametrize("factory", [ProoflineClient, AsyncProoflineClient])
+def test_max_retries_rejects_invalid_values(
+    factory: type[Client], value: Any, error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        factory(SecretStr(TOKEN), max_retries=value)
+
+
+@MODES
+@pytest.mark.parametrize("max_retries", [0, 2])
+async def test_max_retries_bounds_connection_retries_for_every_method(
+    mode: str, max_retries: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpcore
+    from httpcore._backends.auto import AutoBackend
+
+    attempts: list[str] = []
+    backend: Any = _sync_http.NetworkBackend if mode == "sync" else AutoBackend
+    connect = backend.connect_tcp
+
+    def refuse(self: Any, *args: Any, **kwargs: Any) -> Any:
+        attempts.append("connect")
+        if len(attempts) <= 2:
+            raise httpcore.ConnectError("Connection refused.")
+        return connect(self, *args, **kwargs)
+
+    async def async_refuse(self: Any, *args: Any, **kwargs: Any) -> Any:
+        attempts.append("connect")
+        if len(attempts) <= 2:
+            raise httpcore.ConnectError("Connection refused.")
+        return await connect(self, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "connect_tcp", refuse if mode == "sync" else async_refuse)
+    with Server(
+        lambda request, index: Reply(body={"public_key": "pk", "review_id": str(REVIEW)})
+    ) as server:
+        async with session(mode, server.url, max_retries=max_retries) as client:
+            if max_retries == 0:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, "rerun_review", ORG, REVIEW)
+                assert raised.value.type == "urn:proofline:sdk:transport-unavailable"
+                assert attempts == ["connect"]
+                assert server.requests == []
+            else:
+                # A refused connection sent nothing, so even a POST is safe to re-attempt.
+                await call(client, "rerun_review", ORG, REVIEW)
+                assert attempts == ["connect"] * 3
+                assert [request.method for request in server.requests] == ["POST"]
 
 
 @MODES
