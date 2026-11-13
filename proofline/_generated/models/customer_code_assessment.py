@@ -39,6 +39,9 @@ class CustomerCodeAssessment:
            incompleteness_kind (None | str | Unset): Why an `INCOMPLETE` code assessment is incomplete: `NOT_CONFIGURED`,
                 `POLICY_EXCLUDED`, `EVIDENCE_UNAVAILABLE`, `HYPOTHESES_UNRESOLVED` or
                 `MODEL_BUDGET_EXHAUSTED`. Null otherwise.
+           reason_codes (list[str] | None | Unset): Public causes of an `INCOMPLETE` code assessment: `OUT_OF_CREDITS`
+                when credits refused its model. Absent otherwise; other recorded
+                details stay private.
            started_at (datetime.datetime | None | Unset): When the code assessment started. Null until it starts.
     """
 
@@ -50,6 +53,7 @@ class CustomerCodeAssessment:
     completed_at: datetime.datetime | None | Unset = UNSET
     coverage_details: list[str] | Unset = UNSET
     incompleteness_kind: None | str | Unset = UNSET
+    reason_codes: list[str] | None | Unset = UNSET
     started_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -89,6 +93,15 @@ class CustomerCodeAssessment:
         else:
             incompleteness_kind = self.incompleteness_kind
 
+        reason_codes: list[str] | None | Unset
+        if isinstance(self.reason_codes, Unset):
+            reason_codes = UNSET
+        elif isinstance(self.reason_codes, list):
+            reason_codes = self.reason_codes
+
+        else:
+            reason_codes = self.reason_codes
+
         started_at: None | str | Unset
         if isinstance(self.started_at, Unset):
             started_at = UNSET
@@ -114,6 +127,8 @@ class CustomerCodeAssessment:
             field_dict["coverage_details"] = coverage_details
         if incompleteness_kind is not UNSET:
             field_dict["incompleteness_kind"] = incompleteness_kind
+        if reason_codes is not UNSET:
+            field_dict["reason_codes"] = reason_codes
         if started_at is not UNSET:
             field_dict["started_at"] = started_at
 
@@ -185,6 +200,23 @@ class CustomerCodeAssessment:
 
         incompleteness_kind = _parse_incompleteness_kind(d.pop("incompleteness_kind", UNSET))
 
+        def _parse_reason_codes(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                reason_codes_type_0 = cast(list[str], data)
+
+                return reason_codes_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        reason_codes = _parse_reason_codes(d.pop("reason_codes", UNSET))
+
         def _parse_started_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -211,6 +243,7 @@ class CustomerCodeAssessment:
             completed_at=completed_at,
             coverage_details=coverage_details,
             incompleteness_kind=incompleteness_kind,
+            reason_codes=reason_codes,
             started_at=started_at,
         )
 
