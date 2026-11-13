@@ -1612,6 +1612,46 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
 
 
 @MODES
+@pytest.mark.parametrize(
+    ("format", "content_type"),
+    [
+        ("csv", "Text/CSV; charset=utf-8"),
+        ("ndjson", "Application/X-NDJSON; charset=utf-8"),
+    ],
+)
+async def test_export_accepts_case_insensitive_content_type(
+    mode: str, format: str, content_type: str
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        body = (
+            b"dataset_version,claim\n1,hello\n"
+            if format == "csv"
+            else b'{"dataset_version":1,"claim":"hello"}\n'
+        )
+        return Reply(
+            body=body,
+            headers={
+                "Content-Type": content_type,
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            page = await call(
+                client,
+                "export_reviews",
+                ORG,
+                "findings",
+                format=format,
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+            )
+            assert page.rows[0]["claim"] == "hello"
+
+
+@MODES
 @pytest.mark.parametrize("format", ["csv", "ndjson"])
 async def test_review_export_retains_every_recorded_kind(mode: str, format: str) -> None:
     kinds = [
