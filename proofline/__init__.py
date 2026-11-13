@@ -34,6 +34,7 @@ from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .sarif import SarifExportError, review_sarif
 
 __all__ = [
     "AgentSession",
@@ -64,10 +65,12 @@ __all__ = [
     "ReviewFilters",
     "ReviewOutcome",
     "ReviewPage",
+    "review_sarif",
     "RunNowMode",
     "RunNowRefusal",
     "RunNowRequest",
     "RunNowResponse",
+    "SarifExportError",
     "SecretStr",
     "StartSession",
     "StopResponse",

@@ -83,6 +83,33 @@ with ProoflineClient() as client:
 
 The response names the recorded report and its covered and instrumented line counts. An identical upload returns that report with `created=False`. Refused reports raise `ProoflineError`. Uploading a report does not establish a check verdict.
 
+## SARIF reviews
+
+`review_sarif` projects one retained pull-request review to SARIF 2.1.0, the same closed projection as `proofline findings --sarif`. Upload the document to GitHub code scanning or any other SARIF 2.1.0 consumer. It keeps each finding's identity, severity, and verified file locations at the reviewed head, and it leaves out World evidence values and the raw API document.
+
+```python
+import json
+from pathlib import Path
+from proofline import review_sarif
+
+outcome = client.wait_for_review(organization_id, review_id)
+if outcome.review is None:
+    raise SystemExit(outcome.reason)
+Path("proofline.sarif").write_text(
+    json.dumps(
+        review_sarif(
+            outcome.review,
+            organization_id,
+            review_id=review_id,
+            review_url=outcome.review_url,
+        )
+    ),
+    encoding="utf-8",
+)
+```
+
+A review that is still running, failed, stopped, or incomplete is still projected. Its invocation has `executionSuccessful` false and a notification naming the gap. `SUPERSEDED` is an incomplete result, matching the CLI projection. A deployment or other subject, a head that is not a full commit SHA, an unrecognized severity, or an unrecognized risk domain raises `SarifExportError` and produces no document.
+
 ## MCP organization selection
 
 With an MCP OAuth credential approved for several organizations, discover its currently authorized targets with `client.mcp.list_organizations()`. It returns a `KnowledgeResult`; inspect `isError` before reading `structuredContent["data"]["organizations"]`. Each entry contains `organization_id`, `github_login`, and `scopes`.
