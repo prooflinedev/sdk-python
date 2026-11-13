@@ -83,6 +83,25 @@ with ProoflineClient() as client:
 
 The response names the recorded report and its covered and instrumented line counts. An identical upload returns that report with `created=False`. Refused reports raise `ProoflineError`. Uploading a report does not establish a check verdict.
 
+## Review progress notifications
+
+Pass `on_update` to `wait_for_review` to update a CI status display or collect progress
+without implementing another polling loop:
+
+```python
+result = client.wait_for_review(
+    organization_id, review_id,
+    on_update=lambda review: print(review.status),
+)
+```
+
+The callback receives each validated `CustomerReviewDetail` returned by a poll,
+including the terminal review. The asynchronous client accepts either a synchronous
+callback or an async callback, and awaits async callbacks before polling again.
+Callbacks run inline, their time counts toward the wait timeout, and their exceptions
+propagate to the caller. The SDK does not add requests or change its polling backoff.
+Keep callbacks short and do not mutate the review they receive.
+
 ## MCP organization selection
 
 With an MCP OAuth credential approved for several organizations, discover its currently authorized targets with `client.mcp.list_organizations()`. It returns a `KnowledgeResult`; inspect `isError` before reading `structuredContent["data"]["organizations"]`. Each entry contains `organization_id`, `github_login`, and `scopes`.
