@@ -42,6 +42,12 @@ class PullRequestMergeGate:
             none was reported.
         merged_by_github_user_id (int | None | Unset): The stable GitHub user ID reported by a merged-close bypass, or
             null when none was reported.
+        merged_by_login (None | str | Unset): The merger's GitHub login as this organization's developer record last saw
+            it. Display
+             metadata only. Null when the organization has no record of that user.
+        merged_by_name (None | str | Unset): The merger's name, from the organization's developer record or their
+            Proofline account.
+             Display metadata only: `merged_by_github_user_id` stays the identity. Null when unknown.
         merged_pull_request_number (int | None | Unset): The actual pull request merged in the recorded bypass, which
             may differ from the captured PR.
         reason_code (None | str | Unset): The recorded deterministic decision or refusal reason. Null until a decision
@@ -64,6 +70,8 @@ class PullRequestMergeGate:
     finding_count: int | None | Unset = UNSET
     merge_commit_sha: None | str | Unset = UNSET
     merged_by_github_user_id: int | None | Unset = UNSET
+    merged_by_login: None | str | Unset = UNSET
+    merged_by_name: None | str | Unset = UNSET
     merged_pull_request_number: int | None | Unset = UNSET
     reason_code: None | str | Unset = UNSET
     review_id: None | Unset | UUID = UNSET
@@ -136,6 +144,18 @@ class PullRequestMergeGate:
         else:
             merged_by_github_user_id = self.merged_by_github_user_id
 
+        merged_by_login: None | str | Unset
+        if isinstance(self.merged_by_login, Unset):
+            merged_by_login = UNSET
+        else:
+            merged_by_login = self.merged_by_login
+
+        merged_by_name: None | str | Unset
+        if isinstance(self.merged_by_name, Unset):
+            merged_by_name = UNSET
+        else:
+            merged_by_name = self.merged_by_name
+
         merged_pull_request_number: int | None | Unset
         if isinstance(self.merged_pull_request_number, Unset):
             merged_pull_request_number = UNSET
@@ -184,6 +204,10 @@ class PullRequestMergeGate:
             field_dict["merge_commit_sha"] = merge_commit_sha
         if merged_by_github_user_id is not UNSET:
             field_dict["merged_by_github_user_id"] = merged_by_github_user_id
+        if merged_by_login is not UNSET:
+            field_dict["merged_by_login"] = merged_by_login
+        if merged_by_name is not UNSET:
+            field_dict["merged_by_name"] = merged_by_name
         if merged_pull_request_number is not UNSET:
             field_dict["merged_pull_request_number"] = merged_pull_request_number
         if reason_code is not UNSET:
@@ -306,6 +330,24 @@ class PullRequestMergeGate:
             d.pop("merged_by_github_user_id", UNSET)
         )
 
+        def _parse_merged_by_login(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        merged_by_login = _parse_merged_by_login(d.pop("merged_by_login", UNSET))
+
+        def _parse_merged_by_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        merged_by_name = _parse_merged_by_name(d.pop("merged_by_name", UNSET))
+
         def _parse_merged_pull_request_number(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -358,6 +400,8 @@ class PullRequestMergeGate:
             finding_count=finding_count,
             merge_commit_sha=merge_commit_sha,
             merged_by_github_user_id=merged_by_github_user_id,
+            merged_by_login=merged_by_login,
+            merged_by_name=merged_by_name,
             merged_pull_request_number=merged_pull_request_number,
             reason_code=reason_code,
             review_id=review_id,
