@@ -99,6 +99,9 @@ class CustomerReviewDetail:
              head GitHub does not have.
         completed_at (datetime.datetime | None | Unset): When the review reached a terminal status. Absent while it is
             still pending or running.
+        cost_microcredits (int | None | Unset): The credits this run was charged so far, in microcredits, whoever
+             paid: the plan, the free review month or the organization's credits.
+             Null for a caller who is not a member of the organization.
         current_head_commit_sha (None | str | Unset): The pull request's head commit as the latest provider projection
             reports it, which can differ from `head_commit_sha`. Set only on a single-review read, and absent for a
             deployment review or a pull request with no projection.
@@ -235,6 +238,7 @@ class CustomerReviewDetail:
     code_assessment: CustomerCodeAssessment | None | Unset = UNSET
     compare_url: None | str | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
+    cost_microcredits: int | None | Unset = UNSET
     current_head_commit_sha: None | str | Unset = UNSET
     deep_review_escalation: DeepReviewEscalation | None | Unset = UNSET
     diff_stats: None | ReviewDiffStats | Unset = UNSET
@@ -398,6 +402,12 @@ class CustomerReviewDetail:
             completed_at = self.completed_at.isoformat()
         else:
             completed_at = self.completed_at
+
+        cost_microcredits: int | None | Unset
+        if isinstance(self.cost_microcredits, Unset):
+            cost_microcredits = UNSET
+        else:
+            cost_microcredits = self.cost_microcredits
 
         current_head_commit_sha: None | str | Unset
         if isinstance(self.current_head_commit_sha, Unset):
@@ -713,6 +723,8 @@ class CustomerReviewDetail:
             field_dict["compare_url"] = compare_url
         if completed_at is not UNSET:
             field_dict["completed_at"] = completed_at
+        if cost_microcredits is not UNSET:
+            field_dict["cost_microcredits"] = cost_microcredits
         if current_head_commit_sha is not UNSET:
             field_dict["current_head_commit_sha"] = current_head_commit_sha
         if deep_review_escalation is not UNSET:
@@ -988,6 +1000,15 @@ class CustomerReviewDetail:
             return cast(datetime.datetime | None | Unset, data)
 
         completed_at = _parse_completed_at(d.pop("completed_at", UNSET))
+
+        def _parse_cost_microcredits(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        cost_microcredits = _parse_cost_microcredits(d.pop("cost_microcredits", UNSET))
 
         def _parse_current_head_commit_sha(data: object) -> None | str | Unset:
             if data is None:
@@ -1526,6 +1547,7 @@ class CustomerReviewDetail:
             code_assessment=code_assessment,
             compare_url=compare_url,
             completed_at=completed_at,
+            cost_microcredits=cost_microcredits,
             current_head_commit_sha=current_head_commit_sha,
             deep_review_escalation=deep_review_escalation,
             diff_stats=diff_stats,
