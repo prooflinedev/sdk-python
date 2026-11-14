@@ -52,8 +52,8 @@ class PullRequestMergeGate:
             may differ from the captured PR.
         reason_code (None | str | Unset): The recorded deterministic decision or refusal reason. Null until a decision
             is recorded.
-        review_id (None | Unset | UUID): The first review captured for this gate. Null when its trigger was refused
-            before a review existed.
+        review_id (None | Unset | UUID): The review the gate decides from: the first review captured, or the one retry
+            that replaced a review that could not finish. Null when its trigger was refused before a review existed.
     """
 
     blocking_severity: str
