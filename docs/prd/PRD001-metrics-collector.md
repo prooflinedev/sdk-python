@@ -41,12 +41,15 @@ Add a metrics collector and proxy architecture to `ProoflineClient` and `AsyncPr
 ### 3. Public Exports (`proofline/__init__.py`)
 - Export `RequestMetric`, `MetricsProxy`, `LocalStorageMetricsProxy`, and `MetricsCollector` in `__all__`.
 
+### 4. Testing (`tests/test_metrics.py`)
+- Implement all metrics collector and proxy tests in a dedicated test file (`tests/test_metrics.py`), separate from existing client/transport test suites.
+
 ## Target Files
 - `proofline/metrics.py` (new)
 - `proofline/_transport.py`
 - `proofline/client.py`
 - `proofline/__init__.py`
-- `tests/test_metrics.py` (new)
+- `tests/test_metrics.py` (new, dedicated test file for metrics collector)
 
 ## Acceptance Criteria
 - [ ] `MetricsProxy` is defined as an `ABC` and `MetricsCollector` pushes metrics to its configured proxy.
@@ -54,4 +57,5 @@ Add a metrics collector and proxy architecture to `ProoflineClient` and `AsyncPr
 - [ ] `LocalStorageMetricsProxy` appends metrics to `metrics/{date}.csv` with header and full file path, class (if applicable), method, and request metrics data.
 - [ ] Sync and async clients emit `RequestMetric` with accurate status, retry count, and `duration_ms >= 0`.
 - [ ] Faulty `MetricsProxy.push` raising an exception does not fail the client request.
+- [ ] All metrics collector tests are isolated in their own test file (`tests/test_metrics.py`).
 - [ ] `pytest` and `mypy` pass with 100% type coverage on new code.
