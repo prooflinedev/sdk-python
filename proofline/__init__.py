@@ -35,6 +35,7 @@ from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
+from .metrics import LocalStorageMetricsProxy, MetricsCollector, MetricsProxy, RequestMetric
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
 
 __all__ = [
@@ -55,6 +56,9 @@ __all__ = [
     "ExportPage",
     "FileReviewRequest",
     "FileReviewResponse",
+    "LocalStorageMetricsProxy",
+    "MetricsCollector",
+    "MetricsProxy",
     "PatchReviewRequest",
     "PatchReviewResponse",
     "PatchTriggerSource",
@@ -62,6 +66,7 @@ __all__ = [
     "ProoflineError",
     "RepositoryGuidance",
     "RepositoryNames",
+    "RequestMetric",
     "RerunResponse",
     "ReviewFilters",
     "ReviewOutcome",

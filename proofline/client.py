@@ -74,6 +74,7 @@ from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
+from .metrics import MetricsCollector
 from .outcomes import ReviewOutcome, outcome
 
 T = TypeVar("T")
@@ -188,9 +189,11 @@ class ProoflineClient(Operations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        self._metrics = metrics
         self._http = httpx.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -201,7 +204,7 @@ class ProoflineClient(Operations):
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(self._api.token, timeout, metrics=metrics),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
@@ -517,9 +520,11 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        self._metrics = metrics
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -530,7 +535,7 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(self._api.token, timeout, metrics=metrics),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)
