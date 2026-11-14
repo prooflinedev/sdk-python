@@ -36,6 +36,7 @@ from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .summary import outcome_markdown, write_github_step_summary
 
 __all__ = [
     "AgentSession",
@@ -78,6 +79,8 @@ __all__ = [
     "UploadedReport",
     "__version__",
     "models",
+    "outcome_markdown",
+    "write_github_step_summary",
 ]
 
 from .knowledge import KnowledgeResult as KnowledgeResult

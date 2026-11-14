@@ -57,6 +57,22 @@ with ProoflineClient() as client:
 
 Each response returns the original text, decoded rows, dataset version, settled horizon, and an optional next cursor. Each CSV page includes its own header and keeps cells as strings, including nested JSON cells. NDJSON pages retain JSON values. To read additional pages, repeat the call with the returned cursor and the same dataset, window, format, and grouping. A missing next cursor marks the last page.
 
+## CI job summaries
+
+`outcome_markdown` turns the `ReviewOutcome` from `wait_for_review` into Markdown, and `write_github_step_summary` appends it to the GitHub Actions job summary named by `GITHUB_STEP_SUMMARY`.
+
+```python
+import sys
+from proofline import write_github_step_summary
+
+with ProoflineClient() as client:
+    outcome = client.wait_for_review(organization_id, review_id)
+write_github_step_summary(outcome)
+sys.exit(0 if outcome.status == "COMPLETED" else 1)
+```
+
+The summary shows the status, a link to the review, the finding count, each assessment gap with its reason codes, and each unresolved check by name, outcome and lifecycle. Every status other than `COMPLETED` is marked as not a pass. Check detail and unresolved reasons are left out because they can carry withheld environment values, so open the review to read them. Server text is escaped so it cannot break the tables or add links or HTML, and long lists stop at 50 rows. Outside GitHub Actions, when `GITHUB_STEP_SUMMARY` is unset, the writer does nothing and returns `False`. Pass `path` to write somewhere else.
+
 ## Coverage uploads
 
 To upload coverage reports from CI, use a repository-restricted token with `coverage:write` and current repository write access. Name the full commit SHA that the tests ran on. Send 1 to 50 LCOV, Cobertura XML, JaCoCo XML, or Go cover reports in a JSON body of at most 30 MiB.
