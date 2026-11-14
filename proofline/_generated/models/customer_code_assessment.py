@@ -12,6 +12,7 @@ from ..models.code_assessment_status_type_0 import CodeAssessmentStatusType0
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.code_ceiling_stop import CodeCeilingStop
     from ..models.customer_finding import CustomerFinding
 
 
@@ -32,6 +33,9 @@ class CustomerCodeAssessment:
            status (CodeAssessmentStatusType0 | Literal['EXCLUDED']): A code assessment's recorded execution status. It is
                never a verdict on
                 the change: only `COMPLETED` says the assessment covered what it read.
+           ceiling_stop (CodeCeilingStop | None | Unset): How much of the change the code assessment read before its head's
+                spending ceiling stopped it. Null for every other ending, and for an
+                assessment that recorded no change map.
            completed_at (datetime.datetime | None | Unset): When the code assessment ended. Null while it has not.
            coverage_details (list[str] | Unset): Recorded check coverage counts and fixed cancellation causes, without
                source text.
@@ -50,6 +54,7 @@ class CustomerCodeAssessment:
     head_commit_sha: str
     id: UUID
     status: CodeAssessmentStatusType0 | Literal["EXCLUDED"]
+    ceiling_stop: CodeCeilingStop | None | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
     coverage_details: list[str] | Unset = UNSET
     incompleteness_kind: None | str | Unset = UNSET
@@ -58,6 +63,8 @@ class CustomerCodeAssessment:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.code_ceiling_stop import CodeCeilingStop  # noqa: PLC0415
+
         base_commit_sha = self.base_commit_sha
 
         findings = []
@@ -74,6 +81,14 @@ class CustomerCodeAssessment:
             status = self.status.value
         else:
             status = self.status
+
+        ceiling_stop: dict[str, Any] | None | Unset
+        if isinstance(self.ceiling_stop, Unset):
+            ceiling_stop = UNSET
+        elif isinstance(self.ceiling_stop, CodeCeilingStop):
+            ceiling_stop = self.ceiling_stop.to_dict()
+        else:
+            ceiling_stop = self.ceiling_stop
 
         completed_at: None | str | Unset
         if isinstance(self.completed_at, Unset):
@@ -121,6 +136,8 @@ class CustomerCodeAssessment:
                 "status": status,
             }
         )
+        if ceiling_stop is not UNSET:
+            field_dict["ceiling_stop"] = ceiling_stop
         if completed_at is not UNSET:
             field_dict["completed_at"] = completed_at
         if coverage_details is not UNSET:
@@ -136,6 +153,7 @@ class CustomerCodeAssessment:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.code_ceiling_stop import CodeCeilingStop  # noqa: PLC0415
         from ..models.customer_finding import CustomerFinding  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -171,6 +189,23 @@ class CustomerCodeAssessment:
             return componentsschemas_code_assessment_status_type_1
 
         status = _parse_status(d.pop("status"))
+
+        def _parse_ceiling_stop(data: object) -> CodeCeilingStop | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                ceiling_stop_type_0 = CodeCeilingStop.from_dict(data)
+
+                return ceiling_stop_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(CodeCeilingStop | None | Unset, data)
+
+        ceiling_stop = _parse_ceiling_stop(d.pop("ceiling_stop", UNSET))
 
         def _parse_completed_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -240,6 +275,7 @@ class CustomerCodeAssessment:
             head_commit_sha=head_commit_sha,
             id=id,
             status=status,
+            ceiling_stop=ceiling_stop,
             completed_at=completed_at,
             coverage_details=coverage_details,
             incompleteness_kind=incompleteness_kind,

@@ -17,6 +17,7 @@ from .check_file import CheckFile
 from .ci_failure_attribution import CiFailureAttribution
 from .ci_failure_line import CiFailureLine
 from .code_assessment_status_type_0 import CodeAssessmentStatusType0
+from .code_ceiling_stop import CodeCeilingStop
 from .comment_address_evaluation_view import CommentAddressEvaluationView
 from .comment_address_outcome import CommentAddressOutcome
 from .comment_reaction import CommentReaction
@@ -178,6 +179,7 @@ __all__ = (
     "CiFailureAttribution",
     "CiFailureLine",
     "CodeAssessmentStatusType0",
+    "CodeCeilingStop",
     "CommentAddressEvaluationView",
     "CommentAddressOutcome",
     "CommentReaction",
