@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from time import monotonic, sleep
+from time import monotonic, perf_counter, sleep
 from typing import Any, TypeAlias, cast
 from urllib.parse import urlsplit
 
@@ -37,6 +37,7 @@ from ._generated.models import (
 from ._generated.types import Unset
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
+from .metrics import MetricsCollector, RequestMetric, resolve_call_context
 
 VERSION = "5.6.0"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -428,103 +429,196 @@ class AsyncDeadlineStream(httpx.AsyncByteStream):
         await self._inner.aclose()
 
 
+def _error_message(exc: BaseException, token: SecretStr) -> str:
+    if isinstance(exc, ProoflineError):
+        raw_text = exc.detail
+    elif isinstance(exc, httpx.HTTPError):
+        raw_text = str(exc) or network_error(exc).detail
+    else:
+        raw_text = str(exc) or type(exc).__name__
+    return cast(str, redacted(raw_text, token.get_secret_value()))
+
+
+def _emit_metric(
+    metrics: MetricsCollector | None,
+    *,
+    request: httpx.Request,
+    started: float,
+    status_code: int | None,
+    retries: int,
+    error_text: str | None,
+) -> None:
+    if metrics is None:
+        return
+    duration_ms = max(0.0, (perf_counter() - started) * 1000.0)
+    file_path, class_name, method_name = resolve_call_context()
+    metrics.record(
+        RequestMetric(
+            timestamp=datetime.now(UTC).isoformat(),
+            file_path=file_path,
+            class_name=class_name,
+            method_name=method_name,
+            http_method=request.method,
+            path=request.url.path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            retries=retries,
+            error=error_text,
+        )
+    )
+
+
 class RetryTransport(httpx.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(
+        self,
+        token: SecretStr,
+        timeout: float,
+        metrics: MetricsCollector | None = None,
+    ) -> None:
         self._token = token
         self._timeout = timeout
+        self._metrics = metrics
         self._inner = SyncHTTPTransport()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        for attempt in range(4):
-            limit_timeout(request)
-            deadline = monotonic() + self._timeout
-            marker = IO_DEADLINE.set(io_deadline(deadline))
-            try:
-                response = self._inner.handle_request(request)
-            finally:
-                IO_DEADLINE.reset(marker)
-            if 300 <= response.status_code < 400:
-                response.close()
-                raise redirect_error(response.status_code) from None
-            if encoded_response(response):
-                response.close()
-                raise encoding_error(response.status_code) from None
-            if not isinstance(response.stream, httpx.SyncByteStream):
-                response.close()
-                raise unreadable_problem(response.status_code)
-            response.stream = DeadlineStream(response.stream, response.status_code, deadline)
-            if 200 <= response.status_code < 300:
-                return response
-            try:
-                response.read()
-                error = problem(response, self._token)
-            except httpx.HTTPError:
-                if response.status_code in (429, 503):
-                    raise
-                error = unreadable_problem(response.status_code)
-            finally:
-                response.close()
-            delay = retry_delay(response.headers.get("Retry-After"), attempt)
-            if (
-                request.method != "GET"
-                or response.status_code not in (429, 503)
-                or attempt == 3
-                or delay is None
-            ):
-                raise error from None
-            sleep(delay_within_deadline(delay))
-        raise timeout_error()
+        started = perf_counter()
+        retries = 0
+        status_code: int | None = None
+        error_text: str | None = None
+        try:
+            for attempt in range(4):
+                retries = attempt
+                status_code = None
+                limit_timeout(request)
+                deadline = monotonic() + self._timeout
+                marker = IO_DEADLINE.set(io_deadline(deadline))
+                try:
+                    response = self._inner.handle_request(request)
+                finally:
+                    IO_DEADLINE.reset(marker)
+                status_code = response.status_code
+                if 300 <= response.status_code < 400:
+                    response.close()
+                    raise redirect_error(response.status_code) from None
+                if encoded_response(response):
+                    response.close()
+                    raise encoding_error(response.status_code) from None
+                if not isinstance(response.stream, httpx.SyncByteStream):
+                    response.close()
+                    raise unreadable_problem(response.status_code)
+                response.stream = DeadlineStream(response.stream, response.status_code, deadline)
+                if 200 <= response.status_code < 300:
+                    return response
+                try:
+                    response.read()
+                    error = problem(response, self._token)
+                except httpx.HTTPError:
+                    if response.status_code in (429, 503):
+                        raise
+                    error = unreadable_problem(response.status_code)
+                finally:
+                    response.close()
+                delay = retry_delay(response.headers.get("Retry-After"), attempt)
+                if (
+                    request.method != "GET"
+                    or response.status_code not in (429, 503)
+                    or attempt == 3
+                    or delay is None
+                ):
+                    raise error from None
+                sleep(delay_within_deadline(delay))
+            raise timeout_error()
+        except Exception as exc:
+            error_text = _error_message(exc, self._token)
+            raise
+        finally:
+            _emit_metric(
+                self._metrics,
+                request=request,
+                started=started,
+                status_code=status_code,
+                retries=retries,
+                error_text=error_text,
+            )
 
     def close(self) -> None:
         self._inner.close()
 
 
 class AsyncRetryTransport(httpx.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(
+        self,
+        token: SecretStr,
+        timeout: float,
+        metrics: MetricsCollector | None = None,
+    ) -> None:
         self._token = token
         self._timeout = timeout
+        self._metrics = metrics
         self._inner = httpx.AsyncHTTPTransport()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        for attempt in range(4):
-            limit_timeout(request)
-            deadline = monotonic() + self._timeout
-            try:
-                with anyio.fail_after(io_budget(deadline)):
-                    response = await self._inner.handle_async_request(request)
-            except TimeoutError:
-                raise httpx.ReadTimeout("The request deadline expired.") from None
-            if 300 <= response.status_code < 400:
-                await response.aclose()
-                raise redirect_error(response.status_code) from None
-            if encoded_response(response):
-                await response.aclose()
-                raise encoding_error(response.status_code) from None
-            if not isinstance(response.stream, httpx.AsyncByteStream):
-                await response.aclose()
-                raise unreadable_problem(response.status_code)
-            response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
-            if 200 <= response.status_code < 300:
-                return response
-            try:
-                await response.aread()
-                error = problem(response, self._token)
-            except httpx.HTTPError:
-                if response.status_code in (429, 503):
-                    raise
-                error = unreadable_problem(response.status_code)
-            finally:
-                await response.aclose()
-            delay = retry_delay(response.headers.get("Retry-After"), attempt)
-            if (
-                request.method != "GET"
-                or response.status_code not in (429, 503)
-                or attempt == 3
-                or delay is None
-            ):
-                raise error from None
-            await async_sleep(delay_within_deadline(delay))
-        raise timeout_error()
+        started = perf_counter()
+        retries = 0
+        status_code: int | None = None
+        error_text: str | None = None
+        try:
+            for attempt in range(4):
+                retries = attempt
+                status_code = None
+                limit_timeout(request)
+                deadline = monotonic() + self._timeout
+                try:
+                    with anyio.fail_after(io_budget(deadline)):
+                        response = await self._inner.handle_async_request(request)
+                except TimeoutError:
+                    raise httpx.ReadTimeout("The request deadline expired.") from None
+                status_code = response.status_code
+                if 300 <= response.status_code < 400:
+                    await response.aclose()
+                    raise redirect_error(response.status_code) from None
+                if encoded_response(response):
+                    await response.aclose()
+                    raise encoding_error(response.status_code) from None
+                if not isinstance(response.stream, httpx.AsyncByteStream):
+                    await response.aclose()
+                    raise unreadable_problem(response.status_code)
+                response.stream = AsyncDeadlineStream(
+                    response.stream, response.status_code, deadline
+                )
+                if 200 <= response.status_code < 300:
+                    return response
+                try:
+                    await response.aread()
+                    error = problem(response, self._token)
+                except httpx.HTTPError:
+                    if response.status_code in (429, 503):
+                        raise
+                    error = unreadable_problem(response.status_code)
+                finally:
+                    await response.aclose()
+                delay = retry_delay(response.headers.get("Retry-After"), attempt)
+                if (
+                    request.method != "GET"
+                    or response.status_code not in (429, 503)
+                    or attempt == 3
+                    or delay is None
+                ):
+                    raise error from None
+                await async_sleep(delay_within_deadline(delay))
+            raise timeout_error()
+        except Exception as exc:
+            error_text = _error_message(exc, self._token)
+            raise
+        finally:
+            _emit_metric(
+                self._metrics,
+                request=request,
+                started=started,
+                status_code=status_code,
+                retries=retries,
+                error_text=error_text,
+            )
 
     async def aclose(self) -> None:
         await self._inner.aclose()
