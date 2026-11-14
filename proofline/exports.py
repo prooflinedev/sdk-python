@@ -49,7 +49,15 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
             rows = [dict(zip(columns, row, strict=True)) for row in records]
         else:
             rows = [json.loads(line) for line in text.splitlines() if line.strip()]
-        if any(not isinstance(row, dict) or str(row.get("dataset_version")) != "1" for row in rows):
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValueError
+        if format == "csv":
+            if any(row.get("dataset_version") != "1" for row in rows):
+                raise ValueError
+        elif any(
+            type(row.get("dataset_version")) is not int or row["dataset_version"] != 1
+            for row in rows
+        ):
             raise ValueError
         return ExportPage(
             format, text, rows, 1, horizon, response.headers.get("x-proofline-export-next-cursor")

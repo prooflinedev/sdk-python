@@ -1612,6 +1612,32 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
 
 
 @MODES
+async def test_ndjson_export_requires_integer_dataset_version(mode: str) -> None:
+    with Server(
+        lambda request, index: Reply(
+            body=b'{"dataset_version":"1","claim":"wrong type"}\n',
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+            },
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(
+                    client,
+                    "export_reviews",
+                    ORG,
+                    "findings",
+                    format="ndjson",
+                    from_time="2026-10-01T00:00:00Z",
+                    to_time="2026-10-25T00:00:00Z",
+                )
+            assert raised.value.type == "urn:proofline:sdk:invalid-response"
+
+
+@MODES
 @pytest.mark.parametrize("format", ["csv", "ndjson"])
 async def test_review_export_retains_every_recorded_kind(mode: str, format: str) -> None:
     kinds = [
