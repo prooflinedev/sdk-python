@@ -1320,6 +1320,58 @@ async def test_request_and_wait_for_review_timeout(
 
 
 @MODES
+async def test_request_and_wait_for_review_bad_timeout_raises_before_request(mode: str) -> None:
+    request_body = {
+        "review_id": str(REVIEW),
+        "run_number": 1,
+        "existing": False,
+        "automatic_reviews_paused": False,
+    }
+    with Server(lambda request, index: Reply(body=request_body)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(
+                ValueError,
+                match="The review timeout must be a finite nonnegative number of seconds.",
+            ):
+                await call(
+                    client,
+                    "request_and_wait_for_review",
+                    ORG,
+                    REPOSITORY,
+                    42,
+                    timeout=-1,
+                )
+    assert server.requests == []
+
+
+@MODES
+async def test_request_and_wait_for_review_bad_timeout_infinite_raises_before_request(
+    mode: str,
+) -> None:
+    request_body = {
+        "review_id": str(REVIEW),
+        "run_number": 1,
+        "existing": False,
+        "automatic_reviews_paused": False,
+    }
+    with Server(lambda request, index: Reply(body=request_body)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(
+                ValueError,
+                match="The review timeout must be a finite nonnegative number of seconds.",
+            ):
+                await call(
+                    client,
+                    "request_and_wait_for_review",
+                    ORG,
+                    REPOSITORY,
+                    42,
+                    timeout=float("inf"),
+                )
+    assert server.requests == []
+
+
+@MODES
 async def test_retry_after_is_bounded_by_wait_deadline(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

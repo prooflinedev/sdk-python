@@ -523,6 +523,8 @@ class ProoflineClient(Operations):
         A refused request raises ProoflineError; a timeout returns a TIMED_OUT
         outcome carrying the last recorded review, if any.
         """
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         response = self.request_review(
             organization_id, repository_id, pull_request_number, body=body
         )
@@ -890,6 +892,8 @@ class AsyncProoflineClient(AsyncOperations):
         A refused request raises ProoflineError; a timeout returns a TIMED_OUT
         outcome carrying the last recorded review, if any.
         """
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         response = await self.request_review(
             organization_id, repository_id, pull_request_number, body=body
         )
