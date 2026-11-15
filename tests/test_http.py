@@ -740,7 +740,11 @@ def test_problem_raised_in_a_worker_process_reaches_the_caller_typed() -> None:
     with Server(
         lambda request, index: Reply(
             403,
-            {"type": "urn:proofline:forbidden", "title": "Forbidden", "detail": f"no {TOKEN}"},
+            {
+                "type": "urn:proofline:forbidden",
+                "title": "Forbidden",
+                "detail": f"{PRIVATE} {TOKEN}",
+            },
         )
     ) as server:
         context = multiprocessing.get_context("spawn")
@@ -756,8 +760,13 @@ def test_problem_raised_in_a_worker_process_reaches_the_caller_typed() -> None:
             "urn:proofline:forbidden",
             "Forbidden",
         )
-        assert error.detail == "no [redacted]"
+        assert error.detail == f"{PRIVATE} [redacted]"
         assert repr(error) == "ProoflineError(status=403)"
+        # The pool chains the worker's formatted traceback as __cause__; it stays static.
+        assert error.__cause__ is not None
+        diagnostic = "".join(traceback.format_exception(error))
+        assert "Proofline request failed (HTTP 403)." in diagnostic
+        assert PRIVATE not in diagnostic and TOKEN not in diagnostic
     assert len(server.requests) == 2
 
 
