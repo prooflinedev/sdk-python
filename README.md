@@ -47,8 +47,10 @@ from uuid import UUID
 
 with ProoflineClient() as client:
     page = client.export_reviews(
-        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]), "reviews",
-        from_time="2026-10-01T00:00:00Z", to_time="2026-10-25T00:00:00Z",
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        "reviews",
+        from_time="2026-10-01T00:00:00Z",
+        to_time="2026-10-25T00:00:00Z",
         format="csv",
     )
     print(page.text, end="")
@@ -73,10 +75,12 @@ with ProoflineClient() as client:
         UUID(os.environ["PROOFLINE_REPOSITORY_ID"]),
         body=CoverageUploadRequest(
             tested_sha=os.environ["TESTED_SHA"],
-            reports=[UploadedReport(
-                name="lcov.info",
-                content=Path("lcov.info").read_text(encoding="utf-8"),
-            )],
+            reports=[
+                UploadedReport(
+                    name="lcov.info",
+                    content=Path("lcov.info").read_text(encoding="utf-8"),
+                )
+            ],
         ),
     )
 ```
@@ -97,7 +101,9 @@ print(organizations["structuredContent"]["data"]["organizations"])
 # Set organization_id to the UUID of the organization you intend to use.
 result = client.fixes.get_fix_context(finding_id, organization_id=organization_id)
 result = client.knowledge.get_wiki_page(
-    "owner/name", "index", organization_id=organization_id,
+    "owner/name",
+    "index",
+    organization_id=organization_id,
 )
 ```
 
@@ -140,7 +146,9 @@ Read operations require `reviews:read`. Requesting re-verification also requires
 
 ```python
 result = client.fixes.request_reverification(
-    review_id, [finding_id], pushed_commit_sha,
+    review_id,
+    [finding_id],
+    pushed_commit_sha,
     note="Fixed the null case and added a regression test.",
 )
 if result.get("isError"):

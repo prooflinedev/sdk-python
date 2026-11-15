@@ -15,6 +15,7 @@ def _get_kwargs(
     org_id: UUID,
     review_id: UUID,
 ) -> dict[str, Any]:
+
     _kwargs: dict[str, Any] = {
         "method": "post",
         "url": "/api/v1/organizations/{org_id}/reviews/{review_id}/stop".format(

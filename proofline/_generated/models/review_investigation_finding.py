@@ -66,9 +66,7 @@ class ReviewInvestigationFinding:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.review_investigation_citation import (
-            ReviewInvestigationCitation,  # noqa: PLC0415
-        )
+        from ..models.review_investigation_citation import ReviewInvestigationCitation  # noqa: PLC0415
 
         d = dict(src_dict)
         area = d.pop("area")

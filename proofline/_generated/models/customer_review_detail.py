@@ -882,9 +882,7 @@ class CustomerReviewDetail:
         from ..models.related_review import RelatedReview  # noqa: PLC0415
         from ..models.review_actions import ReviewActions  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
-        from ..models.review_investigation_finding import (
-            ReviewInvestigationFinding,  # noqa: PLC0415
-        )
+        from ..models.review_investigation_finding import ReviewInvestigationFinding  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
         from ..models.run_progress import RunProgress  # noqa: PLC0415
         from ..models.subject_view import SubjectView  # noqa: PLC0415

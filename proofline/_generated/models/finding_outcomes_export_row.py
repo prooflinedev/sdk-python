@@ -114,12 +114,8 @@ class FindingOutcomesExportRow:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.finding_outcomes_count import FindingOutcomesCount  # noqa: PLC0415
-        from ..models.finding_outcomes_outcome_count import (
-            FindingOutcomesOutcomeCount,  # noqa: PLC0415
-        )
-        from ..models.finding_outcomes_post_merge_counts import (
-            FindingOutcomesPostMergeCounts,  # noqa: PLC0415
-        )
+        from ..models.finding_outcomes_outcome_count import FindingOutcomesOutcomeCount  # noqa: PLC0415
+        from ..models.finding_outcomes_post_merge_counts import FindingOutcomesPostMergeCounts  # noqa: PLC0415
 
         d = dict(src_dict)
         code_changed = FindingOutcomesCount.from_dict(d.pop("code_changed"))

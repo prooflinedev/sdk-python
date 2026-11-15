@@ -115,9 +115,7 @@ class CustomerFinding:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.comment_address_evaluation_view import (
-            CommentAddressEvaluationView,  # noqa: PLC0415
-        )
+        from ..models.comment_address_evaluation_view import CommentAddressEvaluationView  # noqa: PLC0415
         from ..models.customer_finding_validation import CustomerFindingValidation  # noqa: PLC0415
         from ..models.finding_causal_graph_view import FindingCausalGraphView  # noqa: PLC0415
         from ..models.finding_placement_view import FindingPlacementView  # noqa: PLC0415
@@ -287,9 +285,7 @@ class CustomerFinding:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.comment_address_evaluation_view import (
-            CommentAddressEvaluationView,  # noqa: PLC0415
-        )
+        from ..models.comment_address_evaluation_view import CommentAddressEvaluationView  # noqa: PLC0415
         from ..models.comment_reaction_view import CommentReactionView  # noqa: PLC0415
         from ..models.customer_evidence_ref import CustomerEvidenceRef  # noqa: PLC0415
         from ..models.customer_finding_validation import CustomerFindingValidation  # noqa: PLC0415

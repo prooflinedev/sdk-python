@@ -17,6 +17,7 @@ def _get_kwargs(
     pull_request_number: int,
     run_number: int,
 ) -> dict[str, Any]:
+
     _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/api/v1/organizations/{org_id}/reviews/pr/{repository}/{pull_request_number}/runs/{run_number}".format(
