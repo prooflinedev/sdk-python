@@ -1207,6 +1207,154 @@ async def test_failure_and_stop_remain_distinct(
             assert len(server.requests) == 1
 
 
+HEAD = "a" * 40
+OTHER_HEAD = "c" * 40
+PINNED_ELSEWHERE = (None, "UNKNOWN", ("HEAD_COMMIT_MISMATCH",))
+NO_HEAD = (None, "UNKNOWN", ("HEAD_COMMIT_UNAVAILABLE",))
+
+
+def review_at(head: Any, status: str = "COMPLETED") -> dict[str, Any]:
+    return {**review(status), "head_commit_sha": head}
+
+
+def gap_facts(result: Any) -> list[tuple[Any, str, tuple[str, ...]]]:
+    return [(gap.assessment_id, gap.status, gap.reason_codes) for gap in result.gaps]
+
+
+@MODES
+async def test_wait_held_to_a_head_commit_never_completes_for_another(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body=review_at(HEAD))) as server:
+        async with session(mode, server.url) as client:
+            for held in (HEAD, HEAD.upper()):
+                result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=held)
+                assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+            result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=OTHER_HEAD)
+            assert result.status == "INCOMPLETE"
+            assert gap_facts(result) == [PINNED_ELSEWHERE]
+            assert result.reason == "The review is pinned to another head commit."
+            assert result.review.head_commit_sha == HEAD
+            assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+            assert HEAD not in repr(result) and OTHER_HEAD not in repr(result)
+            # Without the keyword the same record completes, as it always has.
+            result = await call(client, "wait_for_review", ORG, REVIEW)
+            assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+        assert len(server.requests) == 4
+        assert clock.delays == []
+
+
+@MODES
+async def test_wait_ends_on_the_read_that_names_another_head(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    responses = [review("PENDING"), review_at(HEAD, "RUNNING"), review_at(HEAD)]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, head_commit_sha=HEAD
+            )
+        assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+        assert len(server.requests) == 3
+        assert clock.delays == [5, 10]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, head_commit_sha=OTHER_HEAD
+            )
+        assert result.status == "INCOMPLETE"
+        assert result.review.status == "RUNNING"
+        assert gap_facts(result) == [PINNED_ELSEWHERE]
+        assert result.reason == "The review is pinned to another head commit."
+        # The second read names the head, so the review that would complete is never read.
+        assert len(server.requests) == 2
+        assert clock.delays == [5, 10, 5]
+
+
+@MODES
+async def test_a_review_of_another_head_is_incomplete_whatever_its_own_status(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    statuses = ["FAILED", "STOPPED", "SUPERSEDED"]
+    with Server(lambda request, index: Reply(body=review_at(HEAD, statuses[index // 2]))) as server:
+        async with session(mode, server.url) as client:
+            for status in statuses:
+                result = await call(
+                    client, "wait_for_review", ORG, REVIEW, head_commit_sha=OTHER_HEAD
+                )
+                assert (result.status, gap_facts(result)) == ("INCOMPLETE", [PINNED_ELSEWHERE])
+                assert result.review.status == status
+                result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=HEAD)
+                assert result.status == ("FAILED" if status == "FAILED" else "STOPPED")
+                assert (result.gaps, result.reason) == ((), None)
+        assert len(server.requests) == 6
+
+
+@MODES
+async def test_a_review_that_names_no_head_never_completes_for_a_named_commit(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    bodies = [
+        review(),
+        review_at(None),
+        review_at(""),
+        review_at(7),
+        review_at(None, "FAILED"),
+        review_at(None, "SUPERSEDED"),
+    ]
+    expected = ["INCOMPLETE", "INCOMPLETE", "INCOMPLETE", "INCOMPLETE", "FAILED", "STOPPED"]
+    with Server(lambda request, index: Reply(body=bodies[index])) as server:
+        async with session(mode, server.url) as client:
+            for status in expected:
+                result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=HEAD)
+                assert result.status == status
+                assert gap_facts(result) == [NO_HEAD]
+                assert result.reason == "The review names no head commit."
+        assert len(server.requests) == len(bodies)
+        assert clock.delays == []
+    # A review that is still pending may name its head later, so the wait goes on.
+    with Server(lambda request, index: Reply(body=review("PENDING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=12, head_commit_sha=HEAD
+            )
+        assert result.status == "TIMED_OUT"
+        assert gap_facts(result) == [NO_HEAD]
+        assert result.reason == "The review names no head commit."
+        assert len(server.requests) == 2
+        assert clock.delays == [5, 7]
+
+
+@MODES
+async def test_head_commit_must_be_a_full_sha_before_any_request(mode: str) -> None:
+    refused = [
+        "main",
+        "a" * 7,
+        "a" * 39,
+        "a" * 41,
+        "g" * 40,
+        "\u0661" * 40,
+        HEAD + "\n",
+        " " + HEAD[1:],
+        "",
+        7,
+        HEAD.encode(),
+    ]
+    with Server(lambda request, index: Reply(body=review_at("d" * 64))) as server:
+        async with session(mode, server.url) as client:
+            for value in refused:
+                with pytest.raises(ValueError, match="full 40 or 64 character"):
+                    await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=value)
+            assert server.requests == []
+            result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha="D" * 64)
+            assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+        assert len(server.requests) == 1
+
+
 @MODES
 async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
     mode: str, monkeypatch: pytest.MonkeyPatch
