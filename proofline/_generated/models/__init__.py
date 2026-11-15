@@ -142,6 +142,7 @@ from .run_now_refusal_view_type_9 import RunNowRefusalViewType9
 from .run_now_refused import RunNowRefused
 from .run_now_request import RunNowRequest
 from .run_now_response import RunNowResponse
+from .run_progress import RunProgress
 from .scan_request_body import ScanRequestBody
 from .scan_response import ScanResponse
 from .spend_account_kind import SpendAccountKind
@@ -304,6 +305,7 @@ __all__ = (
     "RunNowRefused",
     "RunNowRequest",
     "RunNowResponse",
+    "RunProgress",
     "ScanRequestBody",
     "ScanResponse",
     "SpendAccountKind",

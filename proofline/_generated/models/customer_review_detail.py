@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from ..models.review_actions import ReviewActions
     from ..models.review_diff_stats import ReviewDiffStats
     from ..models.review_open_items import ReviewOpenItems
+    from ..models.run_progress import RunProgress
     from ..models.subject_view import SubjectView
     from ..models.walkthrough_view import WalkthroughView
 
@@ -200,6 +201,10 @@ class CustomerReviewDetail:
             retracted, a marker
              only older versions set. Null otherwise.
         run_number (int | None | Unset): One-based, append-only ordinal within one repository pull request.
+        run_progress (None | RunProgress | Unset): Where an unfinished review's runs stand: running, queued for a
+            worker,
+             waiting for a scheduled step, or due again after an attempt that did
+             not finish. Null once the review has ended.
         stopped_at (datetime.datetime | None | Unset): When the review was stopped. Null unless it was stopped.
         stopped_by (ActorView | None | Unset): Who stopped this review, for a `STOPPED` review whose stop recorded its
              actor. Null otherwise.
@@ -282,6 +287,7 @@ class CustomerReviewDetail:
     review_comment_url: None | str | Unset = UNSET
     review_retracted_at: datetime.datetime | None | Unset = UNSET
     run_number: int | None | Unset = UNSET
+    run_progress: None | RunProgress | Unset = UNSET
     stopped_at: datetime.datetime | None | Unset = UNSET
     stopped_by: ActorView | None | Unset = UNSET
     stopped_from: None | str | Unset = UNSET
@@ -302,6 +308,7 @@ class CustomerReviewDetail:
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
+        from ..models.run_progress import RunProgress  # noqa: PLC0415
         from ..models.walkthrough_view import WalkthroughView  # noqa: PLC0415
 
         actions = self.actions.to_dict()
@@ -657,6 +664,14 @@ class CustomerReviewDetail:
         else:
             run_number = self.run_number
 
+        run_progress: dict[str, Any] | None | Unset
+        if isinstance(self.run_progress, Unset):
+            run_progress = UNSET
+        elif isinstance(self.run_progress, RunProgress):
+            run_progress = self.run_progress.to_dict()
+        else:
+            run_progress = self.run_progress
+
         stopped_at: None | str | Unset
         if isinstance(self.stopped_at, Unset):
             stopped_at = UNSET
@@ -818,6 +833,8 @@ class CustomerReviewDetail:
             field_dict["review_retracted_at"] = review_retracted_at
         if run_number is not UNSET:
             field_dict["run_number"] = run_number
+        if run_progress is not UNSET:
+            field_dict["run_progress"] = run_progress
         if stopped_at is not UNSET:
             field_dict["stopped_at"] = stopped_at
         if stopped_by is not UNSET:
@@ -851,6 +868,7 @@ class CustomerReviewDetail:
         from ..models.review_actions import ReviewActions  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
+        from ..models.run_progress import RunProgress  # noqa: PLC0415
         from ..models.subject_view import SubjectView  # noqa: PLC0415
         from ..models.walkthrough_view import WalkthroughView  # noqa: PLC0415
 
@@ -1495,6 +1513,23 @@ class CustomerReviewDetail:
 
         run_number = _parse_run_number(d.pop("run_number", UNSET))
 
+        def _parse_run_progress(data: object) -> None | RunProgress | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                run_progress_type_0 = RunProgress.from_dict(data)
+
+                return run_progress_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | RunProgress | Unset, data)
+
+        run_progress = _parse_run_progress(d.pop("run_progress", UNSET))
+
         def _parse_stopped_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -1654,6 +1689,7 @@ class CustomerReviewDetail:
             review_comment_url=review_comment_url,
             review_retracted_at=review_retracted_at,
             run_number=run_number,
+            run_progress=run_progress,
             stopped_at=stopped_at,
             stopped_by=stopped_by,
             stopped_from=stopped_from,
