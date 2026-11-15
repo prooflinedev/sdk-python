@@ -6,7 +6,6 @@ import ipaddress
 import math
 import os
 import re
-from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,6 +17,7 @@ from urllib.parse import urlsplit
 
 import anyio
 import httpx
+from anyio import sleep as async_sleep
 from pydantic import SecretStr
 
 from ._generated.models import (
