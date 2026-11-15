@@ -38,6 +38,22 @@ except ProoflineError as error:
         print(error.detail)
 ```
 
+## Requesting and waiting for a review
+
+`request_and_wait_for_review` requests a review of a pull request and waits for it to complete, returning the recorded outcome. A refused request raises `ProoflineError`; a deadline returns a `TIMED_OUT` outcome.
+
+```python
+from proofline import ProoflineClient
+
+with ProoflineClient() as client:
+    outcome = client.request_and_wait_for_review(
+        organization_id, repository_id, 12, timeout=300
+    )
+    print(outcome.status, outcome.review_url)
+```
+
+The async client exposes the same method as `await client.request_and_wait_for_review(...)`.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.

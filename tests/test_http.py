@@ -1233,6 +1233,93 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
 
 
 @MODES
+async def test_request_and_wait_for_review_returns_completed_outcome(mode: str) -> None:
+    request_body = {
+        "review_id": str(REVIEW),
+        "run_number": 1,
+        "existing": False,
+        "automatic_reviews_paused": False,
+    }
+    responses = [request_body, review("COMPLETED")]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "request_and_wait_for_review",
+                ORG,
+                REPOSITORY,
+                42,
+                timeout=100,
+            )
+    assert result.status == "COMPLETED"
+    assert result.review.id == REVIEW
+    assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+    assert server.requests[0].method == "POST"
+    assert server.requests[0].path == (
+        f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}/pull-requests/42/review"
+    )
+    assert server.requests[1].method == "GET"
+    assert server.requests[1].path == f"/api/v1/organizations/{ORG}/reviews/{REVIEW}"
+
+
+@MODES
+async def test_request_and_wait_for_review_propagates_refusal(mode: str) -> None:
+    refusal = {
+        "status": 409,
+        "type": "urn:proofline:review:refused",
+        "title": "Review refused",
+        "detail": "No linked environment",
+        "refusal": {"reason": "NO_LINKED_ENVIRONMENT", "repository_name": "owner/repo"},
+    }
+    with Server(lambda request, index: Reply(status=409, body=refusal)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as error:
+                await call(
+                    client,
+                    "request_and_wait_for_review",
+                    ORG,
+                    REPOSITORY,
+                    42,
+                )
+    assert error.value.status == 409
+    assert server.requests[0].method == "POST"
+    assert server.requests[0].path == (
+        f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}/pull-requests/42/review"
+    )
+
+
+@MODES
+async def test_request_and_wait_for_review_timeout(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    request_body = {
+        "review_id": str(REVIEW),
+        "run_number": 1,
+        "existing": False,
+        "automatic_reviews_paused": False,
+    }
+    running = review("RUNNING")
+    running.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+    responses = [request_body] + [running] * 5
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "request_and_wait_for_review",
+                ORG,
+                REPOSITORY,
+                42,
+                timeout=1,
+            )
+    assert result.status == "TIMED_OUT"
+    assert result.review.id == REVIEW
+    assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+    assert server.requests[0].method == "POST"
+    assert all(request.method == "GET" for request in server.requests[1:])
+
+
+@MODES
 async def test_retry_after_is_bounded_by_wait_deadline(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
