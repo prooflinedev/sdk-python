@@ -102,6 +102,11 @@ class CustomerReviewDetail:
         cost_microcredits (int | None | Unset): The credits this run was charged so far, in microcredits, whoever
              paid: the plan, the free review month or the organization's credits.
              Null for a caller who is not a member of the organization.
+        counted_incomplete_causes (list[IncompleteCauseType0 | Literal['OUT_OF_CREDITS'] | Literal['UNKNOWN']] | Unset):
+            `incomplete_causes` as the Inbox and the reviews `cause:` search
+             count them: `OUT_OF_CREDITS` in place of the `NOT_CONFIGURED` an
+             assessment records when credits refused it. Present exactly when
+             `incomplete_causes` is.
         current_head_commit_sha (None | str | Unset): The pull request's head commit as the latest provider projection
             reports it, which can differ from `head_commit_sha`. Set only on a single-review read, and absent for a
             deployment review or a pull request with no projection.
@@ -239,6 +244,9 @@ class CustomerReviewDetail:
     compare_url: None | str | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
     cost_microcredits: int | None | Unset = UNSET
+    counted_incomplete_causes: (
+        list[IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]] | Unset
+    ) = UNSET
     current_head_commit_sha: None | str | Unset = UNSET
     deep_review_escalation: DeepReviewEscalation | None | Unset = UNSET
     diff_stats: None | ReviewDiffStats | Unset = UNSET
@@ -408,6 +416,19 @@ class CustomerReviewDetail:
             cost_microcredits = UNSET
         else:
             cost_microcredits = self.cost_microcredits
+
+        counted_incomplete_causes: (
+            list[Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"] | str] | Unset
+        ) = UNSET
+        if not isinstance(self.counted_incomplete_causes, Unset):
+            counted_incomplete_causes = []
+            for counted_incomplete_causes_item_data in self.counted_incomplete_causes:
+                counted_incomplete_causes_item: Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"] | str
+                if isinstance(counted_incomplete_causes_item_data, IncompleteCauseType0):
+                    counted_incomplete_causes_item = counted_incomplete_causes_item_data.value
+                else:
+                    counted_incomplete_causes_item = counted_incomplete_causes_item_data
+                counted_incomplete_causes.append(counted_incomplete_causes_item)
 
         current_head_commit_sha: None | str | Unset
         if isinstance(self.current_head_commit_sha, Unset):
@@ -725,6 +746,8 @@ class CustomerReviewDetail:
             field_dict["completed_at"] = completed_at
         if cost_microcredits is not UNSET:
             field_dict["cost_microcredits"] = cost_microcredits
+        if counted_incomplete_causes is not UNSET:
+            field_dict["counted_incomplete_causes"] = counted_incomplete_causes
         if current_head_commit_sha is not UNSET:
             field_dict["current_head_commit_sha"] = current_head_commit_sha
         if deep_review_escalation is not UNSET:
@@ -1009,6 +1032,53 @@ class CustomerReviewDetail:
             return cast(int | None | Unset, data)
 
         cost_microcredits = _parse_cost_microcredits(d.pop("cost_microcredits", UNSET))
+
+        _counted_incomplete_causes = d.pop("counted_incomplete_causes", UNSET)
+        counted_incomplete_causes: (
+            list[IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]] | Unset
+        ) = UNSET
+        if _counted_incomplete_causes is not UNSET:
+            counted_incomplete_causes = []
+            for counted_incomplete_causes_item_data in _counted_incomplete_causes:
+
+                def _parse_counted_incomplete_causes_item(
+                    data: object,
+                ) -> IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]:
+                    try:
+                        if not isinstance(data, str):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_0 = IncompleteCauseType0(data)
+
+                        return componentsschemas_incomplete_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    try:
+                        if not (type(data) is str and data == "UNKNOWN"):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_1 = cast(Literal["UNKNOWN"], data)
+                        if componentsschemas_incomplete_cause_type_1 != "UNKNOWN":
+                            raise ValueError(
+                                f"/components/schemas/IncompleteCause_type_1 must match const 'UNKNOWN', got '{componentsschemas_incomplete_cause_type_1}'"
+                            )
+                        return componentsschemas_incomplete_cause_type_1
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not (type(data) is str and data == "OUT_OF_CREDITS"):
+                        raise TypeError()
+                    componentsschemas_credit_refusal_cause_type_0 = cast(
+                        Literal["OUT_OF_CREDITS"], data
+                    )
+                    if componentsschemas_credit_refusal_cause_type_0 != "OUT_OF_CREDITS":
+                        raise ValueError(
+                            f"/components/schemas/CreditRefusalCause_type_0 must match const 'OUT_OF_CREDITS', got '{componentsschemas_credit_refusal_cause_type_0}'"
+                        )
+                    return componentsschemas_credit_refusal_cause_type_0
+
+                counted_incomplete_causes_item = _parse_counted_incomplete_causes_item(
+                    counted_incomplete_causes_item_data
+                )
+
+                counted_incomplete_causes.append(counted_incomplete_causes_item)
 
         def _parse_current_head_commit_sha(data: object) -> None | str | Unset:
             if data is None:
@@ -1548,6 +1618,7 @@ class CustomerReviewDetail:
             compare_url=compare_url,
             completed_at=completed_at,
             cost_microcredits=cost_microcredits,
+            counted_incomplete_causes=counted_incomplete_causes,
             current_head_commit_sha=current_head_commit_sha,
             deep_review_escalation=deep_review_escalation,
             diff_stats=diff_stats,
