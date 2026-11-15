@@ -106,6 +106,12 @@ class ProoflineError(Exception):
     def __repr__(self) -> str:
         return f"ProoflineError(status={self.status})"
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        # BaseException rebuilds an error as type(self)(*self.args), and args holds
+        # only the status message. Rebuild from the fields and restore the rest, so
+        # pickle, copy and process pools keep the typed problem and its refusal.
+        return type(self), (self.status, self.type, self.detail), self.__dict__.copy()
+
 
 def token_value(token: str | SecretStr | None) -> SecretStr:
     secret = (
