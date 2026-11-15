@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import gzip
 import inspect
 import json
 import logging
+import multiprocessing
+import pickle
 import socket
 import subprocess
 import sys
@@ -13,6 +16,7 @@ import time
 import tomllib
 import traceback
 from collections.abc import AsyncIterator
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -606,6 +610,7 @@ async def test_review_requests_return_each_documented_refusal(
                     assert decoded["environment"]["display_name"] == f"{PRIVATE} [redacted]"
                 diagnostic = repr(error) + str(error) + "".join(traceback.format_exception(error))
                 assert PRIVATE not in diagnostic and TOKEN not in diagnostic
+                assert_round_trips(error)
         assert len(server.requests) == len(REVIEW_REQUESTS)
 
 
@@ -682,6 +687,87 @@ async def test_problem_without_detail_keeps_status_and_title(mode: str) -> None:
             assert "internal error" in error.detail
             assert error.refusal is None
         assert len(server.requests) == 1
+
+
+def problem_fields(error: ProoflineError) -> tuple[Any, ...]:
+    refusal = None if error.refusal is None else error.refusal.to_dict()
+    return (
+        type(error),
+        error.status,
+        error.type,
+        error.detail,
+        error.title,
+        refusal,
+        error.repository_name,
+        str(error),
+        repr(error),
+    )
+
+
+def assert_round_trips(error: ProoflineError) -> None:
+    copies = [copy.copy(error), copy.deepcopy(error)]
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        data = pickle.dumps(error, protocol=protocol)
+        assert TOKEN.encode() not in data
+        copies.append(pickle.loads(data))
+    for restored in copies:
+        assert restored is not error
+        assert problem_fields(restored) == problem_fields(error)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _transport.invalid_response(),
+        _transport.timeout_error(),
+        _transport.redirect_error(307),
+        ProoflineError(409, "urn:proofline:conflict", "busy", title="Conflict"),
+    ],
+    ids=["invalid-response", "timeout", "redirect", "keyword-fields"],
+)
+def test_sdk_problems_round_trip_through_pickle_and_copy(error: ProoflineError) -> None:
+    error.add_note("kept with the error state")
+    assert_round_trips(error)
+    assert pickle.loads(pickle.dumps(error)).__notes__ == ["kept with the error state"]
+
+
+def finding_in_worker(url: str) -> CustomerFinding:
+    with ProoflineClient(SecretStr(TOKEN), base_url=url) as client:
+        return client.get_finding(ORG, FINDING)
+
+
+def test_problem_raised_in_a_worker_process_reaches_the_caller_typed() -> None:
+    with Server(
+        lambda request, index: Reply(
+            403,
+            {
+                "type": "urn:proofline:forbidden",
+                "title": "Forbidden",
+                "detail": f"{PRIVATE} {TOKEN}",
+            },
+        )
+    ) as server:
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=1, mp_context=context) as pool:
+            with pytest.raises(ProoflineError) as raised:
+                pool.submit(finding_in_worker, server.url).result(timeout=60)
+            # The pool survives the refusal and keeps serving later work.
+            with pytest.raises(ProoflineError) as again:
+                pool.submit(finding_in_worker, server.url).result(timeout=60)
+    for error in (raised.value, again.value):
+        assert (error.status, error.type, error.title) == (
+            403,
+            "urn:proofline:forbidden",
+            "Forbidden",
+        )
+        assert error.detail == f"{PRIVATE} [redacted]"
+        assert repr(error) == "ProoflineError(status=403)"
+        # The pool chains the worker's formatted traceback as __cause__; it stays static.
+        assert error.__cause__ is not None
+        diagnostic = "".join(traceback.format_exception(error))
+        assert "Proofline request failed (HTTP 403)." in diagnostic
+        assert PRIVATE not in diagnostic and TOKEN not in diagnostic
+    assert len(server.requests) == 2
 
 
 @MODES
