@@ -758,6 +758,7 @@ async def test_redirect_never_contacts_other_origin(mode: str) -> None:
 async def test_retry_after_waits_for_server_then_returns_typed_success(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    clock = Clock(monkeypatch)
     with Server(
         lambda request, index: (
             Reply(429, {"detail": "Rate limit."}, {"Retry-After": "2"})
@@ -765,11 +766,10 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
             else Reply(body=finding())
         )
     ) as server:
-        started = time.monotonic()
         async with session(mode, server.url) as client:
             result = await call(client, "get_finding", ORG, FINDING)
             assert result.id == FINDING
-        assert time.monotonic() - started >= 2
+        assert clock.delays == [2.0]
         assert len(server.requests) == 2
 
     instant = datetime(2069, 9, 30, tzinfo=UTC)
@@ -788,10 +788,9 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
             else Reply(body=finding())
         )
     ) as server:
-        started = time.monotonic()
         async with session(mode, server.url) as client:
             assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
-        assert time.monotonic() - started >= 2
+        assert clock.delays == [2.0, 2.0]
         assert len(server.requests) == 2
 
 
