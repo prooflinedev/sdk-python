@@ -119,6 +119,8 @@ from .review_actions import ReviewActions
 from .review_depth import ReviewDepth
 from .review_diff_stats import ReviewDiffStats
 from .review_filters import ReviewFilters
+from .review_investigation_citation import ReviewInvestigationCitation
+from .review_investigation_finding import ReviewInvestigationFinding
 from .review_open_items import ReviewOpenItems
 from .review_page import ReviewPage
 from .review_routing_view_type_0 import ReviewRoutingViewType0
@@ -282,6 +284,8 @@ __all__ = (
     "ReviewDepth",
     "ReviewDiffStats",
     "ReviewFilters",
+    "ReviewInvestigationCitation",
+    "ReviewInvestigationFinding",
     "ReviewOpenItems",
     "ReviewPage",
     "ReviewRoutingViewType0",

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from ..models.related_review import RelatedReview
     from ..models.review_actions import ReviewActions
     from ..models.review_diff_stats import ReviewDiffStats
+    from ..models.review_investigation_finding import ReviewInvestigationFinding
     from ..models.review_open_items import ReviewOpenItems
     from ..models.run_progress import RunProgress
     from ..models.subject_view import SubjectView
@@ -136,6 +137,10 @@ class CustomerReviewDetail:
              assessments recorded it, in name order. `UNKNOWN` alone when none
              recorded a cause. Absent for every other status, and on reads other
              than the reviews list and a single review.
+        investigation_findings (list[ReviewInvestigationFinding] | Unset): The supported findings of each environment
+            investigation this review
+             published, by assessment in recorded order, including those the
+             pull-request Check left off its list. Absent when there are none.
         is_deep_review (bool | Unset): Present and true when this run is a Deep Review.
         local_reverifications (list[LocalReverification] | Unset): For a patch review requested with
             `verify_finding_ids`, each finding
@@ -261,6 +266,7 @@ class CustomerReviewDetail:
     head_commit_url: None | str | Unset = UNSET
     head_ref: None | str | Unset = UNSET
     incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
+    investigation_findings: list[ReviewInvestigationFinding] | Unset = UNSET
     is_deep_review: bool | Unset = UNSET
     local_reverifications: list[LocalReverification] | Unset = UNSET
     merge_gate: None | PullRequestMergeGate | Unset = UNSET
@@ -496,6 +502,13 @@ class CustomerReviewDetail:
                 else:
                     incomplete_causes_item = incomplete_causes_item_data
                 incomplete_causes.append(incomplete_causes_item)
+
+        investigation_findings: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.investigation_findings, Unset):
+            investigation_findings = []
+            for investigation_findings_item_data in self.investigation_findings:
+                investigation_findings_item = investigation_findings_item_data.to_dict()
+                investigation_findings.append(investigation_findings_item)
 
         is_deep_review = self.is_deep_review
 
@@ -781,6 +794,8 @@ class CustomerReviewDetail:
             field_dict["head_ref"] = head_ref
         if incomplete_causes is not UNSET:
             field_dict["incomplete_causes"] = incomplete_causes
+        if investigation_findings is not UNSET:
+            field_dict["investigation_findings"] = investigation_findings
         if is_deep_review is not UNSET:
             field_dict["is_deep_review"] = is_deep_review
         if local_reverifications is not UNSET:
@@ -867,6 +882,9 @@ class CustomerReviewDetail:
         from ..models.related_review import RelatedReview  # noqa: PLC0415
         from ..models.review_actions import ReviewActions  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
+        from ..models.review_investigation_finding import (
+            ReviewInvestigationFinding,  # noqa: PLC0415
+        )
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
         from ..models.run_progress import RunProgress  # noqa: PLC0415
         from ..models.subject_view import SubjectView  # noqa: PLC0415
@@ -1212,6 +1230,17 @@ class CustomerReviewDetail:
                 incomplete_causes_item = _parse_incomplete_causes_item(incomplete_causes_item_data)
 
                 incomplete_causes.append(incomplete_causes_item)
+
+        _investigation_findings = d.pop("investigation_findings", UNSET)
+        investigation_findings: list[ReviewInvestigationFinding] | Unset = UNSET
+        if _investigation_findings is not UNSET:
+            investigation_findings = []
+            for investigation_findings_item_data in _investigation_findings:
+                investigation_findings_item = ReviewInvestigationFinding.from_dict(
+                    investigation_findings_item_data
+                )
+
+                investigation_findings.append(investigation_findings_item)
 
         is_deep_review = d.pop("is_deep_review", UNSET)
 
@@ -1663,6 +1692,7 @@ class CustomerReviewDetail:
             head_commit_url=head_commit_url,
             head_ref=head_ref,
             incomplete_causes=incomplete_causes,
+            investigation_findings=investigation_findings,
             is_deep_review=is_deep_review,
             local_reverifications=local_reverifications,
             merge_gate=merge_gate,
