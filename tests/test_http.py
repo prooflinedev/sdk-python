@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import gzip
 import inspect
+import io
 import json
 import logging
 import socket
@@ -1569,6 +1571,58 @@ def test_token_environment_and_https_origin_rejection(monkeypatch: pytest.Monkey
             ProoflineClient(TOKEN, base_url=origin)
     with ProoflineClient(TOKEN, base_url="http://[::1]:8080"):
         pass
+
+
+@MODES
+@pytest.mark.parametrize("size", [131_072, 131_073, 150_000, 8 * 1024 * 1024 + 1])
+async def test_csv_export_preserves_large_cells(mode: str, size: int) -> None:
+    claim = 'é, "quoted"\r\n' + "x" * size
+    row = {
+        "dataset_version": "1",
+        "organization_id": str(ORG),
+        "repository_id": str(REPOSITORY),
+        "review_id": str(REVIEW),
+        "assessment_id": str(ASSESSMENT),
+        "environment_id": str(ORG),
+        "finding_id": str(FINDING),
+        "claim": claim,
+        "impact": "Synthetic consequence",
+        "risk_domain": "SECURITY",
+        "severity": "HIGH",
+        "lifecycle_state": "OPEN",
+        "created_at": "2026-11-16T00:00:00Z",
+        "evidence_refs": "[]",
+    }
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=list(row))
+    writer.writeheader()
+    writer.writerow(row)
+    text = stream.getvalue()
+    with Server(
+        lambda request, index: Reply(
+            body=text.encode(),
+            headers={
+                "Content-Type": "text/csv",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-11-16T00:00:00Z",
+                "X-Proofline-Export-Next-Cursor": "opaque/+cursor",
+            },
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            kwargs = {"from_time": "2026-11-01T00:00:00Z", "to_time": "2026-11-15T00:00:00Z"}
+            if size > 8 * 1024 * 1024:
+                with pytest.raises(ProoflineError) as caught:
+                    await call(client, "export_reviews", ORG, "findings", format="csv", **kwargs)
+                assert caught.value.type == "urn:proofline:sdk:invalid-response"
+            else:
+                page = await call(client, "export_reviews", ORG, "findings", format="csv", **kwargs)
+                assert page.rows == [row]
+                assert page.text == text
+                assert page.version == 1
+                assert page.settled_until == "2026-11-16T00:00:00Z"
+                assert page.next_cursor == "opaque/+cursor"
+        assert len(server.requests) == 1
 
 
 @MODES
