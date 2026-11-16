@@ -661,6 +661,39 @@ async def test_malformed_refusal_keeps_fixed_sdk_problem_type(
             assert TOKEN not in error.detail
 
 
+@MODES
+@pytest.mark.parametrize(
+    "view",
+    [
+        {"reason": "OUT_OF_CREDITS"},
+        {"reason": "PLAN_CREDITS_SPENT", "resets": "2026-12-01T00:00:00Z"},
+    ],
+    ids=["out-of-credits", "plan-credits-spent"],
+)
+async def test_credit_refusal_keeps_the_server_problem(mode: str, view: dict[str, Any]) -> None:
+    body = {
+        "title": "payment required",
+        "status": 402,
+        "detail": f"Credits cannot pay for {TOKEN}.",
+        "repository_name": "api",
+        "refusal": view,
+    }
+    with Server(
+        lambda request, index: Reply(402, body, {"Content-Type": "application/problem+json"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            for name in REVIEW_REQUESTS:
+                args, kwargs = review_request(name)
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, name, *args, **kwargs)
+                error = raised.value
+                assert (error.status, error.type) == (402, "about:blank")
+                assert error.title == "payment required"
+                assert error.detail == "Credits cannot pay for [redacted]."
+                assert (error.refusal, error.repository_name) == (None, None)
+        assert len(server.requests) == len(REVIEW_REQUESTS)
+
+
 def test_every_documented_refusal_reason_has_a_field_check() -> None:
     reasons = {variant["properties"]["reason"]["const"] for variant in REFUSAL_VARIANTS}
     assert set(REFUSAL_SHAPES) == reasons

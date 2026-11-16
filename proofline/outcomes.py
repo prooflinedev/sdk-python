@@ -64,6 +64,14 @@ def _optional_text(value: object) -> bool:
     return value is None or isinstance(value, (str, Unset))
 
 
+def _optional_texts(value: object) -> bool:
+    return (
+        value is None
+        or isinstance(value, Unset)
+        or (isinstance(value, list) and all(isinstance(item, str) for item in value))
+    )
+
+
 def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | None:
     # A CODE result cannot replace a missing ENV result or its check receipts.
     if review.assessment_count != 0 or review.assessments:
@@ -77,6 +85,7 @@ def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | N
         or not isinstance(code.findings, list)
         or code.status not in ("PENDING", "RUNNING", "COMPLETED", "INCOMPLETE", "EXCLUDED")
         or not _optional_text(code.incompleteness_kind)
+        or not _optional_texts(code.reason_codes)
     ):
         return None
     for recorded, actual in (
@@ -115,10 +124,7 @@ def _validate(review: CustomerReviewDetail, review_id: UUID | None) -> None:
         if assessment.id in seen:
             raise _invalid()
         seen.add(assessment.id)
-        reasons = assessment.reason_codes
-        if not (reasons is None or isinstance(reasons, Unset)) and (
-            not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons)
-        ):
+        if not _optional_texts(assessment.reason_codes):
             raise _invalid()
         for check in assessment.checks.families:
             if (
@@ -149,13 +155,16 @@ def outcome(
     if code_only:
         if code is None:
             gaps.append(AssessmentGap(None, "UNKNOWN", ("CODE_ASSESSMENT_UNAVAILABLE",)))
-        elif code.status != "COMPLETED" or text(code.incompleteness_kind):
+        elif code.status != "COMPLETED" or text(code.incompleteness_kind) or code.reason_codes:
             kind = text(code.incompleteness_kind)
+            reasons = tuple(code.reason_codes) if isinstance(code.reason_codes, list) else ()
+            if kind:
+                reasons = (*reasons, kind)
             gaps.append(
                 AssessmentGap(
                     code.id,
                     code.status,
-                    (kind,) if kind else ("CODE_ASSESSMENT_STATE_UNAVAILABLE",),
+                    reasons or ("CODE_ASSESSMENT_STATE_UNAVAILABLE",),
                     kind,
                 )
             )
