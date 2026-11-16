@@ -59,6 +59,23 @@ with ProoflineClient() as client:
 
 Each response returns the original text, decoded rows, dataset version, settled horizon, and an optional next cursor. Each CSV page includes its own header and keeps cells as strings, including nested JSON cells. NDJSON pages retain JSON values. To read additional pages, repeat the call with the returned cursor and the same dataset, window, format, and grouping. A missing next cursor marks the last page.
 
+## Waiting for a deployment review
+
+A deploy job usually knows the deployment's public key, not the review id. `wait_for_deployment_review` polls that key with the same backoff, deadline and completion rules as `wait_for_review`, and returns a `ReviewOutcome`.
+
+```python
+with ProoflineClient() as client:
+    result = client.wait_for_deployment_review(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        os.environ["PROOFLINE_DEPLOYMENT_KEY"],
+        timeout=600,
+    )
+if result.status != "COMPLETED":
+    raise SystemExit(f"Deployment review is {result.status}: {result.review_url}")
+```
+
+The first response pins the review id. If a later poll resolves the key to a different review, the wait raises `ProoflineError` with type `urn:proofline:sdk:invalid-response` rather than report another review's result. Once the id is known, `review_url` links to that review; a wait that times out before any response links to the deployment key instead. `TIMED_OUT`, `INCOMPLETE` and the retained `gaps` mean the same as for `wait_for_review`.
+
 ## Coverage uploads
 
 To upload coverage reports from CI, use a repository-restricted token with `coverage:write` and current repository write access. Name the full commit SHA that the tests ran on. Send 1 to 50 LCOV, Cobertura XML, JaCoCo XML, or Go cover reports in a JSON body of at most 30 MiB.
