@@ -63,12 +63,36 @@ class Lookup:
         return self._addresses
 
 
+_DNS_WORKER_LIMIT = 8
+_DNS_WORKER_SLOTS = threading.BoundedSemaphore(_DNS_WORKER_LIMIT)
+
+
+def _run_bounded_lookup(lookup: Lookup) -> None:
+    try:
+        lookup.run()
+    finally:
+        _DNS_WORKER_SLOTS.release()
+
+
 def resolve(host: str, port: int, timeout: float | None) -> list[str]:
     try:
         ipaddress.ip_address(host)
     except ValueError:
         lookup = Lookup(host, port)
-        threading.Thread(target=lookup.run, name="proofline-dns", daemon=True).start()
+        if not _DNS_WORKER_SLOTS.acquire(timeout=timeout):
+            raise httpcore.ConnectTimeout(
+                "DNS worker capacity was not available in time."
+            )
+        try:
+            threading.Thread(
+                target=_run_bounded_lookup,
+                args=(lookup,),
+                name="proofline-dns",
+                daemon=True,
+            ).start()
+        except BaseException:
+            _DNS_WORKER_SLOTS.release()
+            raise
         return lookup.addresses(timeout)
     return [host]
 
