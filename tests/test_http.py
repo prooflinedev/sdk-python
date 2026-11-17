@@ -2534,3 +2534,218 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+SCAN_PATH = f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}/scans"
+RESOLUTION = UUID("00000000-0000-4000-8000-000000000007")
+
+
+def scan(outcome: str = "CREATED", review_id: UUID | None = REVIEW) -> dict[str, Any]:
+    return {
+        "outcome": outcome,
+        "resolution_id": str(RESOLUTION),
+        "review_id": None if review_id is None else str(review_id),
+    }
+
+
+def scan_ids(server: Server) -> set[str]:
+    return {json.loads(request.body)["request_id"] for request in server.requests}
+
+
+@MODES
+async def test_scan_revision_retries_with_one_request_id(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(
+        lambda request, index: (
+            Reply(503, {"detail": "Unavailable."}) if index < 2 else Reply(body=scan())
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "scan_revision", ORG, REPOSITORY, budget_credits=50, ref="main"
+            )
+        assert result.outcome == "CREATED"
+        assert result.review_id == REVIEW
+        assert [request.method for request in server.requests] == ["POST"] * 3
+        assert {request.path for request in server.requests} == {SCAN_PATH}
+        assert len(scan_ids(server)) == 1
+        UUID(scan_ids(server).pop())
+        assert json.loads(server.requests[0].body)["budget_credits"] == 50
+        assert json.loads(server.requests[0].body)["ref"] == "main"
+        assert len(clock.delays) == 2
+
+
+@MODES
+async def test_scan_revision_keeps_a_caller_request_id(mode: str) -> None:
+    request_id = UUID("00000000-0000-4000-8000-0000000000aa")
+    with Server(lambda request, index: Reply(body=scan("EXISTING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "scan_revision",
+                ORG,
+                REPOSITORY,
+                budget_credits=1,
+                commit_sha="a" * 40,
+                request_id=request_id,
+            )
+        assert result.outcome == "EXISTING"
+        assert scan_ids(server) == {str(request_id)}
+        assert json.loads(server.requests[0].body)["commit_sha"] == "a" * 40
+
+
+@MODES
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+async def test_scan_revision_retry_is_bounded(
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    with Server(lambda request, index: Reply(status, {"detail": "Unavailable."})) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "scan_revision", ORG, REPOSITORY, budget_credits=1, ref="main")
+            assert raised.value.status == status
+            assert raised.value.__notes__ == [f"scan request_id: {scan_ids(server).copy().pop()}"]
+        assert len(server.requests) == 4
+        assert len(scan_ids(server)) == 1
+
+
+@MODES
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 500])
+async def test_scan_revision_does_not_retry_other_problems(mode: str, status: int) -> None:
+    with Server(lambda request, index: Reply(status, {"detail": "No."})) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "scan_revision", ORG, REPOSITORY, budget_credits=1, ref="main")
+            assert raised.value.status == status
+        assert len(server.requests) == 1
+
+
+@MODES
+async def test_scan_revision_waits_only_for_a_created_review(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        if request.method == "POST":
+            return Reply(body=scan())
+        return Reply(body=review("COMPLETED"))
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "scan_revision", ORG, REPOSITORY, budget_credits=1, ref="main", wait=True
+            )
+        assert result.review.id == REVIEW
+        assert [request.method for request in server.requests] == ["POST", "GET"]
+
+    with Server(lambda request, index: Reply(body=scan("REPOSITORY_UNAVAILABLE", None))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "scan_revision", ORG, REPOSITORY, budget_credits=1, ref="main", wait=True
+            )
+        assert result.outcome == "REPOSITORY_UNAVAILABLE"
+        assert len(server.requests) == 1
+
+
+def test_scan_retries_unreachable_api_and_timeouts_only() -> None:
+    from proofline import scans
+
+    for kind in ("transport-unavailable", "timeout"):
+        assert scans.should_retry(ProoflineError(0, f"urn:proofline:sdk:{kind}", "Down."))
+    assert not scans.should_retry(ProoflineError(0, "urn:proofline:sdk:invalid-response", "Bad."))
+
+
+@MODES
+async def test_scan_revision_retries_a_timed_out_request_with_the_same_id(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    with Server(
+        lambda request, index: (
+            Reply(body=scan(), header_pause=0.5) if index == 0 else Reply(body=scan())
+        )
+    ) as server:
+        async with session(mode, server.url, timeout=0.1) as client:
+            result = await call(
+                client, "scan_revision", ORG, REPOSITORY, budget_credits=1, ref="main"
+            )
+        assert result.outcome == "CREATED"
+        assert len(server.requests) == 2
+        assert len(scan_ids(server)) == 1
+
+
+@MODES
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"ref": "main", "commit_sha": "a" * 40},
+        {"ref": ""},
+        {"commit_sha": None},
+        {"ref": "   "},
+        {"ref": "main", "budget_credits": -1},
+        {"ref": "main", "budget_credits": True},
+        {"ref": "main", "budget_credits": 1.5},
+        {"ref": "main", "wait": True, "timeout": float("nan")},
+        {"commit_sha": "abc123", "wait": True},
+    ],
+)
+async def test_scan_revision_rejects_a_bad_call_before_any_request(
+    mode: str, arguments: dict[str, Any]
+) -> None:
+    arguments = {"budget_credits": 1, **arguments}
+    with Server(lambda request, index: Reply(body=scan())) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError):
+                await call(client, "scan_revision", ORG, REPOSITORY, **arguments)
+        assert server.requests == []
+
+
+@MODES
+async def test_scan_revision_ignores_timeout_when_not_waiting(mode: str) -> None:
+    with Server(lambda request, index: Reply(body=scan())) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "scan_revision",
+                ORG,
+                REPOSITORY,
+                budget_credits=1,
+                ref="main",
+                timeout=float("nan"),
+            )
+        assert result.outcome == "CREATED"
+
+
+@MODES
+async def test_scan_revision_holds_the_wait_to_the_requested_commit(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        return (
+            Reply(body=scan("EXISTING"))
+            if request.method == "POST"
+            else Reply(body=review_at(HEAD))
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            same = await call(
+                client,
+                "scan_revision",
+                ORG,
+                REPOSITORY,
+                budget_credits=1,
+                commit_sha="a" * 40,
+                wait=True,
+            )
+            other = await call(
+                client,
+                "scan_revision",
+                ORG,
+                REPOSITORY,
+                budget_credits=1,
+                commit_sha=OTHER_HEAD,
+                wait=True,
+            )
+    assert same.status == "COMPLETED"
+    assert other.status == "INCOMPLETE"
+    assert gap_facts(other) == [PINNED_ELSEWHERE]
