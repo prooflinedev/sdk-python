@@ -79,10 +79,9 @@ def resolve(host: str, port: int, timeout: float | None) -> list[str]:
         ipaddress.ip_address(host)
     except ValueError:
         lookup = Lookup(host, port)
+        deadline = monotonic() + timeout if timeout is not None else None
         if not _DNS_WORKER_SLOTS.acquire(timeout=timeout):
-            raise httpcore.ConnectTimeout(
-                "DNS worker capacity was not available in time."
-            )
+            raise httpcore.ConnectTimeout("DNS worker capacity was not available in time.")
         try:
             threading.Thread(
                 target=_run_bounded_lookup,
@@ -93,7 +92,7 @@ def resolve(host: str, port: int, timeout: float | None) -> list[str]:
         except BaseException:
             _DNS_WORKER_SLOTS.release()
             raise
-        return lookup.addresses(timeout)
+        return lookup.addresses(max(0.0, deadline - monotonic()) if deadline is not None else None)
     return [host]
 
 

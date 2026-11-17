@@ -86,7 +86,7 @@ class CustomerReviewDetail:
              recorded none.
         change_summary (ChangeSummary | None | Unset): What the change does and which files the review read at which
             depth
-             (§55). Null until the review's publication records it, and for a
+             (Â§55). Null until the review's publication records it, and for a
              review that is not of a pull request. Generated text has current
              credentials and recorded protected values withheld; missing or expired
              provenance withholds the generated text whole.
