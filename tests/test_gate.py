@@ -124,6 +124,8 @@ def test_complete_code_findings_reach_by_lifecycle_and_severity(
     [
         {**code_assessment("INCOMPLETE")},
         {**code_assessment(), "incompleteness_kind": "MODEL_BUDGET_EXHAUSTED"},
+        # COMPLETED with a public reason code is incomplete, as in `outcome()` and the CLI.
+        {**code_assessment(), "reason_codes": ["OUT_OF_CREDITS"]},
         {**code_assessment(), "head_commit_sha": "c" * 40},
         {**code_assessment(), "base_commit_sha": "c" * 40},
         {
@@ -144,6 +146,33 @@ def test_unusable_code_records_supply_no_findings_and_never_complete_a_code_only
     assert read(beside).status == "COMPLETED"
     assert read(beside).gate("SERIOUS") == "NOT_REACHED"
     assert read(code_only(code, **recorded)).gate("SERIOUS") == "NOT_COMPLETE"
+
+
+@pytest.mark.parametrize("reason_codes", [None, []])
+def test_absent_or_empty_reason_codes_keep_a_code_record_complete(reason_codes: Any) -> None:
+    code = {
+        **code_assessment(),
+        "reason_codes": reason_codes,
+        "findings": [code_finding("SERIOUS")],
+    }
+    assert read(env_review(counts(), code_assessment=code)).gate("SERIOUS") == "REACHED"
+    assert read(code_only(code)).gate("SERIOUS") == "REACHED"
+
+
+def test_a_wait_held_to_another_head_is_not_complete() -> None:
+    detail = CustomerReviewDetail.from_dict(env_review(counts(1, 1), head_commit_sha="a" * 40))
+    for held, status, result in [
+        ("A" * 40, "COMPLETED", "REACHED"),
+        ("b" * 40, "INCOMPLETE", "NOT_COMPLETE"),
+    ]:
+        waited = outcome(detail, URL, head_commit_sha=held)
+        assert waited is not None
+        assert (waited.status, waited.gate("SERIOUS")) == (status, result)
+    unpinned = outcome(
+        CustomerReviewDetail.from_dict(env_review(counts(1, 1))), URL, head_commit_sha="b" * 40
+    )
+    assert unpinned is not None
+    assert (unpinned.status, unpinned.gate("SERIOUS")) == ("INCOMPLETE", "NOT_COMPLETE")
 
 
 def test_code_commits_are_compared_only_where_the_review_recorded_them() -> None:

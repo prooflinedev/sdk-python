@@ -86,13 +86,7 @@ class ReviewOutcome:
         # whose findings are not its whole result. CODE findings have no recorded
         # decisions, so their lifecycle and severity decide.
         code = _recorded_code(self.review)
-        findings = (
-            code.findings
-            if code is not None
-            and code.status == "COMPLETED"
-            and not text(code.incompleteness_kind)
-            else []
-        )
+        findings = code.findings if code is not None and _code_complete(code) else []
         if count > 0 or any(
             finding.lifecycle_state != "RESOLVED" and _reaches(finding.severity, fail_on)
             for finding in findings
@@ -164,6 +158,14 @@ def _recorded_code(review: CustomerReviewDetail) -> CustomerCodeAssessment | Non
     return code
 
 
+def _code_complete(code: CustomerCodeAssessment) -> bool:
+    # Only COMPLETED with no incompleteness kind and no public reason code says the
+    # CODE assessment covered what it read.
+    return (
+        code.status == "COMPLETED" and not text(code.incompleteness_kind) and not code.reason_codes
+    )
+
+
 def _validate(review: CustomerReviewDetail, review_id: UUID | None) -> None:
     if (
         not isinstance(review.id, UUID)
@@ -231,7 +233,7 @@ def outcome(
     if code_only:
         if code is None:
             gaps.append(AssessmentGap(None, "UNKNOWN", ("CODE_ASSESSMENT_UNAVAILABLE",)))
-        elif code.status != "COMPLETED" or text(code.incompleteness_kind) or code.reason_codes:
+        elif not _code_complete(code):
             kind = text(code.incompleteness_kind)
             reasons = tuple(code.reason_codes) if isinstance(code.reason_codes, list) else ()
             if kind:
