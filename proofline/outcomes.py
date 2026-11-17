@@ -18,6 +18,10 @@ _KNOWN_ASSESSMENTS = frozenset(
     ("PENDING", "RUNNING", "COMPLETED", "INCOMPLETE", "FAILED", "STOPPED", "SUPERSEDED", "EXCLUDED")
 )
 _WITHHELD_MARKER = "[withheld: environment value]"
+_HEAD_REASONS = {
+    "HEAD_COMMIT_MISMATCH": "The review is pinned to another head commit.",
+    "HEAD_COMMIT_UNAVAILABLE": "The review names no head commit.",
+}
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,14 @@ def _optional_text(value: object) -> bool:
     return value is None or isinstance(value, (str, Unset))
 
 
+def _optional_texts(value: object) -> bool:
+    return (
+        value is None
+        or isinstance(value, Unset)
+        or (isinstance(value, list) and all(isinstance(item, str) for item in value))
+    )
+
+
 def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | None:
     # A CODE result cannot replace a missing ENV result or its check receipts.
     if review.assessment_count != 0 or review.assessments:
@@ -77,6 +89,7 @@ def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | N
         or not isinstance(code.findings, list)
         or code.status not in ("PENDING", "RUNNING", "COMPLETED", "INCOMPLETE", "EXCLUDED")
         or not _optional_text(code.incompleteness_kind)
+        or not _optional_texts(code.reason_codes)
     ):
         return None
     for recorded, actual in (
@@ -115,10 +128,7 @@ def _validate(review: CustomerReviewDetail, review_id: UUID | None) -> None:
         if assessment.id in seen:
             raise _invalid()
         seen.add(assessment.id)
-        reasons = assessment.reason_codes
-        if not (reasons is None or isinstance(reasons, Unset)) and (
-            not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons)
-        ):
+        if not _optional_texts(assessment.reason_codes):
             raise _invalid()
         for check in assessment.checks.families:
             if (
@@ -131,12 +141,23 @@ def _validate(review: CustomerReviewDetail, review_id: UUID | None) -> None:
                 raise _invalid()
 
 
+def _head_gap(review: CustomerReviewDetail, head_commit_sha: str | None) -> str | None:
+    # A result is evidence only for the head the review is pinned to.
+    if head_commit_sha is None:
+        return None
+    head = text(review.head_commit_sha)
+    if head is None:
+        return "HEAD_COMMIT_UNAVAILABLE"
+    return None if head.lower() == head_commit_sha.lower() else "HEAD_COMMIT_MISMATCH"
+
+
 def outcome(
     review: CustomerReviewDetail | None,
     review_url: str,
     forced: OutcomeStatus | None = None,
     *,
     review_id: UUID | None = None,
+    head_commit_sha: str | None = None,
 ) -> ReviewOutcome | None:
     gaps: list[AssessmentGap] = []
     if review is None:
@@ -149,13 +170,16 @@ def outcome(
     if code_only:
         if code is None:
             gaps.append(AssessmentGap(None, "UNKNOWN", ("CODE_ASSESSMENT_UNAVAILABLE",)))
-        elif code.status != "COMPLETED" or text(code.incompleteness_kind):
+        elif code.status != "COMPLETED" or text(code.incompleteness_kind) or code.reason_codes:
             kind = text(code.incompleteness_kind)
+            reasons = tuple(code.reason_codes) if isinstance(code.reason_codes, list) else ()
+            if kind:
+                reasons = (*reasons, kind)
             gaps.append(
                 AssessmentGap(
                     code.id,
                     code.status,
-                    (kind,) if kind else ("CODE_ASSESSMENT_STATE_UNAVAILABLE",),
+                    reasons or ("CODE_ASSESSMENT_STATE_UNAVAILABLE",),
                     kind,
                 )
             )
@@ -196,8 +220,13 @@ def outcome(
             )
     if review.assessment_count != len(review.assessments):
         gaps.append(AssessmentGap(None, "UNKNOWN", ("ASSESSMENT_HISTORY_UNAVAILABLE",)))
+    head_gap = _head_gap(review, head_commit_sha)
     if forced is not None:
         status = forced
+    elif head_gap == "HEAD_COMMIT_MISMATCH":
+        # A pinned head does not change, so nothing this review records later
+        # can speak for the commit the caller named.
+        status = "INCOMPLETE"
     elif review.status in ("PENDING", "RUNNING"):
         return None
     elif review.status == "FAILED":
@@ -205,9 +234,12 @@ def outcome(
     elif review.status in ("STOPPED", "SUPERSEDED"):
         status = "STOPPED"
     elif review.status == "COMPLETED":
-        status = "INCOMPLETE" if gaps else "COMPLETED"
+        status = "INCOMPLETE" if gaps or head_gap else "COMPLETED"
     else:
         status = "INCOMPLETE"
         if not gaps:
             gaps.append(AssessmentGap(None, review.status, ("REVIEW_STATE_UNAVAILABLE",)))
-    return ReviewOutcome(status, review_url, review, tuple(gaps))
+    if head_gap is None:
+        return ReviewOutcome(status, review_url, review, tuple(gaps))
+    gaps.append(AssessmentGap(None, "UNKNOWN", (head_gap,)))
+    return ReviewOutcome(status, review_url, review, tuple(gaps), _HEAD_REASONS[head_gap])

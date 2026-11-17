@@ -48,9 +48,7 @@ class FindingOutcomesPostMergeCounts:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.finding_outcomes_post_merge_count import (
-            FindingOutcomesPostMergeCount,  # noqa: PLC0415
-        )
+        from ..models.finding_outcomes_post_merge_count import FindingOutcomesPostMergeCount  # noqa: PLC0415
 
         d = dict(src_dict)
         judged = d.pop("judged")

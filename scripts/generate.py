@@ -14,7 +14,7 @@ import tomllib
 from pathlib import Path
 
 VERSION = "0.29.1"
-RUFF_VERSION = "0.14.3"
+RUFF_VERSION = "0.17.4"
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENT = ROOT / "openapi.public.json"
 OUTPUT = ROOT / "proofline" / "_generated"

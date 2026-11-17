@@ -18,11 +18,13 @@ class ActorView:
     Attributes:
         github_user_id (int): Stable GitHub identity. The login below is display metadata.
         login (str): The login they were known by when they acted. Display metadata.
+        name (None | str | Unset): Profile name resolved for this organization. Display metadata only.
         profile_url (None | str | Unset): Their profile on the deployment's GitHub host.
     """
 
     github_user_id: int
     login: str
+    name: None | str | Unset = UNSET
     profile_url: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -30,6 +32,12 @@ class ActorView:
         github_user_id = self.github_user_id
 
         login = self.login
+
+        name: None | str | Unset
+        if isinstance(self.name, Unset):
+            name = UNSET
+        else:
+            name = self.name
 
         profile_url: None | str | Unset
         if isinstance(self.profile_url, Unset):
@@ -45,6 +53,8 @@ class ActorView:
                 "login": login,
             }
         )
+        if name is not UNSET:
+            field_dict["name"] = name
         if profile_url is not UNSET:
             field_dict["profile_url"] = profile_url
 
@@ -56,6 +66,15 @@ class ActorView:
         github_user_id = d.pop("github_user_id")
 
         login = d.pop("login")
+
+        def _parse_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        name = _parse_name(d.pop("name", UNSET))
 
         def _parse_profile_url(data: object) -> None | str | Unset:
             if data is None:
@@ -69,6 +88,7 @@ class ActorView:
         actor_view = cls(
             github_user_id=github_user_id,
             login=login,
+            name=name,
             profile_url=profile_url,
         )
 

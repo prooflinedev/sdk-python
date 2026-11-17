@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import gzip
 import inspect
+import io
 import json
 import logging
 import socket
@@ -661,6 +663,39 @@ async def test_malformed_refusal_keeps_fixed_sdk_problem_type(
             assert TOKEN not in error.detail
 
 
+@MODES
+@pytest.mark.parametrize(
+    "view",
+    [
+        {"reason": "OUT_OF_CREDITS"},
+        {"reason": "PLAN_CREDITS_SPENT", "resets": "2026-12-01T00:00:00Z"},
+    ],
+    ids=["out-of-credits", "plan-credits-spent"],
+)
+async def test_credit_refusal_keeps_the_server_problem(mode: str, view: dict[str, Any]) -> None:
+    body = {
+        "title": "payment required",
+        "status": 402,
+        "detail": f"Credits cannot pay for {TOKEN}.",
+        "repository_name": "api",
+        "refusal": view,
+    }
+    with Server(
+        lambda request, index: Reply(402, body, {"Content-Type": "application/problem+json"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            for name in REVIEW_REQUESTS:
+                args, kwargs = review_request(name)
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, name, *args, **kwargs)
+                error = raised.value
+                assert (error.status, error.type) == (402, "about:blank")
+                assert error.title == "payment required"
+                assert error.detail == "Credits cannot pay for [redacted]."
+                assert (error.refusal, error.repository_name) == (None, None)
+        assert len(server.requests) == len(REVIEW_REQUESTS)
+
+
 def test_every_documented_refusal_reason_has_a_field_check() -> None:
     reasons = {variant["properties"]["reason"]["const"] for variant in REFUSAL_VARIANTS}
     assert set(REFUSAL_SHAPES) == reasons
@@ -758,6 +793,7 @@ async def test_redirect_never_contacts_other_origin(mode: str) -> None:
 async def test_retry_after_waits_for_server_then_returns_typed_success(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    clock = Clock(monkeypatch)
     with Server(
         lambda request, index: (
             Reply(429, {"detail": "Rate limit."}, {"Retry-After": "2"})
@@ -765,11 +801,10 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
             else Reply(body=finding())
         )
     ) as server:
-        started = time.monotonic()
         async with session(mode, server.url) as client:
             result = await call(client, "get_finding", ORG, FINDING)
             assert result.id == FINDING
-        assert time.monotonic() - started >= 2
+        assert clock.delays == [2.0]
         assert len(server.requests) == 2
 
     instant = datetime(2069, 9, 30, tzinfo=UTC)
@@ -788,10 +823,9 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
             else Reply(body=finding())
         )
     ) as server:
-        started = time.monotonic()
         async with session(mode, server.url) as client:
             assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
-        assert time.monotonic() - started >= 2
+        assert clock.delays == [2.0, 2.0]
         assert len(server.requests) == 2
 
 
@@ -1208,6 +1242,154 @@ async def test_failure_and_stop_remain_distinct(
             assert len(server.requests) == 1
 
 
+HEAD = "a" * 40
+OTHER_HEAD = "c" * 40
+PINNED_ELSEWHERE = (None, "UNKNOWN", ("HEAD_COMMIT_MISMATCH",))
+NO_HEAD = (None, "UNKNOWN", ("HEAD_COMMIT_UNAVAILABLE",))
+
+
+def review_at(head: Any, status: str = "COMPLETED") -> dict[str, Any]:
+    return {**review(status), "head_commit_sha": head}
+
+
+def gap_facts(result: Any) -> list[tuple[Any, str, tuple[str, ...]]]:
+    return [(gap.assessment_id, gap.status, gap.reason_codes) for gap in result.gaps]
+
+
+@MODES
+async def test_wait_held_to_a_head_commit_never_completes_for_another(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body=review_at(HEAD))) as server:
+        async with session(mode, server.url) as client:
+            for held in (HEAD, HEAD.upper()):
+                result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=held)
+                assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+            result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=OTHER_HEAD)
+            assert result.status == "INCOMPLETE"
+            assert gap_facts(result) == [PINNED_ELSEWHERE]
+            assert result.reason == "The review is pinned to another head commit."
+            assert result.review.head_commit_sha == HEAD
+            assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+            assert HEAD not in repr(result) and OTHER_HEAD not in repr(result)
+            # Without the keyword the same record completes, as it always has.
+            result = await call(client, "wait_for_review", ORG, REVIEW)
+            assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+        assert len(server.requests) == 4
+        assert clock.delays == []
+
+
+@MODES
+async def test_wait_ends_on_the_read_that_names_another_head(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    responses = [review("PENDING"), review_at(HEAD, "RUNNING"), review_at(HEAD)]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, head_commit_sha=HEAD
+            )
+        assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+        assert len(server.requests) == 3
+        assert clock.delays == [5, 10]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, head_commit_sha=OTHER_HEAD
+            )
+        assert result.status == "INCOMPLETE"
+        assert result.review.status == "RUNNING"
+        assert gap_facts(result) == [PINNED_ELSEWHERE]
+        assert result.reason == "The review is pinned to another head commit."
+        # The second read names the head, so the review that would complete is never read.
+        assert len(server.requests) == 2
+        assert clock.delays == [5, 10, 5]
+
+
+@MODES
+async def test_a_review_of_another_head_is_incomplete_whatever_its_own_status(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    statuses = ["FAILED", "STOPPED", "SUPERSEDED"]
+    with Server(lambda request, index: Reply(body=review_at(HEAD, statuses[index // 2]))) as server:
+        async with session(mode, server.url) as client:
+            for status in statuses:
+                result = await call(
+                    client, "wait_for_review", ORG, REVIEW, head_commit_sha=OTHER_HEAD
+                )
+                assert (result.status, gap_facts(result)) == ("INCOMPLETE", [PINNED_ELSEWHERE])
+                assert result.review.status == status
+                result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=HEAD)
+                assert result.status == ("FAILED" if status == "FAILED" else "STOPPED")
+                assert (result.gaps, result.reason) == ((), None)
+        assert len(server.requests) == 6
+
+
+@MODES
+async def test_a_review_that_names_no_head_never_completes_for_a_named_commit(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    bodies = [
+        review(),
+        review_at(None),
+        review_at(""),
+        review_at(7),
+        review_at(None, "FAILED"),
+        review_at(None, "SUPERSEDED"),
+    ]
+    expected = ["INCOMPLETE", "INCOMPLETE", "INCOMPLETE", "INCOMPLETE", "FAILED", "STOPPED"]
+    with Server(lambda request, index: Reply(body=bodies[index])) as server:
+        async with session(mode, server.url) as client:
+            for status in expected:
+                result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=HEAD)
+                assert result.status == status
+                assert gap_facts(result) == [NO_HEAD]
+                assert result.reason == "The review names no head commit."
+        assert len(server.requests) == len(bodies)
+        assert clock.delays == []
+    # A review that is still pending may name its head later, so the wait goes on.
+    with Server(lambda request, index: Reply(body=review("PENDING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=12, head_commit_sha=HEAD
+            )
+        assert result.status == "TIMED_OUT"
+        assert gap_facts(result) == [NO_HEAD]
+        assert result.reason == "The review names no head commit."
+        assert len(server.requests) == 2
+        assert clock.delays == [5, 7]
+
+
+@MODES
+async def test_head_commit_must_be_a_full_sha_before_any_request(mode: str) -> None:
+    refused = [
+        "main",
+        "a" * 7,
+        "a" * 39,
+        "a" * 41,
+        "g" * 40,
+        "\u0661" * 40,
+        HEAD + "\n",
+        " " + HEAD[1:],
+        "",
+        7,
+        HEAD.encode(),
+    ]
+    with Server(lambda request, index: Reply(body=review_at("d" * 64))) as server:
+        async with session(mode, server.url) as client:
+            for value in refused:
+                with pytest.raises(ValueError, match="full 40 or 64 character"):
+                    await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha=value)
+            assert server.requests == []
+            result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha="D" * 64)
+            assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+        assert len(server.requests) == 1
+
+
 @MODES
 async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
     mode: str, monkeypatch: pytest.MonkeyPatch
@@ -1573,6 +1755,58 @@ def test_token_environment_and_https_origin_rejection(monkeypatch: pytest.Monkey
 
 
 @MODES
+@pytest.mark.parametrize("size", [131_072, 131_073, 150_000, 8 * 1024 * 1024 + 1])
+async def test_csv_export_preserves_large_cells(mode: str, size: int) -> None:
+    claim = 'é, "quoted"\r\n' + "x" * size
+    row = {
+        "dataset_version": "1",
+        "organization_id": str(ORG),
+        "repository_id": str(REPOSITORY),
+        "review_id": str(REVIEW),
+        "assessment_id": str(ASSESSMENT),
+        "environment_id": str(ORG),
+        "finding_id": str(FINDING),
+        "claim": claim,
+        "impact": "Synthetic consequence",
+        "risk_domain": "SECURITY",
+        "severity": "HIGH",
+        "lifecycle_state": "OPEN",
+        "created_at": "2026-11-16T00:00:00Z",
+        "evidence_refs": "[]",
+    }
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=list(row))
+    writer.writeheader()
+    writer.writerow(row)
+    text = stream.getvalue()
+    with Server(
+        lambda request, index: Reply(
+            body=text.encode(),
+            headers={
+                "Content-Type": "text/csv",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-11-16T00:00:00Z",
+                "X-Proofline-Export-Next-Cursor": "opaque/+cursor",
+            },
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            kwargs = {"from_time": "2026-11-01T00:00:00Z", "to_time": "2026-11-15T00:00:00Z"}
+            if size > 8 * 1024 * 1024:
+                with pytest.raises(ProoflineError) as caught:
+                    await call(client, "export_reviews", ORG, "findings", format="csv", **kwargs)
+                assert caught.value.type == "urn:proofline:sdk:invalid-response"
+            else:
+                page = await call(client, "export_reviews", ORG, "findings", format="csv", **kwargs)
+                assert page.rows == [row]
+                assert page.text == text
+                assert page.version == 1
+                assert page.settled_until == "2026-11-16T00:00:00Z"
+                assert page.next_cursor == "opaque/+cursor"
+        assert len(server.requests) == 1
+
+
+@MODES
 async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) -> None:
     def respond(request: Request, index: int) -> Reply:
         query = parse_qs(urlsplit(request.path).query)
@@ -1609,6 +1843,230 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
             with pytest.raises(ProoflineError) as caught:
                 await call(client, "export_reviews", ORG, "findings", cursor="refused", **kwargs)
             assert caught.value.status == 404
+
+
+async def next_export(iterator: Any) -> Any:
+    return await anext(iterator) if hasattr(iterator, "__anext__") else next(iterator)
+
+
+@MODES
+@pytest.mark.parametrize("format", ["csv", "ndjson"])
+async def test_export_iterator_preserves_filters_and_streams_empty_pages(
+    mode: str, format: str
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        assert request.path.startswith(f"/api/v1/organizations/{ORG}/exports/finding_outcomes?")
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        query = parse_qs(urlsplit(request.path).query)
+        assert query == {
+            "from": ["2026-10-01T00:00:00Z"],
+            "to": ["2026-10-25T00:00:00Z"],
+            "format": [format],
+            "group_by": ["repository"],
+            "cursor": ["resume/+cursor" if index == 0 else "next/+cursor"],
+        }
+        headers = {
+            "Content-Type": "text/csv" if format == "csv" else "application/x-ndjson",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+        }
+        if index == 0:
+            headers["X-Proofline-Export-Next-Cursor"] = "next/+cursor"
+        body = (
+            (
+                b"dataset_version,claim\r\n"
+                if index == 0
+                else b"dataset_version,claim\r\n1,hello\r\n"
+            )
+            if format == "csv"
+            else (b"" if index == 0 else b'{"dataset_version":1,"claim":"hello"}\n')
+        )
+        return Reply(body=body, headers=headers)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            iterator = client.iter_export_pages(
+                ORG,
+                "finding_outcomes",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                format=format,
+                cursor="resume/+cursor",
+                group_by="repository",
+                max_pages=2,
+            )
+            assert not server.requests
+            first = await next_export(iterator)
+            assert first.rows == []
+            assert first.next_cursor == "next/+cursor"
+            assert first.version == 1
+            assert first.settled_until == "2026-10-25T00:00:00Z"
+            assert len(server.requests) == 1
+            second = await next_export(iterator)
+            assert second.rows[0]["claim"] == "hello"
+            assert second.next_cursor is None
+            assert second.text.endswith("\n")
+            if mode == "sync":
+                with pytest.raises(StopIteration):
+                    next(iterator)
+            else:
+                with pytest.raises(StopAsyncIteration):
+                    await anext(iterator)
+        assert len(server.requests) == 2
+
+
+@MODES
+@pytest.mark.parametrize("failure", ["empty", "repeat", "resume", "cycle", "bound", "refused"])
+async def test_export_iterator_refuses_invalid_continuations_and_bounds(
+    mode: str, failure: str
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        if failure == "refused":
+            return Reply(status=404, body={"detail": "not found"})
+        cursor = {
+            "empty": "",
+            "repeat": "next",
+            "resume": "initial",
+            "cycle": "a" if index % 2 == 0 else "b",
+            "bound": str(index),
+        }[failure]
+        return Reply(
+            body=b'{"dataset_version":1}\n',
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+                "X-Proofline-Export-Next-Cursor": cursor,
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            iterator = client.iter_export_pages(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                max_pages=3,
+                cursor="initial" if failure == "resume" else None,
+            )
+            with pytest.raises(ProoflineError) as raised:
+                for _ in range(4):
+                    await next_export(iterator)
+            if failure == "refused":
+                assert raised.value.status == 404
+            else:
+                suffix = "pagination-limit" if failure == "bound" else "invalid-pagination"
+                assert raised.value.type == f"urn:proofline:sdk:{suffix}"
+        expected_requests = {
+            "empty": 1,
+            "repeat": 2,
+            "resume": 1,
+            "cycle": 3,
+            "bound": 3,
+            "refused": 1,
+        }
+        assert len(server.requests) == expected_requests[failure]
+
+
+@MODES
+@pytest.mark.parametrize("bound", [0, -1, 1001, True, 1.5])
+async def test_export_iterator_validates_bound_before_requests(mode: str, bound: Any) -> None:
+    with Server(lambda request, index: Reply(body={})) as server:
+        async with session(mode, server.url) as client:
+            iterator = client.iter_export_pages(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                max_pages=bound,
+            )
+            with pytest.raises(ValueError, match="max_pages"):
+                await next_export(iterator)
+        assert not server.requests
+
+
+@MODES
+@pytest.mark.parametrize(
+    ("cursors", "resume", "yielded"),
+    [
+        ([""], None, 0),
+        (["initial"], "initial", 0),
+        (["a", "a"], None, 1),
+        (["a", "b", "a"], None, 2),
+    ],
+    ids=["empty", "resume", "repeat", "cycle"],
+)
+async def test_export_iterator_never_yields_the_page_with_an_invalid_cursor(
+    mode: str, cursors: list[str], resume: str | None, yielded: int
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        return Reply(
+            body=f'{{"dataset_version":1,"page":{index}}}\n'.encode(),
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+                "X-Proofline-Export-Next-Cursor": cursors[index],
+            },
+        )
+
+    pages: list[Any] = []
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            iterator = client.iter_export_pages(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                cursor=resume,
+            )
+            with pytest.raises(ProoflineError) as raised:
+                while True:
+                    pages.append(await next_export(iterator))
+        assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+        assert [page.rows[0]["page"] for page in pages] == list(range(yielded))
+        assert len(server.requests) == yielded + 1
+
+
+@MODES
+@pytest.mark.parametrize(
+    ("format", "content_type"),
+    [
+        ("csv", "Text/CSV; charset=utf-8"),
+        ("ndjson", "Application/X-NDJSON; charset=utf-8"),
+    ],
+)
+async def test_export_accepts_case_insensitive_content_type(
+    mode: str, format: str, content_type: str
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        body = (
+            b"dataset_version,claim\n1,hello\n"
+            if format == "csv"
+            else b'{"dataset_version":1,"claim":"hello"}\n'
+        )
+        return Reply(
+            body=body,
+            headers={
+                "Content-Type": content_type,
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            page = await call(
+                client,
+                "export_reviews",
+                ORG,
+                "findings",
+                format=format,
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+            )
+            assert page.rows[0]["claim"] == "hello"
 
 
 @MODES
@@ -2061,3 +2519,44 @@ def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> No
     fixture.write_text("\n".join(lines))
     # Use the same mypy configuration as the SDK qualification gate.
     subprocess.run([sys.executable, "-m", "mypy", str(fixture)], check=True)
+
+
+@MODES
+async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> None:
+    kwargs = {
+        "from_time": "2026-10-01T00:00:00Z",
+        "to_time": "2026-10-25T00:00:00Z",
+    }
+
+    for separator in ("\x85", "\u2028", "\u2029"):
+        row = {
+            "dataset_version": 1,
+            "claim": f"before{separator}after",
+        }
+        body = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+
+        def respond(request: Request, index: int) -> Reply:
+            return Reply(
+                body=body,
+                headers={
+                    "Content-Type": "application/x-ndjson",
+                    "X-Proofline-Export-Version": "1",
+                    "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+                    "X-Proofline-Export-Next-Cursor": "next-page",
+                },
+            )
+
+        with Server(respond) as server:
+            async with session(mode, server.url) as client:
+                exported = await call(
+                    client,
+                    "export_reviews",
+                    ORG,
+                    "findings",
+                    format="ndjson",
+                    **kwargs,
+                )
+
+                assert len(exported.rows) == 1
+                assert exported.rows[0]["claim"] == row["claim"]
+                assert exported.next_cursor == "next-page"

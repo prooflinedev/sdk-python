@@ -28,6 +28,7 @@ def _get_kwargs(
     search: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
+
     params: dict[str, Any] = {}
 
     json_attention: None | str | Unset
@@ -180,17 +181,25 @@ def sync_detailed(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository_query (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -254,17 +263,25 @@ def sync(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository_query (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -323,17 +340,25 @@ async def asyncio_detailed(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository_query (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -395,17 +420,25 @@ async def asyncio(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository_query (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

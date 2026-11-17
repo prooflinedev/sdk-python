@@ -57,9 +57,7 @@ class FindingOutcomesOutcomeCount:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.finding_outcomes_drilldown import FindingOutcomesDrilldown  # noqa: PLC0415
-        from ..models.finding_outcomes_validation_sources import (
-            FindingOutcomesValidationSources,  # noqa: PLC0415
-        )
+        from ..models.finding_outcomes_validation_sources import FindingOutcomesValidationSources  # noqa: PLC0415
 
         d = dict(src_dict)
         count = d.pop("count")

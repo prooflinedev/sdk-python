@@ -38,7 +38,7 @@ from ._generated.types import Unset
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
 
-VERSION = "5.3.0"
+VERSION = "5.11.4"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 FULL_WEEKDAY = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
@@ -295,7 +295,9 @@ def problem(response: httpx.Response, token: SecretStr) -> ProoflineError:
         detail = f"Proofline returned the problem {title!r} without a detail."
     else:
         detail = "Proofline returned an HTTP error without a problem document."
-    if "refusal" not in body:
+    # The contract types a refusal only as a review request's 400. The 402 a
+    # credit refusal answers is undocumented, so it stays a plain problem.
+    if response.status_code != 400 or "refusal" not in body:
         return ProoflineError(response.status_code, kind, detail, title=title)
     try:
         view = body["refusal"]
