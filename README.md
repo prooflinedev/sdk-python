@@ -45,7 +45,9 @@ except ProoflineError as error:
 ```python
 requested = client.request_review(organization_id, repository_id, 12)
 outcome = client.wait_for_review(
-    organization_id, requested.review_id, head_commit_sha=head_commit_sha,
+    organization_id,
+    requested.review_id,
+    head_commit_sha=head_commit_sha,
 )
 if outcome.status != "COMPLETED":
     print(outcome.status, outcome.reason)
