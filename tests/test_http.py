@@ -1845,118 +1845,188 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
             assert caught.value.status == 404
 
 
-EXPORT_WINDOW: dict[str, Any] = {
-    "from_time": "2026-10-01T00:00:00Z",
-    "to_time": "2026-10-25T00:00:00Z",
-}
-
-
-def export_reply(body: bytes, next_cursor: str | None, *, is_csv: bool = False) -> Reply:
-    headers = {
-        "Content-Type": "text/csv" if is_csv else "application/x-ndjson",
-        "X-Proofline-Export-Version": "1",
-        "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
-    }
-    if next_cursor is not None:
-        headers["X-Proofline-Export-Next-Cursor"] = next_cursor
-    return Reply(body=body, headers=headers)
-
-
-async def collect_exports(client: Client, *args: Any, **kwargs: Any) -> list[Any]:
-    iterator = client.iter_export_pages(ORG, *args, **kwargs)
-    if hasattr(iterator, "__aiter__"):
-        return [page async for page in iterator]
-    return list(iterator)
+async def next_export(iterator: Any) -> Any:
+    return await anext(iterator) if hasattr(iterator, "__anext__") else next(iterator)
 
 
 @MODES
-async def test_iter_export_pages_follows_cursors_with_the_same_filters(mode: str) -> None:
-    cursors = {None: "first/+page", "first/+page": "second", "second": None}
-
+@pytest.mark.parametrize("format", ["csv", "ndjson"])
+async def test_export_iterator_preserves_filters_and_streams_empty_pages(
+    mode: str, format: str
+) -> None:
     def respond(request: Request, index: int) -> Reply:
+        assert request.path.startswith(f"/api/v1/organizations/{ORG}/exports/finding_outcomes?")
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         query = parse_qs(urlsplit(request.path).query)
-        assert request.path.startswith(f"/api/v1/organizations/{ORG}/exports/spend?")
-        assert query["from"] == [EXPORT_WINDOW["from_time"]]
-        assert query["to"] == [EXPORT_WINDOW["to_time"]]
-        assert query["format"] == ["csv"]
-        assert query["group_by"] == ["repository"]
-        cursor = query.get("cursor", [None])[0]
-        return export_reply(
-            f"dataset_version,page\r\n1,{index}\r\n".encode(), cursors[cursor], is_csv=True
+        assert query == {
+            "from": ["2026-10-01T00:00:00Z"],
+            "to": ["2026-10-25T00:00:00Z"],
+            "format": [format],
+            "group_by": ["repository"],
+            "cursor": ["resume/+cursor" if index == 0 else "next/+cursor"],
+        }
+        headers = {
+            "Content-Type": "text/csv" if format == "csv" else "application/x-ndjson",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+        }
+        if index == 0:
+            headers["X-Proofline-Export-Next-Cursor"] = "next/+cursor"
+        body = (
+            (
+                b"dataset_version,claim\r\n"
+                if index == 0
+                else b"dataset_version,claim\r\n1,hello\r\n"
+            )
+            if format == "csv"
+            else (b"" if index == 0 else b'{"dataset_version":1,"claim":"hello"}\n')
+        )
+        return Reply(body=body, headers=headers)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            iterator = client.iter_export_pages(
+                ORG,
+                "finding_outcomes",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                format=format,
+                cursor="resume/+cursor",
+                group_by="repository",
+                max_pages=2,
+            )
+            assert not server.requests
+            first = await next_export(iterator)
+            assert first.rows == []
+            assert first.next_cursor == "next/+cursor"
+            assert first.version == 1
+            assert first.settled_until == "2026-10-25T00:00:00Z"
+            assert len(server.requests) == 1
+            second = await next_export(iterator)
+            assert second.rows[0]["claim"] == "hello"
+            assert second.next_cursor is None
+            assert second.text.endswith("\n")
+            if mode == "sync":
+                with pytest.raises(StopIteration):
+                    next(iterator)
+            else:
+                with pytest.raises(StopAsyncIteration):
+                    await anext(iterator)
+        assert len(server.requests) == 2
+
+
+@MODES
+@pytest.mark.parametrize("failure", ["empty", "repeat", "resume", "cycle", "bound", "refused"])
+async def test_export_iterator_refuses_invalid_continuations_and_bounds(
+    mode: str, failure: str
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        if failure == "refused":
+            return Reply(status=404, body={"detail": "not found"})
+        cursor = {
+            "empty": "",
+            "repeat": "next",
+            "resume": "initial",
+            "cycle": "a" if index % 2 == 0 else "b",
+            "bound": str(index),
+        }[failure]
+        return Reply(
+            body=b'{"dataset_version":1}\n',
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+                "X-Proofline-Export-Next-Cursor": cursor,
+            },
         )
 
     with Server(respond) as server:
         async with session(mode, server.url) as client:
-            pages = await collect_exports(
-                client, "spend", format="csv", group_by="repository", **EXPORT_WINDOW
+            iterator = client.iter_export_pages(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                max_pages=3,
+                cursor="initial" if failure == "resume" else None,
             )
-    assert [page.rows[0]["page"] for page in pages] == ["0", "1", "2"]
-    assert [page.next_cursor for page in pages] == ["first/+page", "second", None]
-    assert "cursor" not in server.requests[0].path
-    assert "cursor=first%2F%2Bpage" in server.requests[1].path
-    assert "cursor=second" in server.requests[2].path
+            with pytest.raises(ProoflineError) as raised:
+                for _ in range(4):
+                    await next_export(iterator)
+            if failure == "refused":
+                assert raised.value.status == 404
+            else:
+                suffix = "pagination-limit" if failure == "bound" else "invalid-pagination"
+                assert raised.value.type == f"urn:proofline:sdk:{suffix}"
+        expected_requests = {
+            "empty": 1,
+            "repeat": 2,
+            "resume": 1,
+            "cycle": 3,
+            "bound": 3,
+            "refused": 1,
+        }
+        assert len(server.requests) == expected_requests[failure]
 
 
 @MODES
-async def test_iter_export_pages_resumes_from_a_cursor(mode: str) -> None:
-    def respond(request: Request, index: int) -> Reply:
-        assert parse_qs(urlsplit(request.path).query)["cursor"] == ["saved"]
-        return export_reply(b'{"dataset_version":1,"id":"last"}\n', None)
-
-    with Server(respond) as server:
+@pytest.mark.parametrize("bound", [0, -1, 1001, True, 1.5])
+async def test_export_iterator_validates_bound_before_requests(mode: str, bound: Any) -> None:
+    with Server(lambda request, index: Reply(body={})) as server:
         async with session(mode, server.url) as client:
-            pages = await collect_exports(client, "reviews", cursor="saved", **EXPORT_WINDOW)
-    assert [page.rows[0]["id"] for page in pages] == ["last"]
-    assert len(server.requests) == 1
+            iterator = client.iter_export_pages(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                max_pages=bound,
+            )
+            with pytest.raises(ValueError, match="max_pages"):
+                await next_export(iterator)
+        assert not server.requests
 
 
 @MODES
-@pytest.mark.parametrize("repeated", ["loop", "", "saved"])
-async def test_iter_export_pages_refuses_a_repeated_or_empty_cursor(
-    mode: str, repeated: str
+@pytest.mark.parametrize(
+    ("cursors", "resume", "yielded"),
+    [
+        ([""], None, 0),
+        (["initial"], "initial", 0),
+        (["a", "a"], None, 1),
+        (["a", "b", "a"], None, 2),
+    ],
+    ids=["empty", "resume", "repeat", "cycle"],
+)
+async def test_export_iterator_never_yields_the_page_with_an_invalid_cursor(
+    mode: str, cursors: list[str], resume: str | None, yielded: int
 ) -> None:
     def respond(request: Request, index: int) -> Reply:
-        return export_reply(b'{"dataset_version":1}\n', repeated)
+        return Reply(
+            body=f'{{"dataset_version":1,"page":{index}}}\n'.encode(),
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+                "X-Proofline-Export-Next-Cursor": cursors[index],
+            },
+        )
 
-    kwargs = {"cursor": "saved"} if repeated == "saved" else {}
+    pages: list[Any] = []
     with Server(respond) as server:
         async with session(mode, server.url) as client:
+            iterator = client.iter_export_pages(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                cursor=resume,
+            )
             with pytest.raises(ProoflineError) as raised:
-                await collect_exports(client, "findings", **kwargs, **EXPORT_WINDOW)
-    assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
-    assert len(server.requests) == (1 if repeated != "loop" else 2)
-
-
-@MODES
-async def test_iter_export_pages_stops_at_max_pages(mode: str) -> None:
-    def respond(request: Request, index: int) -> Reply:
-        return export_reply(b'{"dataset_version":1}\n', f"next-{index}")
-
-    with Server(respond) as server:
-        async with session(mode, server.url) as client:
-            seen: list[Any] = []
-            with pytest.raises(ProoflineError) as raised:
-                iterator = client.iter_export_pages(ORG, "reviews", max_pages=2, **EXPORT_WINDOW)
-                if hasattr(iterator, "__aiter__"):
-                    async for page in iterator:
-                        seen.append(page)
-                else:
-                    for page in iterator:
-                        seen.append(page)
-    assert raised.value.type == "urn:proofline:sdk:pagination-limit"
-    assert raised.value.detail == "Export pagination reached the configured bound."
-    assert len(seen) == 2
-    assert len(server.requests) == 2
-
-
-@MODES
-@pytest.mark.parametrize("max_pages", [0, 1_001])
-async def test_iter_export_pages_validates_max_pages(mode: str, max_pages: int) -> None:
-    with Server(lambda request, index: Reply()) as server:
-        async with session(mode, server.url) as client:
-            with pytest.raises(ValueError):
-                await collect_exports(client, "reviews", max_pages=max_pages, **EXPORT_WINDOW)
-    assert server.requests == []
+                while True:
+                    pages.append(await next_export(iterator))
+        assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+        assert [page.rows[0]["page"] for page in pages] == list(range(yielded))
+        assert len(server.requests) == yielded + 1
 
 
 @MODES

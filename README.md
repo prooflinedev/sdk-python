@@ -76,20 +76,21 @@ with ProoflineClient() as client:
 
 Each response returns the original text, decoded rows, dataset version, settled horizon, and an optional next cursor. Each CSV page includes its own header and keeps cells as strings, including nested JSON cells. NDJSON pages retain JSON values. To read additional pages, repeat the call with the returned cursor and the same dataset, window, format, and grouping. A missing next cursor marks the last page.
 
-`iter_export_pages` follows the cursor for you. It sends the same dataset, window, format, and grouping on every request, yields each page in order, and stops after the page without a next cursor. Pass `cursor` to resume from a saved position. A repeated or empty cursor raises `ProoflineError` with the type `urn:proofline:sdk:invalid-pagination`, and reading more than `max_pages` pages (default 100, at most 1000) raises `urn:proofline:sdk:pagination-limit`. The async client yields the same pages with `async for`.
+`iter_export_pages` follows continuation cursors lazily while keeping the same organization, dataset, window, format, and grouping on every request.
 
 ```python
 with ProoflineClient() as client:
     for page in client.iter_export_pages(
         UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
-        "spend",
+        "reviews",
         from_time="2026-10-01T00:00:00Z",
         to_time="2026-10-25T00:00:00Z",
-        group_by="repository",
     ):
         for row in page.rows:
             print(row)
 ```
+
+Use `async for` with `AsyncProoflineClient`. Each yielded page retains its raw text, decoded rows, and metadata; CSV pages retain their individual headers. Pass `cursor=` to resume an export. Iteration stops only when the server omits the next cursor, including when an intermediate page has no rows. Empty or repeated continuation cursors raise `ProoflineError` with type `urn:proofline:sdk:invalid-pagination`, and the page that carries such a cursor is never yielded. The default bound is 100 pages; set `max_pages` to an integer from 1 to 1000. Exhausting that bound while a cursor remains raises `urn:proofline:sdk:pagination-limit`, so a partial export cannot silently appear complete. Stop iteration early when only a prefix is needed.
 
 ## Coverage uploads
 

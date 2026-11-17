@@ -180,20 +180,20 @@ def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
     return cursor
 
 
-def _pagination_limit(subject: str = "Review") -> ProoflineError:
+def _pagination_limit(resource: str = "Review") -> ProoflineError:
     return ProoflineError(
         0,
         "urn:proofline:sdk:pagination-limit",
-        f"{subject} pagination reached the configured bound.",
+        f"{resource} pagination reached the configured bound.",
     )
 
 
 def _export_page_limit(max_pages: int) -> None:
-    if not 1 <= max_pages <= 1_000:
+    if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= 1_000:
         raise ValueError("Export pagination requires max_pages 1..1000.")
 
 
-def _next_export_cursor(page: ExportPage, seen: set[str]) -> str | None:
+def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
     cursor = page.next_cursor
     if cursor is None:
         return None
@@ -316,13 +316,9 @@ class ProoflineClient(Operations):
         group_by: str | None = None,
         max_pages: int = 100,
     ) -> Iterator[ExportPage]:
-        """Yield every export page in order, following next_cursor with the same filters.
-
-        Stops after the page without a next cursor. A repeated or empty cursor raises
-        ``invalid-pagination``; more than ``max_pages`` pages raises ``pagination-limit``.
-        """
+        """Stream export pages, refusing cursor cycles and incomplete bounded traversals."""
         _export_page_limit(max_pages)
-        seen: set[str] = {cursor} if cursor else set()
+        seen = {cursor} if cursor is not None else set()
         for _ in range(max_pages):
             page = self.export_reviews(
                 organization_id,
@@ -333,8 +329,8 @@ class ProoflineClient(Operations):
                 cursor=cursor,
                 group_by=group_by,
             )
+            cursor = _export_next_cursor(page, seen)
             yield page
-            cursor = _next_export_cursor(page, seen)
             if cursor is None:
                 return
         raise _pagination_limit("Export")
@@ -690,13 +686,9 @@ class AsyncProoflineClient(AsyncOperations):
         group_by: str | None = None,
         max_pages: int = 100,
     ) -> AsyncIterator[ExportPage]:
-        """Yield every export page in order, following next_cursor with the same filters.
-
-        Stops after the page without a next cursor. A repeated or empty cursor raises
-        ``invalid-pagination``; more than ``max_pages`` pages raises ``pagination-limit``.
-        """
+        """Stream export pages, refusing cursor cycles and incomplete bounded traversals."""
         _export_page_limit(max_pages)
-        seen: set[str] = {cursor} if cursor else set()
+        seen = {cursor} if cursor is not None else set()
         for _ in range(max_pages):
             page = await self.export_reviews(
                 organization_id,
@@ -707,8 +699,8 @@ class AsyncProoflineClient(AsyncOperations):
                 cursor=cursor,
                 group_by=group_by,
             )
+            cursor = _export_next_cursor(page, seen)
             yield page
-            cursor = _next_export_cursor(page, seen)
             if cursor is None:
                 return
         raise _pagination_limit("Export")
