@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
@@ -149,6 +150,16 @@ def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
         raise ValueError(
             "Pagination requires page_size 1..100, max_pages 1..1000, max_items 1..100000."
         )
+
+
+def _head_commit(value: str | None) -> None:
+    # Only a full SHA names one exact commit; a branch or an abbreviation does not.
+    if value is not None and (
+        not isinstance(value, str)
+        or len(value) not in (40, 64)
+        or any(character not in hexdigits for character in value)
+    ):
+        raise ValueError("The head commit must be a full 40 or 64 character hexadecimal SHA.")
 
 
 def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
@@ -476,16 +487,25 @@ class ProoflineClient(Operations):
         raise _pagination_limit()
 
     def wait_for_review(
-        self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        timeout: float = 300,
+        head_commit_sha: str | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
         A name lookup still running at the deadline returns TIMED_OUT; it never
         reports completion.
+
+        head_commit_sha holds the outcome to that commit. A review pinned to
+        another head ends the wait on that read and is never COMPLETED.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
+        _head_commit(head_commit_sha)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -500,12 +520,13 @@ class ProoflineClient(Operations):
                     raise
                 if (_transport.remaining() or 0) <= 0:
                     break
-                result = outcome(last, url, review_id=review_id)
+                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
-            return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
+            timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
+            return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)
 
@@ -830,10 +851,16 @@ class AsyncProoflineClient(AsyncOperations):
         raise _pagination_limit()
 
     async def wait_for_review(
-        self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        timeout: float = 300,
+        head_commit_sha: str | None = None,
     ) -> ReviewOutcome:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
+        _head_commit(head_commit_sha)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -848,11 +875,12 @@ class AsyncProoflineClient(AsyncOperations):
                     raise
                 if (_transport.remaining() or 0) <= 0:
                     break
-                result = outcome(last, url, review_id=review_id)
+                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
-            return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
+            timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
+            return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)

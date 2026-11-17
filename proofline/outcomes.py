@@ -18,6 +18,10 @@ _KNOWN_ASSESSMENTS = frozenset(
     ("PENDING", "RUNNING", "COMPLETED", "INCOMPLETE", "FAILED", "STOPPED", "SUPERSEDED", "EXCLUDED")
 )
 _WITHHELD_MARKER = "[withheld: environment value]"
+_HEAD_REASONS = {
+    "HEAD_COMMIT_MISMATCH": "The review is pinned to another head commit.",
+    "HEAD_COMMIT_UNAVAILABLE": "The review names no head commit.",
+}
 
 
 @dataclass(frozen=True)
@@ -137,12 +141,23 @@ def _validate(review: CustomerReviewDetail, review_id: UUID | None) -> None:
                 raise _invalid()
 
 
+def _head_gap(review: CustomerReviewDetail, head_commit_sha: str | None) -> str | None:
+    # A result is evidence only for the head the review is pinned to.
+    if head_commit_sha is None:
+        return None
+    head = text(review.head_commit_sha)
+    if head is None:
+        return "HEAD_COMMIT_UNAVAILABLE"
+    return None if head.lower() == head_commit_sha.lower() else "HEAD_COMMIT_MISMATCH"
+
+
 def outcome(
     review: CustomerReviewDetail | None,
     review_url: str,
     forced: OutcomeStatus | None = None,
     *,
     review_id: UUID | None = None,
+    head_commit_sha: str | None = None,
 ) -> ReviewOutcome | None:
     gaps: list[AssessmentGap] = []
     if review is None:
@@ -205,8 +220,13 @@ def outcome(
             )
     if review.assessment_count != len(review.assessments):
         gaps.append(AssessmentGap(None, "UNKNOWN", ("ASSESSMENT_HISTORY_UNAVAILABLE",)))
+    head_gap = _head_gap(review, head_commit_sha)
     if forced is not None:
         status = forced
+    elif head_gap == "HEAD_COMMIT_MISMATCH":
+        # A pinned head does not change, so nothing this review records later
+        # can speak for the commit the caller named.
+        status = "INCOMPLETE"
     elif review.status in ("PENDING", "RUNNING"):
         return None
     elif review.status == "FAILED":
@@ -214,9 +234,12 @@ def outcome(
     elif review.status in ("STOPPED", "SUPERSEDED"):
         status = "STOPPED"
     elif review.status == "COMPLETED":
-        status = "INCOMPLETE" if gaps else "COMPLETED"
+        status = "INCOMPLETE" if gaps or head_gap else "COMPLETED"
     else:
         status = "INCOMPLETE"
         if not gaps:
             gaps.append(AssessmentGap(None, review.status, ("REVIEW_STATE_UNAVAILABLE",)))
-    return ReviewOutcome(status, review_url, review, tuple(gaps))
+    if head_gap is None:
+        return ReviewOutcome(status, review_url, review, tuple(gaps))
+    gaps.append(AssessmentGap(None, "UNKNOWN", (head_gap,)))
+    return ReviewOutcome(status, review_url, review, tuple(gaps), _HEAD_REASONS[head_gap])
