@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,7 +9,8 @@ from typing import Any, Literal
 
 import httpx
 
-from ._transport import ProoflineError
+from ._csv import parse_csv
+from ._transport import MAX_RESPONSE_BYTES, ProoflineError
 
 ExportDataset = Literal["reviews", "finding_outcomes", "finding_validations", "spend", "findings"]
 ExportFormat = Literal["csv", "ndjson"]
@@ -29,6 +28,8 @@ class ExportPage:
 
 def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
     try:
+        if len(response.content) > MAX_RESPONSE_BYTES:
+            raise ValueError
         media = "text/csv" if format == "csv" else "application/x-ndjson"
         if (
             response.headers.get("content-type", "").split(";")[0].strip().lower() != media
@@ -40,7 +41,7 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
             raise ValueError
         text = response.content.decode("utf-8")
         if format == "csv":
-            records = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+            records = parse_csv(text)
             columns = records.pop(0)
             if len(set(columns)) != len(columns) or any(
                 len(row) != len(columns) for row in records
@@ -54,7 +55,7 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
         return ExportPage(
             format, text, rows, 1, horizon, response.headers.get("x-proofline-export-next-cursor")
         )
-    except (ValueError, KeyError, IndexError, UnicodeError, csv.Error):
+    except (ValueError, KeyError, IndexError, UnicodeError):
         raise ProoflineError(
             response.status_code,
             "urn:proofline:sdk:invalid-response",
