@@ -18,7 +18,7 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
     ...
 ```
 
-When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
+When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. When no `base_url` is passed, they read `PROOFLINE_BASE_URL` and otherwise use `https://proofline.sh`, as the CLI, the MCP bridge and the TypeScript SDK do. An explicit `base_url` wins over the variable, an empty variable counts as unset, and a value that is not an HTTPS origin or a loopback HTTP origin raises a `ValueError` that names `PROOFLINE_BASE_URL` without repeating the value. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
 ## Errors and refusals
 

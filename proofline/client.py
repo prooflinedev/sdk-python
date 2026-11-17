@@ -210,6 +210,8 @@ def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
 class ProoflineClient(Operations):
     """Synchronous typed HTTP operations.
 
+    ``base_url`` defaults to ``PROOFLINE_BASE_URL``, then to ``https://proofline.sh``.
+
     Name resolution, connection, TLS and socket operations stop at the configured
     HTTP timeout and at a wait deadline.
     """
@@ -218,11 +220,11 @@ class ProoflineClient(Operations):
         self,
         token: str | SecretStr | None = None,
         *,
-        base_url: str = "https://proofline.sh",
+        base_url: str | None = None,
         timeout: float = 30,
     ) -> None:
-        self._api = _configuration(token, base_url, timeout)
-        self._base_url = _transport.base_url(base_url)
+        self._base_url = _transport.configured_base_url(base_url)
+        self._api = _configuration(token, self._base_url, timeout)
         self._http = httpx.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -588,11 +590,11 @@ class AsyncProoflineClient(AsyncOperations):
         self,
         token: str | SecretStr | None = None,
         *,
-        base_url: str = "https://proofline.sh",
+        base_url: str | None = None,
         timeout: float = 30,
     ) -> None:
-        self._api = _configuration(token, base_url, timeout)
-        self._base_url = _transport.base_url(base_url)
+        self._base_url = _transport.configured_base_url(base_url)
+        self._api = _configuration(token, self._base_url, timeout)
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
