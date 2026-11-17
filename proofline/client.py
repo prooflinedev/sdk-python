@@ -144,6 +144,25 @@ def _review_url(base_url: str, organization_id: UUID, review_id: UUID) -> str:
     )
 
 
+def _deployment_url(base_url: str, organization_id: UUID, public_key: str) -> str:
+    return (
+        f"{base_url}/orgs/by-id/{quote(str(organization_id), safe='')}"
+        f"/reviews/deployments/{quote(public_key, safe='')}"
+    )
+
+
+def _wait_timeout(timeout: float) -> None:
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
+
+
+def _pinned(review: CustomerReviewDetail, pinned: UUID | None) -> UUID | None:
+    # The first well-formed response fixes the review a deployment key names.
+    if pinned is None and isinstance(review.id, UUID):
+        return review.id
+    return pinned
+
+
 def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
     if not 1 <= page_size <= 100 or not 1 <= max_pages <= 1_000 or not 1 <= max_items <= 100_000:
         raise ValueError(
@@ -484,8 +503,7 @@ class ProoflineClient(Operations):
         reports completion.
         """
 
-        if not math.isfinite(timeout) or timeout < 0:
-            raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
+        _wait_timeout(timeout)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -506,6 +524,45 @@ class ProoflineClient(Operations):
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
             return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
+    def wait_for_deployment_review(
+        self, organization_id: UUID, public_key: str, *, timeout: float = 300
+    ) -> ReviewOutcome:
+        """Wait for the review of one deployment, addressed by its public key.
+
+        The first response pins the review id. A later response for a different
+        review raises ProoflineError instead of reporting another review's result.
+        """
+
+        _wait_timeout(timeout)
+        address = _deployment_url(self._base_url, organization_id, public_key)
+        pinned: UUID | None = None
+        last: CustomerReviewDetail | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = self.get_deployment_review(organization_id, public_key)
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                pinned = _pinned(last, pinned)
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                url = _review_url(self._base_url, organization_id, pinned) if pinned else address
+                result = outcome(last, url, review_id=pinned)
+                if result is not None:
+                    return result
+                sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            url = _review_url(self._base_url, organization_id, pinned) if pinned else address
+            return outcome(last, url, "TIMED_OUT", review_id=pinned) or ReviewOutcome(
+                "TIMED_OUT", url
+            )
         finally:
             _transport.DEADLINE.reset(deadline)
 
@@ -832,8 +889,7 @@ class AsyncProoflineClient(AsyncOperations):
     async def wait_for_review(
         self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
     ) -> ReviewOutcome:
-        if not math.isfinite(timeout) or timeout < 0:
-            raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
+        _wait_timeout(timeout)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -854,5 +910,44 @@ class AsyncProoflineClient(AsyncOperations):
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
             return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
+    async def wait_for_deployment_review(
+        self, organization_id: UUID, public_key: str, *, timeout: float = 300
+    ) -> ReviewOutcome:
+        """Wait for the review of one deployment, addressed by its public key.
+
+        The first response pins the review id. A later response for a different
+        review raises ProoflineError instead of reporting another review's result.
+        """
+
+        _wait_timeout(timeout)
+        address = _deployment_url(self._base_url, organization_id, public_key)
+        pinned: UUID | None = None
+        last: CustomerReviewDetail | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = await self.get_deployment_review(organization_id, public_key)
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                pinned = _pinned(last, pinned)
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                url = _review_url(self._base_url, organization_id, pinned) if pinned else address
+                result = outcome(last, url, review_id=pinned)
+                if result is not None:
+                    return result
+                await async_sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            url = _review_url(self._base_url, organization_id, pinned) if pinned else address
+            return outcome(last, url, "TIMED_OUT", review_id=pinned) or ReviewOutcome(
+                "TIMED_OUT", url
+            )
         finally:
             _transport.DEADLINE.reset(deadline)

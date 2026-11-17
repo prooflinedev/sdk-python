@@ -5,6 +5,7 @@ import gzip
 import inspect
 import json
 import logging
+import math
 import socket
 import subprocess
 import sys
@@ -1262,6 +1263,98 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
             assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
         assert clock.delays == [5, 10, 20, 40, 60, 60, 60, 5]
         assert len(server.requests) == 8
+
+
+DEPLOYMENT_KEY = "deploy/2026-11-16?env=prod"
+DEPLOYMENT_PATH = (
+    f"/api/v1/organizations/{ORG}/reviews/deployments/deploy%2F2026-11-16%3Fenv%3Dprod"
+)
+
+
+@MODES
+async def test_deployment_wait_polls_the_key_and_reports_the_pinned_review(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    responses = [review("PENDING"), review("RUNNING"), review()]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_deployment_review", ORG, DEPLOYMENT_KEY, timeout=100
+            )
+        assert result.status == "COMPLETED"
+        assert result.gaps == ()
+        assert result.review.id == REVIEW
+        assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+        assert [(request.method, request.path) for request in server.requests] == [
+            ("GET", DEPLOYMENT_PATH)
+        ] * 3
+        assert clock.delays == [5, 10]
+
+
+@MODES
+@pytest.mark.parametrize("drift_at", [1, 2])
+async def test_deployment_wait_refuses_a_key_that_moves_to_another_review(
+    mode: str, drift_at: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    other = review()
+    other["id"] = "00000000-0000-4000-8000-0000000000ff"
+    responses = [review("RUNNING"), review("RUNNING"), review()]
+    responses[drift_at] = other
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_deployment_review", ORG, DEPLOYMENT_KEY)
+        assert raised.value.type == "urn:proofline:sdk:invalid-response"
+        assert len(server.requests) == drift_at + 1
+
+
+@MODES
+async def test_deployment_wait_timeout_keeps_the_deployment_address_and_last_record(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_deployment_review", ORG, DEPLOYMENT_KEY, timeout=0
+            )
+            assert result.status == "TIMED_OUT"
+            assert result.review is None
+            assert result.review_url == (
+                f"{server.url}/orgs/by-id/{ORG}/reviews/deployments/deploy%2F2026-11-16%3Fenv%3Dprod"
+            )
+            assert server.requests == []
+            result = await call(
+                client, "wait_for_deployment_review", ORG, DEPLOYMENT_KEY, timeout=30
+            )
+            assert result.status == "TIMED_OUT"
+            assert result.review.id == REVIEW
+            assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+            for bad in (-1, math.inf, math.nan):
+                with pytest.raises(ValueError):
+                    await call(
+                        client, "wait_for_deployment_review", ORG, DEPLOYMENT_KEY, timeout=bad
+                    )
+        assert clock.delays == [5, 10, 15]
+        assert len(server.requests) == 3
+
+
+@MODES
+async def test_deployment_wait_surfaces_refusals_without_polling_again(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    with Server(
+        lambda request, index: Reply(403, {"type": "urn:proofline:forbidden", "detail": PRIVATE})
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_deployment_review", ORG, DEPLOYMENT_KEY)
+        assert raised.value.status == 403
+        assert raised.value.type == "urn:proofline:forbidden"
+        assert len(server.requests) == 1
 
 
 @MODES
