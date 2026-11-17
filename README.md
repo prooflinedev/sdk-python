@@ -20,6 +20,41 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Errors and refusals
+
+A refused request raises `ProoflineError` with the server problem's `status`, `type`, `title` and `detail`. When a review request creates nothing, the error also carries `refusal`, whose `reason` names the setting to change, such as `NO_LINKED_ENVIRONMENT` or `ENVIRONMENT_NOT_READY`, and `repository_name`. `RunNowRefusal` names the type of `refusal`. A refusal that does not match the public contract keeps its status, `title` and `detail` with the type `urn:proofline:sdk:invalid-response` and no `refusal`. Any other status, such as the 402 a review request answers when credits cannot pay, is a plain problem with no `refusal`. The token is redacted from every text field, and `repr` and `str` show only the status.
+
+```python
+from proofline import ProoflineError
+
+try:
+    client.request_review(organization_id, repository_id, 12)
+except ProoflineError as error:
+    if error.refusal is None:
+        raise
+    if error.refusal.reason == "NO_LINKED_ENVIRONMENT":
+        print(f"Link an environment to {error.repository_name}.")
+    else:
+        print(error.detail)
+```
+
+## Holding a wait to a commit
+
+`request_review` names a pull request, and its response names no commit: the review belongs to the head the pull request has when the request arrives. To accept a result only for the commit you hold, pass that commit to `wait_for_review`.
+
+```python
+requested = client.request_review(organization_id, repository_id, 12)
+outcome = client.wait_for_review(
+    organization_id,
+    requested.review_id,
+    head_commit_sha=head_commit_sha,
+)
+if outcome.status != "COMPLETED":
+    print(outcome.status, outcome.reason)
+```
+
+`head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
+
 ## Failing a job on open findings
 
 `ReviewOutcome.gate(fail_on)` measures a review against a `WARNING` or `SERIOUS` threshold with the rules of `proofline ci review --fail-on`, so a Python pipeline can fail the same way the CLI does.
@@ -36,10 +71,10 @@ if result != "NOT_REACHED":
 
 - `REACHED`: the completed review has an open finding at or above the threshold.
 - `NOT_REACHED`: the completed review has none.
-- `NOT_COMPLETE`: the review is incomplete, failed, or stopped, whatever it found.
+- `NOT_COMPLETE`: the outcome is `INCOMPLETE`, `FAILED`, or `STOPPED`, whatever the review found. This includes a review pinned to another head than the `head_commit_sha` passed to `wait_for_review`.
 - `UNAVAILABLE`: the wait timed out, or the completed review lacks the server's open-finding counts, so the threshold cannot be measured.
 
-The server counts open findings from their current decisions, so dismissed findings and unexpired risk acceptances do not count. A code-only finding counts while it is not `RESOLVED` and its complete CODE assessment is of the review's own commits. A severity the SDK does not know reaches every threshold. The exit codes above are the CLI's.
+The server counts open findings from their current decisions, so dismissed findings and unexpired risk acceptances do not count. A code-only finding counts while it is not `RESOLVED` and its CODE assessment is complete, meaning `COMPLETED` with no incompleteness kind and no reason codes, and is of the review's own commits. A severity the SDK does not know reaches every threshold. The exit codes above are the CLI's.
 
 The threshold is the caller's, as with `--fail-on`, and applies to any review. An organization that opts in to a merge gate instead gets the server's frozen `ALLOW` or `BLOCK` decision for a pull request head in `outcome.review.merge_gate`, which is null otherwise.
 
@@ -52,8 +87,10 @@ from uuid import UUID
 
 with ProoflineClient() as client:
     page = client.export_reviews(
-        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]), "reviews",
-        from_time="2026-10-01T00:00:00Z", to_time="2026-10-25T00:00:00Z",
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        "reviews",
+        from_time="2026-10-01T00:00:00Z",
+        to_time="2026-10-25T00:00:00Z",
         format="csv",
     )
     print(page.text, end="")
@@ -62,9 +99,25 @@ with ProoflineClient() as client:
 
 Each response returns the original text, decoded rows, dataset version, settled horizon, and an optional next cursor. Each CSV page includes its own header and keeps cells as strings, including nested JSON cells. NDJSON pages retain JSON values. To read additional pages, repeat the call with the returned cursor and the same dataset, window, format, and grouping. A missing next cursor marks the last page.
 
+`iter_export_pages` follows continuation cursors lazily while keeping the same organization, dataset, window, format, and grouping on every request.
+
+```python
+with ProoflineClient() as client:
+    for page in client.iter_export_pages(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        "reviews",
+        from_time="2026-10-01T00:00:00Z",
+        to_time="2026-10-25T00:00:00Z",
+    ):
+        for row in page.rows:
+            print(row)
+```
+
+Use `async for` with `AsyncProoflineClient`. Each yielded page retains its raw text, decoded rows, and metadata; CSV pages retain their individual headers. Pass `cursor=` to resume an export. Iteration stops only when the server omits the next cursor, including when an intermediate page has no rows. Empty or repeated continuation cursors raise `ProoflineError` with type `urn:proofline:sdk:invalid-pagination`, and the page that carries such a cursor is never yielded. The default bound is 100 pages; set `max_pages` to an integer from 1 to 1000. Exhausting that bound while a cursor remains raises `urn:proofline:sdk:pagination-limit`, so a partial export cannot silently appear complete. Stop iteration early when only a prefix is needed.
+
 ## Coverage uploads
 
-To upload coverage reports from CI, use a repository-restricted token with `coverage:write` and current repository write access. Name the full commit SHA that the tests ran on. Reports may use LCOV, Cobertura XML, JaCoCo XML, or Go cover profiles.
+To upload coverage reports from CI, use a repository-restricted token with `coverage:write` and current repository write access. Name the full commit SHA that the tests ran on. Send 1 to 50 LCOV, Cobertura XML, JaCoCo XML, or Go cover reports in a JSON body of at most 30 MiB.
 
 ```python
 import os
@@ -78,10 +131,12 @@ with ProoflineClient() as client:
         UUID(os.environ["PROOFLINE_REPOSITORY_ID"]),
         body=CoverageUploadRequest(
             tested_sha=os.environ["TESTED_SHA"],
-            reports=[UploadedReport(
-                name="lcov.info",
-                content=Path("lcov.info").read_text(encoding="utf-8"),
-            )],
+            reports=[
+                UploadedReport(
+                    name="lcov.info",
+                    content=Path("lcov.info").read_text(encoding="utf-8"),
+                )
+            ],
         ),
     )
 ```
@@ -102,7 +157,9 @@ print(organizations["structuredContent"]["data"]["organizations"])
 # Set organization_id to the UUID of the organization you intend to use.
 result = client.fixes.get_fix_context(finding_id, organization_id=organization_id)
 result = client.knowledge.get_wiki_page(
-    "owner/name", "index", organization_id=organization_id,
+    "owner/name",
+    "index",
+    organization_id=organization_id,
 )
 ```
 
@@ -145,7 +202,9 @@ Read operations require `reviews:read`. Requesting re-verification also requires
 
 ```python
 result = client.fixes.request_reverification(
-    review_id, [finding_id], pushed_commit_sha,
+    review_id,
+    [finding_id],
+    pushed_commit_sha,
     note="Fixed the null case and added a regression test.",
 )
 if result.get("isError"):

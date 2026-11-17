@@ -18,7 +18,7 @@ class CoverageUploadRequest:
 
     Attributes:
         reports (list[UploadedReport]): One to 50 reports, each LCOV, Cobertura XML, `JaCoCo` XML or a Go
-             cover profile, in a JSON body of at most 64 MiB.
+             cover profile, in a JSON body of at most 30 MiB.
         tested_sha (str): The full 40-character commit the tests ran on. GitHub must have it in
              this repository. A merge commit counts for a pull request head that is
              one of its two parents.

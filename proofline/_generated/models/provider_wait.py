@@ -1,33 +1,42 @@
 from __future__ import annotations
 
+import datetime
 from collections.abc import Mapping
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, TypeVar
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
-T = TypeVar("T", bound="RunNowRefusalViewType11")
+from ..models.provider_wait_reason import ProviderWaitReason
+
+T = TypeVar("T", bound="ProviderWait")
 
 
 @_attrs_define
-class RunNowRefusalViewType11:
-    """The existing review already retains a different focus.
+class ProviderWait:
+    """A provider wait that holds the review now.
 
     Attributes:
-        reason (Literal['DEEP_REVIEW_FOCUS_CONFLICT']):
+        reason (ProviderWaitReason): Why a review's run waits on a provider.
+        until (datetime.datetime): When the wait ends: the reset GitHub named, or, when it named none,
+             when the run is due again.
     """
 
-    reason: Literal["DEEP_REVIEW_FOCUS_CONFLICT"]
+    reason: ProviderWaitReason
+    until: datetime.datetime
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        reason = self.reason
+        reason = self.reason.value
+
+        until = self.until.isoformat()
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
                 "reason": reason,
+                "until": until,
             }
         )
 
@@ -36,18 +45,17 @@ class RunNowRefusalViewType11:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        reason = cast(Literal["DEEP_REVIEW_FOCUS_CONFLICT"], d.pop("reason"))
-        if reason != "DEEP_REVIEW_FOCUS_CONFLICT":
-            raise ValueError(
-                f"reason must match const 'DEEP_REVIEW_FOCUS_CONFLICT', got '{reason}'"
-            )
+        reason = ProviderWaitReason(d.pop("reason"))
 
-        run_now_refusal_view_type_11 = cls(
+        until = datetime.datetime.fromisoformat(d.pop("until"))
+
+        provider_wait = cls(
             reason=reason,
+            until=until,
         )
 
-        run_now_refusal_view_type_11.additional_properties = d
-        return run_now_refusal_view_type_11
+        provider_wait.additional_properties = d
+        return provider_wait
 
     @property
     def additional_keys(self) -> list[str]:

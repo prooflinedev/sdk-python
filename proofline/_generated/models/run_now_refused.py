@@ -17,8 +17,6 @@ if TYPE_CHECKING:
     from ..models.run_now_refusal_view_type_7 import RunNowRefusalViewType7
     from ..models.run_now_refusal_view_type_8 import RunNowRefusalViewType8
     from ..models.run_now_refusal_view_type_9 import RunNowRefusalViewType9
-    from ..models.run_now_refusal_view_type_10 import RunNowRefusalViewType10
-    from ..models.run_now_refusal_view_type_11 import RunNowRefusalViewType11
 
 
 T = TypeVar("T", bound="RunNowRefused")
@@ -38,10 +36,10 @@ class RunNowRefused:
        Attributes:
            detail (str): One sentence naming the condition and the setting to change, for a
                 reader with no link to follow.
-           refusal (RunNowRefusalViewType0 | RunNowRefusalViewType1 | RunNowRefusalViewType10 | RunNowRefusalViewType11 |
-               RunNowRefusalViewType2 | RunNowRefusalViewType3 | RunNowRefusalViewType4 | RunNowRefusalViewType5 |
-               RunNowRefusalViewType6 | RunNowRefusalViewType7 | RunNowRefusalViewType8 | RunNowRefusalViewType9): Why a run-
-               now request created nothing, each reason with what the page
+           refusal (RunNowRefusalViewType0 | RunNowRefusalViewType1 | RunNowRefusalViewType2 | RunNowRefusalViewType3 |
+               RunNowRefusalViewType4 | RunNowRefusalViewType5 | RunNowRefusalViewType6 | RunNowRefusalViewType7 |
+               RunNowRefusalViewType8 | RunNowRefusalViewType9): Why a run-now request created nothing, each reason with what
+               the page
                 needs to link the setting to change.
            repository_name (str): The repository's name within its owner, as its pages are addressed.
            status (int): Always 400.
@@ -52,8 +50,6 @@ class RunNowRefused:
     refusal: (
         RunNowRefusalViewType0
         | RunNowRefusalViewType1
-        | RunNowRefusalViewType10
-        | RunNowRefusalViewType11
         | RunNowRefusalViewType2
         | RunNowRefusalViewType3
         | RunNowRefusalViewType4
@@ -78,8 +74,6 @@ class RunNowRefused:
         from ..models.run_now_refusal_view_type_6 import RunNowRefusalViewType6  # noqa: PLC0415
         from ..models.run_now_refusal_view_type_7 import RunNowRefusalViewType7  # noqa: PLC0415
         from ..models.run_now_refusal_view_type_8 import RunNowRefusalViewType8  # noqa: PLC0415
-        from ..models.run_now_refusal_view_type_9 import RunNowRefusalViewType9  # noqa: PLC0415
-        from ..models.run_now_refusal_view_type_10 import RunNowRefusalViewType10  # noqa: PLC0415
 
         detail = self.detail
 
@@ -101,10 +95,6 @@ class RunNowRefused:
         elif isinstance(self.refusal, RunNowRefusalViewType7):
             refusal = self.refusal.to_dict()
         elif isinstance(self.refusal, RunNowRefusalViewType8):
-            refusal = self.refusal.to_dict()
-        elif isinstance(self.refusal, RunNowRefusalViewType9):
-            refusal = self.refusal.to_dict()
-        elif isinstance(self.refusal, RunNowRefusalViewType10):
             refusal = self.refusal.to_dict()
         else:
             refusal = self.refusal.to_dict()
@@ -141,8 +131,6 @@ class RunNowRefused:
         from ..models.run_now_refusal_view_type_7 import RunNowRefusalViewType7  # noqa: PLC0415
         from ..models.run_now_refusal_view_type_8 import RunNowRefusalViewType8  # noqa: PLC0415
         from ..models.run_now_refusal_view_type_9 import RunNowRefusalViewType9  # noqa: PLC0415
-        from ..models.run_now_refusal_view_type_10 import RunNowRefusalViewType10  # noqa: PLC0415
-        from ..models.run_now_refusal_view_type_11 import RunNowRefusalViewType11  # noqa: PLC0415
 
         d = dict(src_dict)
         detail = d.pop("detail")
@@ -152,8 +140,6 @@ class RunNowRefused:
         ) -> (
             RunNowRefusalViewType0
             | RunNowRefusalViewType1
-            | RunNowRefusalViewType10
-            | RunNowRefusalViewType11
             | RunNowRefusalViewType2
             | RunNowRefusalViewType3
             | RunNowRefusalViewType4
@@ -253,31 +239,11 @@ class RunNowRefused:
                 return componentsschemas_run_now_refusal_view_type_8
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                componentsschemas_run_now_refusal_view_type_9 = RunNowRefusalViewType9.from_dict(
-                    data
-                )
-
-                return componentsschemas_run_now_refusal_view_type_9
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
-            try:
-                if not isinstance(data, dict):
-                    raise TypeError()
-                componentsschemas_run_now_refusal_view_type_10 = RunNowRefusalViewType10.from_dict(
-                    data
-                )
-
-                return componentsschemas_run_now_refusal_view_type_10
-            except (TypeError, ValueError, AttributeError, KeyError):
-                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            componentsschemas_run_now_refusal_view_type_11 = RunNowRefusalViewType11.from_dict(data)
+            componentsschemas_run_now_refusal_view_type_9 = RunNowRefusalViewType9.from_dict(data)
 
-            return componentsschemas_run_now_refusal_view_type_11
+            return componentsschemas_run_now_refusal_view_type_9
 
         refusal = _parse_refusal(d.pop("refusal"))
 

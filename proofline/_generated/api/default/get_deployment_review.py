@@ -15,6 +15,7 @@ def _get_kwargs(
     org_id: UUID,
     public_key: str,
 ) -> dict[str, Any]:
+
     _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/api/v1/organizations/{org_id}/reviews/deployments/{public_key}".format(
