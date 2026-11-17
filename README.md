@@ -157,6 +157,39 @@ if result.get("isError"):
 
 Calls under `client.fixes` never retry. Results retain untrusted-text wrappers, availability, assessment gaps, and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix, and a tool request never records a human disposition.
 
+
+## Comparing review observations
+
+To track changes over time, retain two review details obtained from separate
+reads of the same review and compare them:
+
+```python
+from proofline import ProoflineClient, compare_review_observations
+
+with ProoflineClient() as client:
+    earlier = client.get_review(organization_id, review_id)
+
+    # Your application decides when to fetch the next observation.
+    # For example, it could store the first result and fetch again later.
+    later = client.get_review(organization_id, review_id)
+
+comparison = compare_review_observations(earlier, later)
+
+if comparison.serious_delta is None:
+    print("Serious-finding change unavailable:", comparison.unknown_reasons)
+else:
+    print("Change in serious-finding count:", comparison.serious_delta)
+
+print("Recorded head states:", comparison.earlier_head_state, comparison.later_head_state)
+print("Recorded scope indicators:", comparison.earlier_scope_known, comparison.later_scope_known)
+```
+
+The helper does not fetch or store observations. A negative count delta does
+not identify a finding or prove it was fixed. Head states describe Proofline's
+recorded provider state, which may differ from the live GitHub head. An unknown
+assessment scope does not mean all environments were assessed.
+
+
 ## Development
 
 The repository bundles its public API contract in `openapi.public.json`. New public operations generate typed methods on both `ProoflineClient` and `AsyncProoflineClient` along with the code in `proofline/_generated/`.

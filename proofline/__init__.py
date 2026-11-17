@@ -35,6 +35,7 @@ from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
+from .observations import ReviewObservationComparison, compare_review_observations
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
 
 __all__ = [
@@ -78,6 +79,8 @@ __all__ = [
     "UploadedReport",
     "__version__",
     "models",
+    "ReviewObservationComparison",
+    "compare_review_observations",
 ]
 
 from .knowledge import KnowledgeResult as KnowledgeResult
