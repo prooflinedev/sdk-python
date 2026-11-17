@@ -76,7 +76,7 @@ if result != "NOT_REACHED":
 
 The server counts open findings from their current decisions, so dismissed findings and unexpired risk acceptances do not count. A code-only finding counts while it is not `RESOLVED` and its CODE assessment is complete, meaning `COMPLETED` with no incompleteness kind and no reason codes, and is of the review's own commits. A severity the SDK does not know reaches every threshold. The exit codes above are the CLI's.
 
-The threshold is the caller's, as with `--fail-on`, and applies to any review. An organization that opts in to a merge gate instead gets the server's frozen `ALLOW` or `BLOCK` decision for a pull request head in `outcome.review.merge_gate`, which is null otherwise.
+The threshold is the caller's, as with `--fail-on`. The gate follows `ci review --fail-on` for every kind of review, so a review the server returns without open-finding counts is `UNAVAILABLE`. For patch, commit, and file reviews, which have no finding decisions, `proofline review --fail-on` counts their unresolved findings instead; `gate()` does not. An organization that opts in to a merge gate instead gets the server's frozen `ALLOW` or `BLOCK` decision for a pull request head in `outcome.review.merge_gate`, which is null otherwise.
 
 ## Review exports
 
