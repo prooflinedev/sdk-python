@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "proofline-sdk"
-version = "6.0.0"
+version = "6.1.0"
 description = "Typed synchronous and asynchronous clients for the Proofline review API"
 readme = "README.md"
 license = "Apache-2.0 AND MIT"
@@ -35,7 +35,7 @@ Repository = "https://github.com/prooflinedev/sdk-python"
 [project.optional-dependencies]
 dev = [
     "openapi-python-client==0.29.1",
-    "ruff==0.17.4",
+    "ruff==0.17.5",
     "mypy==2.4.1",
     "pytest==9.2.0",
     "pytest-asyncio==1.4.1",
