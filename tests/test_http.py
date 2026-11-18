@@ -1644,6 +1644,38 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
 
 
 @MODES
+async def test_malformed_export_response_raises_invalid_response(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        assert request.path.startswith(
+            f"/api/v1/organizations/{ORG}/exports/findings?"
+        )
+        return Reply(
+            body=b'{"dataset_version": 1, "claim": ',
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(
+                    client,
+                    "export_reviews",
+                    ORG,
+                    "findings",
+                    from_time="2026-10-01T00:00:00Z",
+                    to_time="2026-10-25T00:00:00Z",
+                    format="ndjson",
+                )
+
+            assert raised.value.status == 200
+            assert raised.value.type == "urn:proofline:sdk:invalid-response"
+
+
+@MODES
 @pytest.mark.parametrize("format", ["csv", "ndjson"])
 async def test_review_export_retains_every_recorded_kind(mode: str, format: str) -> None:
     kinds = [
