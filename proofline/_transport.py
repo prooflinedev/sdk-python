@@ -145,6 +145,30 @@ def base_url(value: str) -> str:
     return value.rstrip("/")
 
 
+HOSTED_ORIGIN = "https://proofline.sh"
+
+
+def configured_base_url(value: str | None) -> str:
+    """Resolve the origin: the argument, then PROOFLINE_BASE_URL, then the hosted origin.
+
+    An empty ``PROOFLINE_BASE_URL`` counts as unset, so a CI template that expands a
+    missing variable to an empty string still reaches the hosted origin. A bad value
+    read from the environment is reported by name and never echoed, because it can
+    carry credentials.
+    """
+    if value is not None:
+        return base_url(value)
+    configured = os.environ.get("PROOFLINE_BASE_URL", "")
+    if not configured:
+        return HOSTED_ORIGIN
+    try:
+        return base_url(configured)
+    except ValueError:
+        raise ValueError(
+            "PROOFLINE_BASE_URL must be an HTTPS origin, or HTTP with a literal loopback address."
+        ) from None
+
+
 def invalid_response() -> ProoflineError:
     return ProoflineError(
         0, "urn:proofline:sdk:invalid-response", "Proofline returned an invalid API response."

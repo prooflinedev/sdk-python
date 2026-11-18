@@ -21,7 +21,7 @@ def python_at(directory: Path) -> Path:
 
 def command(*args: str, cwd: Path = ROOT) -> None:
     env = dict(os.environ)
-    for name in ("PYTHONPATH", "PYTHONHOME", "PROOFLINE_TOKEN"):
+    for name in ("PYTHONPATH", "PYTHONHOME", "PROOFLINE_TOKEN", "PROOFLINE_BASE_URL"):
         env.pop(name, None)
     for name in tuple(env):
         if name.startswith("UV_"):

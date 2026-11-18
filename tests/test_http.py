@@ -2534,3 +2534,49 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+async def test_base_url_defaults_to_the_environment_then_the_hosted_origin(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        return Reply(body=page())
+
+    with Server(respond) as server:
+        monkeypatch.setenv("PROOFLINE_BASE_URL", server.url)
+        if mode == "sync":
+            with ProoflineClient(SecretStr(TOKEN)) as client:
+                await call(client, "list_reviews", ORG)
+        else:
+            async with AsyncProoflineClient(SecretStr(TOKEN)) as client:
+                await call(client, "list_reviews", ORG)
+        assert server.requests[0].path.startswith(f"/api/v1/organizations/{ORG}/reviews")
+        assert server.requests[0].headers["Authorization"] == f"Bearer {TOKEN}"
+
+    with Server(respond) as explicit_server:
+        monkeypatch.setenv("PROOFLINE_BASE_URL", "http://127.0.0.1:9")
+        async with session(mode, explicit_server.url) as client:
+            await call(client, "list_reviews", ORG)
+        assert len(explicit_server.requests) == 1
+
+    monkeypatch.delenv("PROOFLINE_BASE_URL", raising=False)
+    assert _transport.configured_base_url(None) == "https://proofline.sh"
+    monkeypatch.setenv("PROOFLINE_BASE_URL", "")
+    assert _transport.configured_base_url(None) == "https://proofline.sh"
+    assert _transport.configured_base_url("https://staging.example") == "https://staging.example"
+
+    for bad in (
+        "http://example.com",
+        "https://user:secret@example.com",
+        "https://example.com/path",
+        "https://example.com?query=1",
+    ):
+        monkeypatch.setenv("PROOFLINE_BASE_URL", bad)
+        with pytest.raises(ValueError) as refused:
+            _transport.configured_base_url(None)
+        assert str(refused.value).startswith("PROOFLINE_BASE_URL must be")
+        assert "secret" not in str(refused.value)
+
+    with pytest.raises(ValueError):
+        _transport.configured_base_url("http://example.com")
