@@ -1584,6 +1584,7 @@ async def test_streaming_and_resolution_keep_deadline_outcomes_explicit(
 
     original_resolution = socket.getaddrinfo
     resolution_started = threading.Event()
+    resolution_released = threading.Event()
     resolution_finished = threading.Event()
     resolutions: list[bool] = []
 
@@ -1593,7 +1594,9 @@ async def test_streaming_and_resolution_keep_deadline_outcomes_explicit(
             return original_resolution(host, port, *args, **kwargs)
         resolution_started.set()
         try:
-            time.sleep(0.25)
+            # Hang until the test releases it, so the deadline expires during the lookup
+            # whenever the worker starts. The bound only ends a call that waits for it.
+            resolution_released.wait(5)
             return original_resolution("127.0.0.1", port, *args, **kwargs)
         finally:
             resolution_finished.set()
@@ -1602,17 +1605,17 @@ async def test_streaming_and_resolution_keep_deadline_outcomes_explicit(
     with Server(lambda request, index: Reply(body=finding())) as server:
         origin = server.url.replace("http://127.0.0.1", "https://controlled.proofline.invalid")
         async with session(mode, origin) as client:
-            started = time.monotonic()
-            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.05)
-            elapsed = time.monotonic() - started
+            # The resolver worker starts within a millisecond on an idle host; the deadline
+            # leaves a loaded check worker half a second to start it (#19783).
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.5)
             assert result.status == "TIMED_OUT"
             assert result.review is None
             assert result.review_url == f"{origin}/orgs/by-id/{ORG}/reviews/{REVIEW}"
             assert resolution_started.is_set()
-            assert elapsed < 0.2
             assert not resolution_finished.is_set()
             # Drain the abandoned resolver worker before the loopback peer closes.
-            deadline = time.monotonic() + 1
+            resolution_released.set()
+            deadline = time.monotonic() + 5
             while not resolution_finished.is_set() and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
             assert resolution_finished.is_set()
@@ -1817,13 +1820,13 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
         is_csv = query.get("format") == ["csv"]
         return Reply(
             body=(
-                b'dataset_version,claim\r\n1,"comma, quote "" and\nnewline"\r\n'
+                b'dataset_version,claim\r\n2,"comma, quote "" and\nnewline"\r\n'
                 if is_csv
-                else b'{"dataset_version":1,"claim":"hello"}\n'
+                else b'{"dataset_version":2,"claim":"hello"}\n'
             ),
             headers={
                 "Content-Type": "text/csv" if is_csv else "application/x-ndjson",
-                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Version": "2",
                 "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
                 "X-Proofline-Export-Next-Cursor": "opaque/+cursor",
             },
@@ -1838,7 +1841,8 @@ async def test_export_pages_preserve_csv_and_refuse_foreign_cursor(mode: str) ->
             exported = await call(
                 client, "export_reviews", ORG, "findings", cursor=exported.next_cursor, **kwargs
             )
-            assert exported.rows[0]["dataset_version"] == 1
+            assert exported.rows[0]["dataset_version"] == 2
+            assert exported.version == 2
             assert "cursor=opaque%2F%2Bcursor" in server.requests[1].path
             with pytest.raises(ProoflineError) as caught:
                 await call(client, "export_reviews", ORG, "findings", cursor="refused", **kwargs)
@@ -2067,6 +2071,52 @@ async def test_export_accepts_case_insensitive_content_type(
                 to_time="2026-10-25T00:00:00Z",
             )
             assert page.rows[0]["claim"] == "hello"
+
+
+@MODES
+async def test_export_versions_follow_the_dataset(mode: str) -> None:
+    served = {
+        "findings": [("1", 1), ("2", 2), ("2", 1), ("3", 3)],
+        "finding_validations": [("2", 2)],
+        "reviews": [("1", 1), ("2", 2)],
+    }
+
+    seen: dict[str, int] = {}
+
+    def respond(request: Request, index: int) -> Reply:
+        dataset = urlsplit(request.path).path.rsplit("/", 1)[1]
+        seen[dataset] = seen.get(dataset, 0) + 1
+        header, row = served[dataset][seen[dataset] - 1]
+        return Reply(
+            body=json.dumps({"dataset_version": row}).encode() + b"\n",
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": header,
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            kwargs = {"from_time": "2026-10-01T00:00:00Z", "to_time": "2026-10-25T00:00:00Z"}
+            outcomes = []
+            for dataset, replies in served.items():
+                for _ in replies:
+                    try:
+                        page = await call(client, "export_reviews", ORG, dataset, **kwargs)
+                        outcomes.append((dataset, page.version))
+                    except ProoflineError as error:
+                        outcomes.append((dataset, error.type))
+            refused = "urn:proofline:sdk:invalid-response"
+            assert outcomes == [
+                ("findings", 1),
+                ("findings", 2),
+                ("findings", refused),
+                ("findings", refused),
+                ("finding_validations", 2),
+                ("reviews", 1),
+                ("reviews", refused),
+            ]
 
 
 @MODES

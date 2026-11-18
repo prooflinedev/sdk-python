@@ -15,6 +15,10 @@ from ._transport import MAX_RESPONSE_BYTES, ProoflineError
 ExportDataset = Literal["reviews", "finding_outcomes", "finding_validations", "spend", "findings"]
 ExportFormat = Literal["csv", "ndjson"]
 
+# Version 2 of the finding datasets adds code-lane rows. Version 1 stays accepted from servers
+# that have not moved to version 2.
+_VERSIONS: dict[str, tuple[str, ...]] = {"findings": ("1", "2"), "finding_validations": ("1", "2")}
+
 
 @dataclass(frozen=True)
 class ExportPage:
@@ -26,14 +30,16 @@ class ExportPage:
     next_cursor: str | None
 
 
-def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
+def decode_export(
+    response: httpx.Response, format: ExportFormat, dataset: ExportDataset
+) -> ExportPage:
     try:
         if len(response.content) > MAX_RESPONSE_BYTES:
             raise ValueError
         media = "text/csv" if format == "csv" else "application/x-ndjson"
-        if (
-            response.headers.get("content-type", "").split(";")[0].strip().lower() != media
-            or response.headers.get("x-proofline-export-version") != "1"
+        version = response.headers.get("x-proofline-export-version")
+        if response.headers.get("content-type", "").split(";")[0].strip().lower() != media or (
+            version not in _VERSIONS.get(dataset, ("1",))
         ):
             raise ValueError
         horizon = response.headers["x-proofline-export-settled-until"]
@@ -50,10 +56,17 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
             rows = [dict(zip(columns, row, strict=True)) for row in records]
         else:
             rows = [json.loads(line) for line in text.split("\n") if line.strip()]
-        if any(not isinstance(row, dict) or str(row.get("dataset_version")) != "1" for row in rows):
+        if any(
+            not isinstance(row, dict) or str(row.get("dataset_version")) != version for row in rows
+        ):
             raise ValueError
         return ExportPage(
-            format, text, rows, 1, horizon, response.headers.get("x-proofline-export-next-cursor")
+            format,
+            text,
+            rows,
+            int(version),
+            horizon,
+            response.headers.get("x-proofline-export-next-cursor"),
         )
     except (ValueError, KeyError, IndexError, UnicodeError):
         raise ProoflineError(

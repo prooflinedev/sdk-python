@@ -33,7 +33,7 @@ def test_large_csv_field_preserved(size: int) -> None:
     writer.writerow(["dataset_version", "claim"])
     writer.writerow(["1", claim])
     text = stream.getvalue()
-    page = decode_export(response(text), "csv")
+    page = decode_export(response(text), "csv", "reviews")
     assert page.rows == [{"dataset_version": "1", "claim": claim}]
     assert page.text == text
 
@@ -44,10 +44,10 @@ def test_csv_response_byte_bound(extra: int) -> None:
     text = prefix + "x" * (MAX_RESPONSE_BYTES - len(prefix) + extra)
     if extra:
         with pytest.raises(ProoflineError, match="HTTP 200") as caught:
-            decode_export(response(text), "csv")
+            decode_export(response(text), "csv", "reviews")
         assert caught.value.type == "urn:proofline:sdk:invalid-response"
     else:
-        assert len(decode_export(response(text), "csv").rows[0]["claim"]) == (
+        assert len(decode_export(response(text), "csv", "reviews").rows[0]["claim"]) == (
             MAX_RESPONSE_BYTES - len(prefix)
         )
 
@@ -66,7 +66,7 @@ def test_csv_response_byte_bound(extra: int) -> None:
 )
 def test_invalid_csv_retains_typed_error(text: str) -> None:
     with pytest.raises(ProoflineError) as caught:
-        decode_export(response(text), "csv")
+        decode_export(response(text), "csv", "reviews")
     assert caught.value.type == "urn:proofline:sdk:invalid-response"
     assert caught.value.status == 200
 
@@ -94,9 +94,10 @@ def test_concurrent_decoding_preserves_global_csv_limit() -> None:
     def decode(index: int) -> str:
         if index % 2:
             with pytest.raises(ProoflineError):
-                decode_export(response('dataset_version,claim\n1,"unfinished'), "csv")
+                decode_export(response('dataset_version,claim\n1,"unfinished'), "csv", "reviews")
         else:
-            assert decode_export(response("dataset_version,claim\n1," + "x" * 150_000), "csv")
+            text = "dataset_version,claim\n1," + "x" * 150_000
+            assert decode_export(response(text), "csv", "reviews")
         return str(csv.field_size_limit())
 
     with ThreadPoolExecutor(max_workers=4) as pool:

@@ -300,7 +300,7 @@ class ProoflineClient(Operations):
                 params=params,
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )
-            return decode_export(response, format)
+            return decode_export(response, format, dataset)
         except httpx.HTTPError as error:
             raise _transport.network_error(error) from None
 
@@ -670,7 +670,7 @@ class AsyncProoflineClient(AsyncOperations):
                 params=params,
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )
-            return decode_export(response, format)
+            return decode_export(response, format, dataset)
         except httpx.HTTPError as error:
             raise _transport.network_error(error) from None
 
