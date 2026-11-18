@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from string import hexdigits
+from string import ascii_lowercase, ascii_uppercase, hexdigits
 from time import monotonic, sleep
 from types import TracebackType
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
@@ -58,6 +58,7 @@ from ._generated.models.finding_fix_prompt_type_1 import FindingFixPromptType1
 from ._generated.models.patch_review_request import PatchReviewRequest
 from ._generated.models.patch_review_response import PatchReviewResponse
 from ._generated.models.repository_guidance import RepositoryGuidance
+from ._generated.models.repository_name import RepositoryName
 from ._generated.models.repository_names import RepositoryNames
 from ._generated.models.rerun_response import RerunResponse
 from ._generated.models.review_page import ReviewPage
@@ -205,6 +206,47 @@ def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
         )
     seen.add(cursor)
     return cursor
+
+
+_ASCII_LOWER = str.maketrans(ascii_uppercase, ascii_lowercase)
+
+
+def _repository_full_name(full_name: str) -> str:
+    # A provider name is exactly owner/name; anything else cannot name one repository.
+    if not isinstance(full_name, str) or full_name.count("/") != 1:
+        raise ValueError("The repository name must be owner/name, such as octo-org/api.")
+    owner, name = full_name.split("/")
+    if not owner or not name or owner != owner.strip() or name != name.strip():
+        raise ValueError("The repository name must be owner/name, such as octo-org/api.")
+    return full_name
+
+
+def _matching_repository(names: RepositoryNames, full_name: str) -> RepositoryName:
+    # GitHub compares owner/name without regard to ASCII case, so the lookup does too;
+    # a name spelled exactly as the caller wrote it still wins over a case-only variant.
+    exact = [item for item in names.repositories if item.full_name == full_name]
+    folded = full_name.translate(_ASCII_LOWER)
+    similar = [
+        item for item in names.repositories if item.full_name.translate(_ASCII_LOWER) == folded
+    ]
+    matches = exact or similar
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ProoflineError(
+            0,
+            "urn:proofline:sdk:repository-not-found",
+            f"No repository named {full_name} is visible to this token. A repository-restricted "
+            "token sees only its allowlist, and a renamed repository is listed under its new name.",
+            repository_name=full_name,
+        )
+    raise ProoflineError(
+        0,
+        "urn:proofline:sdk:ambiguous-repository",
+        f"More than one repository matches {full_name}; pass the exact owner/name spelling "
+        "or use the repository ID.",
+        repository_name=full_name,
+    )
 
 
 class ProoflineClient(Operations):
@@ -438,6 +480,16 @@ class ProoflineClient(Operations):
 
     def list_repositories(self, organization_id: UUID) -> RepositoryNames:
         return self._call(list_repositories.sync_detailed, RepositoryNames, organization_id)
+
+    def find_repository(self, organization_id: UUID, full_name: str) -> RepositoryName:
+        """Resolve a provider owner/name, such as GITHUB_REPOSITORY, to its repository.
+
+        The match ignores ASCII case, as GitHub does, and an exact spelling wins.
+        Keep the returned id: the name can change on a rename. A malformed name
+        raises ValueError before any request.
+        """
+        full_name = _repository_full_name(full_name)
+        return _matching_repository(self.list_repositories(organization_id), full_name)
 
     def request_review(
         self,
@@ -829,6 +881,16 @@ class AsyncProoflineClient(AsyncOperations):
         return await self._call(
             list_repositories.asyncio_detailed, RepositoryNames, organization_id
         )
+
+    async def find_repository(self, organization_id: UUID, full_name: str) -> RepositoryName:
+        """Resolve a provider owner/name, such as GITHUB_REPOSITORY, to its repository.
+
+        The match ignores ASCII case, as GitHub does, and an exact spelling wins.
+        Keep the returned id: the name can change on a rename. A malformed name
+        raises ValueError before any request.
+        """
+        full_name = _repository_full_name(full_name)
+        return _matching_repository(await self.list_repositories(organization_id), full_name)
 
     async def request_review(
         self,
