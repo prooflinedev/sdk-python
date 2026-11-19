@@ -3,6 +3,7 @@
 from .action_unavailability import ActionUnavailability
 from .actor_view import ActorView
 from .agent_session import AgentSession
+from .agent_session_connection import AgentSessionConnection
 from .agent_session_prompt_type_0 import AgentSessionPromptType0
 from .agent_session_prompt_type_1 import AgentSessionPromptType1
 from .agent_session_target import AgentSessionTarget
@@ -108,6 +109,7 @@ from .prose_outcome_type_0 import ProseOutcomeType0
 from .provider_wait import ProviderWait
 from .provider_wait_reason import ProviderWaitReason
 from .pull_request_merge_gate import PullRequestMergeGate
+from .questions_unavailable_reason import QuestionsUnavailableReason
 from .refresh_view import RefreshView
 from .refused_environment import RefusedEnvironment
 from .related_review import RelatedReview
@@ -168,6 +170,7 @@ __all__ = (
     "ActionUnavailability",
     "ActorView",
     "AgentSession",
+    "AgentSessionConnection",
     "AgentSessionPromptType0",
     "AgentSessionPromptType1",
     "AgentSessionTarget",
@@ -273,6 +276,7 @@ __all__ = (
     "ProviderWait",
     "ProviderWaitReason",
     "PullRequestMergeGate",
+    "QuestionsUnavailableReason",
     "RefreshView",
     "RefusedEnvironment",
     "RelatedReview",

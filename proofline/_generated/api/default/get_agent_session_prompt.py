@@ -79,8 +79,9 @@ def sync_detailed(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):
@@ -115,8 +116,9 @@ def sync(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):
@@ -146,8 +148,9 @@ async def asyncio_detailed(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):
@@ -180,8 +183,9 @@ async def asyncio(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):

@@ -80,6 +80,9 @@ class ReviewSummary:
              is the fallback. Display metadata, never identity.
         pull_request_author_url (None | str | Unset): The author's profile on the deployment's GitHub host. Absent when
             no author login is known.
+        pull_request_draft (bool | None | Unset): Whether the pull request is a draft, as provider state last reported
+             it. Display state only: an open draft keeps `pull_request_state` `OPEN`.
+             Absent when `pull_request_state` is.
         pull_request_number (int | None | Unset): The pull request number. Absent for a deployment or patch review.
         pull_request_state (None | str | Unset): Current provider state of the pull request: `OPEN`, `CLOSED`, or
              `MERGED`. Absent for deployment reviews or a missing projection.
@@ -131,6 +134,7 @@ class ReviewSummary:
     pull_request_author_login: None | str | Unset = UNSET
     pull_request_author_name: None | str | Unset = UNSET
     pull_request_author_url: None | str | Unset = UNSET
+    pull_request_draft: bool | None | Unset = UNSET
     pull_request_number: int | None | Unset = UNSET
     pull_request_state: None | str | Unset = UNSET
     pull_request_title: None | str | Unset = UNSET
@@ -258,6 +262,12 @@ class ReviewSummary:
         else:
             pull_request_author_url = self.pull_request_author_url
 
+        pull_request_draft: bool | None | Unset
+        if isinstance(self.pull_request_draft, Unset):
+            pull_request_draft = UNSET
+        else:
+            pull_request_draft = self.pull_request_draft
+
         pull_request_number: int | None | Unset
         if isinstance(self.pull_request_number, Unset):
             pull_request_number = UNSET
@@ -372,6 +382,8 @@ class ReviewSummary:
             field_dict["pull_request_author_name"] = pull_request_author_name
         if pull_request_author_url is not UNSET:
             field_dict["pull_request_author_url"] = pull_request_author_url
+        if pull_request_draft is not UNSET:
+            field_dict["pull_request_draft"] = pull_request_draft
         if pull_request_number is not UNSET:
             field_dict["pull_request_number"] = pull_request_number
         if pull_request_state is not UNSET:
@@ -614,6 +626,15 @@ class ReviewSummary:
             d.pop("pull_request_author_url", UNSET)
         )
 
+        def _parse_pull_request_draft(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        pull_request_draft = _parse_pull_request_draft(d.pop("pull_request_draft", UNSET))
+
         def _parse_pull_request_number(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -761,6 +782,7 @@ class ReviewSummary:
             pull_request_author_login=pull_request_author_login,
             pull_request_author_name=pull_request_author_name,
             pull_request_author_url=pull_request_author_url,
+            pull_request_draft=pull_request_draft,
             pull_request_number=pull_request_number,
             pull_request_state=pull_request_state,
             pull_request_title=pull_request_title,

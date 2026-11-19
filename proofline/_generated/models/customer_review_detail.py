@@ -10,6 +10,7 @@ from attrs import field as _attrs_field
 
 from ..models.incomplete_cause_type_0 import IncompleteCauseType0
 from ..models.patch_trigger_source import PatchTriggerSource
+from ..models.questions_unavailable_reason import QuestionsUnavailableReason
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -177,6 +178,9 @@ class CustomerReviewDetail:
              is the fallback. Display metadata, never identity.
         pull_request_author_url (None | str | Unset): The author's profile on the deployment's GitHub host. Absent when
             no author login is known.
+        pull_request_draft (bool | None | Unset): Whether the pull request is a draft, as provider state last reported
+             it. Display state only: an open draft keeps `pull_request_state` `OPEN`.
+             Absent when `pull_request_state` is.
         pull_request_number (int | None | Unset): The pull request number. Absent for a deployment or patch review.
         pull_request_state (None | str | Unset): Current provider state of the pull request: `OPEN`, `CLOSED`, or
              `MERGED`. Absent for deployment reviews or a missing projection.
@@ -185,6 +189,12 @@ class CustomerReviewDetail:
              renderers must treat it as text, never markup.
         pull_request_url (None | str | Unset): The pull request on GitHub. Absent for a deployment review or when the
             repository is unknown.
+        questions_unavailable_reason (None | QuestionsUnavailableReason | Unset): Why Proofline answers no question
+            about this run: `FORK_PULL_REQUEST`
+             when the pull request is recorded as coming from a fork, whose
+             conversations the fork policy excludes whatever the run. Absent
+             otherwise, which does not mean a question will be answered: each one
+             is still checked for access and retained evidence.
         refresh (None | RefreshView | Unset): How this review decided what it reviews after a push or a full-review
              request. Absent for a review that refreshes nothing, and while a
              refresh has not decided yet.
@@ -280,10 +290,12 @@ class CustomerReviewDetail:
     pull_request_author_login: None | str | Unset = UNSET
     pull_request_author_name: None | str | Unset = UNSET
     pull_request_author_url: None | str | Unset = UNSET
+    pull_request_draft: bool | None | Unset = UNSET
     pull_request_number: int | None | Unset = UNSET
     pull_request_state: None | str | Unset = UNSET
     pull_request_title: None | str | Unset = UNSET
     pull_request_url: None | str | Unset = UNSET
+    questions_unavailable_reason: None | QuestionsUnavailableReason | Unset = UNSET
     refresh: None | RefreshView | Unset = UNSET
     repository_full_name: None | str | Unset = UNSET
     repository_id: None | Unset | UUID = UNSET
@@ -591,6 +603,12 @@ class CustomerReviewDetail:
         else:
             pull_request_author_url = self.pull_request_author_url
 
+        pull_request_draft: bool | None | Unset
+        if isinstance(self.pull_request_draft, Unset):
+            pull_request_draft = UNSET
+        else:
+            pull_request_draft = self.pull_request_draft
+
         pull_request_number: int | None | Unset
         if isinstance(self.pull_request_number, Unset):
             pull_request_number = UNSET
@@ -614,6 +632,14 @@ class CustomerReviewDetail:
             pull_request_url = UNSET
         else:
             pull_request_url = self.pull_request_url
+
+        questions_unavailable_reason: None | str | Unset
+        if isinstance(self.questions_unavailable_reason, Unset):
+            questions_unavailable_reason = UNSET
+        elif isinstance(self.questions_unavailable_reason, QuestionsUnavailableReason):
+            questions_unavailable_reason = self.questions_unavailable_reason.value
+        else:
+            questions_unavailable_reason = self.questions_unavailable_reason
 
         refresh: dict[str, Any] | None | Unset
         if isinstance(self.refresh, Unset):
@@ -822,6 +848,8 @@ class CustomerReviewDetail:
             field_dict["pull_request_author_name"] = pull_request_author_name
         if pull_request_author_url is not UNSET:
             field_dict["pull_request_author_url"] = pull_request_author_url
+        if pull_request_draft is not UNSET:
+            field_dict["pull_request_draft"] = pull_request_draft
         if pull_request_number is not UNSET:
             field_dict["pull_request_number"] = pull_request_number
         if pull_request_state is not UNSET:
@@ -830,6 +858,8 @@ class CustomerReviewDetail:
             field_dict["pull_request_title"] = pull_request_title
         if pull_request_url is not UNSET:
             field_dict["pull_request_url"] = pull_request_url
+        if questions_unavailable_reason is not UNSET:
+            field_dict["questions_unavailable_reason"] = questions_unavailable_reason
         if refresh is not UNSET:
             field_dict["refresh"] = refresh
         if repository_full_name is not UNSET:
@@ -1391,6 +1421,15 @@ class CustomerReviewDetail:
             d.pop("pull_request_author_url", UNSET)
         )
 
+        def _parse_pull_request_draft(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        pull_request_draft = _parse_pull_request_draft(d.pop("pull_request_draft", UNSET))
+
         def _parse_pull_request_number(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -1426,6 +1465,27 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         pull_request_url = _parse_pull_request_url(d.pop("pull_request_url", UNSET))
+
+        def _parse_questions_unavailable_reason(
+            data: object,
+        ) -> None | QuestionsUnavailableReason | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                questions_unavailable_reason_type_0 = QuestionsUnavailableReason(data)
+
+                return questions_unavailable_reason_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | QuestionsUnavailableReason | Unset, data)
+
+        questions_unavailable_reason = _parse_questions_unavailable_reason(
+            d.pop("questions_unavailable_reason", UNSET)
+        )
 
         def _parse_refresh(data: object) -> None | RefreshView | Unset:
             if data is None:
@@ -1704,10 +1764,12 @@ class CustomerReviewDetail:
             pull_request_author_login=pull_request_author_login,
             pull_request_author_name=pull_request_author_name,
             pull_request_author_url=pull_request_author_url,
+            pull_request_draft=pull_request_draft,
             pull_request_number=pull_request_number,
             pull_request_state=pull_request_state,
             pull_request_title=pull_request_title,
             pull_request_url=pull_request_url,
+            questions_unavailable_reason=questions_unavailable_reason,
             refresh=refresh,
             repository_full_name=repository_full_name,
             repository_id=repository_id,
