@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+import os
 from asyncio import sleep as async_sleep
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -72,6 +74,7 @@ from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
+from .coverage import CoverageFileSpec, build_coverage_request
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
@@ -478,6 +481,18 @@ class ProoflineClient(Operations):
             body=body,
         )
 
+    def upload_coverage_files(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        *,
+        tested_sha: str,
+        files: Sequence[CoverageFileSpec],
+        root: str | os.PathLike[str] | None = None,
+    ) -> CoverageUploadResponse:
+        body = build_coverage_request(tested_sha, files, root=root)
+        return self.upload_coverage_reports(organization_id, repository_id, body=body)
+
     def request_file_review(
         self, organization_id: UUID, repository_id: UUID, *, body: FileReviewRequest
     ) -> FileReviewResponse:
@@ -868,6 +883,18 @@ class AsyncProoflineClient(AsyncOperations):
             repository_id,
             body=body,
         )
+
+    async def upload_coverage_files(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        *,
+        tested_sha: str,
+        files: Sequence[CoverageFileSpec],
+        root: str | os.PathLike[str] | None = None,
+    ) -> CoverageUploadResponse:
+        body = await asyncio.to_thread(build_coverage_request, tested_sha, files, root=root)
+        return await self.upload_coverage_reports(organization_id, repository_id, body=body)
 
     async def request_file_review(
         self, organization_id: UUID, repository_id: UUID, *, body: FileReviewRequest
