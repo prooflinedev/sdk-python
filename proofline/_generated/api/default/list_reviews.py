@@ -15,6 +15,7 @@ def _get_kwargs(
     org_id: UUID,
     *,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -35,6 +36,13 @@ def _get_kwargs(
     else:
         json_attention = attention
     params["attention"] = json_attention
+
+    json_audits: None | str | Unset
+    if isinstance(audits, Unset):
+        json_audits = UNSET
+    else:
+        json_audits = audits
+    params["audits"] = json_audits
 
     json_author: None | str | Unset
     if isinstance(author, Unset):
@@ -152,6 +160,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -173,6 +182,8 @@ def sync_detailed(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
         author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
             ID. `mine`
              needs a person's sign-in or token.
@@ -204,6 +215,7 @@ def sync_detailed(
     kwargs = _get_kwargs(
         org_id=org_id,
         attention=attention,
+        audits=audits,
         author=author,
         cursor=cursor,
         environment=environment,
@@ -228,6 +240,7 @@ def sync(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -249,6 +262,8 @@ def sync(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
         author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
             ID. `mine`
              needs a person's sign-in or token.
@@ -281,6 +296,7 @@ def sync(
         org_id=org_id,
         client=client,
         attention=attention,
+        audits=audits,
         author=author,
         cursor=cursor,
         environment=environment,
@@ -299,6 +315,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -320,6 +337,8 @@ async def asyncio_detailed(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
         author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
             ID. `mine`
              needs a person's sign-in or token.
@@ -351,6 +370,7 @@ async def asyncio_detailed(
     kwargs = _get_kwargs(
         org_id=org_id,
         attention=attention,
+        audits=audits,
         author=author,
         cursor=cursor,
         environment=environment,
@@ -373,6 +393,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -394,6 +415,8 @@ async def asyncio(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
         author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
             ID. `mine`
              needs a person's sign-in or token.
@@ -427,6 +450,7 @@ async def asyncio(
             org_id=org_id,
             client=client,
             attention=attention,
+            audits=audits,
             author=author,
             cursor=cursor,
             environment=environment,

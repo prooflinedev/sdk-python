@@ -71,6 +71,10 @@ class CustomerReviewDetail:
              repositories, workflow runs, artifacts or deployments.
         trigger_origin (str): Who asked for this review: `AUTOMATIC`, `COMMAND`, `RERUN`, `MANUAL`,
              or `UNKNOWN` for a trigger key this build does not recognise.
+        audit_mode (None | str | Unset): The repository audit's mode, `CODE_ONLY` or `INFRASTRUCTURE_AWARE`,
+             when this `REVISION_SCAN` is an audit. An audit's findings are in its
+             audit report, not in `finding_count` or the review's assessments.
+             Null for every other review.
         base_branch_commit_sha (None | str | Unset): The base branch tip GitHub reported when the review was triggered,
              display metadata that differs from `base_commit_sha` when the base
              branch moved after the branch point.
@@ -253,6 +257,7 @@ class CustomerReviewDetail:
     stoppable: bool
     subjects: list[SubjectView]
     trigger_origin: str
+    audit_mode: None | str | Unset = UNSET
     base_branch_commit_sha: None | str | Unset = UNSET
     base_commit_sha: None | str | Unset = UNSET
     base_commit_url: None | str | Unset = UNSET
@@ -367,6 +372,12 @@ class CustomerReviewDetail:
             subjects.append(subjects_item)
 
         trigger_origin = self.trigger_origin
+
+        audit_mode: None | str | Unset
+        if isinstance(self.audit_mode, Unset):
+            audit_mode = UNSET
+        else:
+            audit_mode = self.audit_mode
 
         base_branch_commit_sha: None | str | Unset
         if isinstance(self.base_branch_commit_sha, Unset):
@@ -778,6 +789,8 @@ class CustomerReviewDetail:
                 "trigger_origin": trigger_origin,
             }
         )
+        if audit_mode is not UNSET:
+            field_dict["audit_mode"] = audit_mode
         if base_branch_commit_sha is not UNSET:
             field_dict["base_branch_commit_sha"] = base_branch_commit_sha
         if base_commit_sha is not UNSET:
@@ -963,6 +976,15 @@ class CustomerReviewDetail:
             subjects.append(subjects_item)
 
         trigger_origin = d.pop("trigger_origin")
+
+        def _parse_audit_mode(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        audit_mode = _parse_audit_mode(d.pop("audit_mode", UNSET))
 
         def _parse_base_branch_commit_sha(data: object) -> None | str | Unset:
             if data is None:
@@ -1729,6 +1751,7 @@ class CustomerReviewDetail:
             stoppable=stoppable,
             subjects=subjects,
             trigger_origin=trigger_origin,
+            audit_mode=audit_mode,
             base_branch_commit_sha=base_branch_commit_sha,
             base_commit_sha=base_commit_sha,
             base_commit_url=base_commit_url,

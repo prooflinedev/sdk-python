@@ -42,6 +42,10 @@ class ReviewSummary:
             `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
         trigger_origin (str): Who asked for this review: `AUTOMATIC`, `COMMAND`, `RERUN`, `MANUAL`,
              or `UNKNOWN` for a trigger key this build does not recognise.
+        audit_mode (None | str | Unset): The repository audit's mode, `CODE_ONLY` or `INFRASTRUCTURE_AWARE`,
+             when this `REVISION_SCAN` is an audit. An audit's findings are in its
+             audit report, not in `finding_count` or the review's assessments.
+             Null for every other review.
         completed_at (datetime.datetime | None | Unset): When the review reached a terminal status. Absent while it is
             still pending or running.
         counted_incomplete_causes (list[IncompleteCauseType0 | Literal['OUT_OF_CREDITS'] | Literal['UNKNOWN']] | Unset):
@@ -119,6 +123,7 @@ class ReviewSummary:
     publication: str
     status: str
     trigger_origin: str
+    audit_mode: None | str | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
     counted_incomplete_causes: (
         list[IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]] | Unset
@@ -171,6 +176,12 @@ class ReviewSummary:
         status = self.status
 
         trigger_origin = self.trigger_origin
+
+        audit_mode: None | str | Unset
+        if isinstance(self.audit_mode, Unset):
+            audit_mode = UNSET
+        else:
+            audit_mode = self.audit_mode
 
         completed_at: None | str | Unset
         if isinstance(self.completed_at, Unset):
@@ -356,6 +367,8 @@ class ReviewSummary:
                 "trigger_origin": trigger_origin,
             }
         )
+        if audit_mode is not UNSET:
+            field_dict["audit_mode"] = audit_mode
         if completed_at is not UNSET:
             field_dict["completed_at"] = completed_at
         if counted_incomplete_causes is not UNSET:
@@ -434,6 +447,15 @@ class ReviewSummary:
         status = d.pop("status")
 
         trigger_origin = d.pop("trigger_origin")
+
+        def _parse_audit_mode(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        audit_mode = _parse_audit_mode(d.pop("audit_mode", UNSET))
 
         def _parse_completed_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -769,6 +791,7 @@ class ReviewSummary:
             publication=publication,
             status=status,
             trigger_origin=trigger_origin,
+            audit_mode=audit_mode,
             completed_at=completed_at,
             counted_incomplete_causes=counted_incomplete_causes,
             current_head_commit_sha=current_head_commit_sha,
