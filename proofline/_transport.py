@@ -65,8 +65,8 @@ RunNowRefusal: TypeAlias = (
     | RunNowRefusalViewType9
 )
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
-# Set once a successful response reaches the client, so operation_errors can tell a
-# body Proofline returned from an error raised before any request left the process.
+# Set once any response reaches the client, so operation_errors can tell a failure
+# caused by what Proofline sent from an error raised before a request left the process.
 RESPONDED: ContextVar[bool] = ContextVar("proofline_response_received", default=False)
 
 
@@ -293,7 +293,8 @@ REFUSAL_SHAPES: dict[str, Callable[[dict[str, Any]], bool]] = {
 def problem(response: httpx2.Response, token: SecretStr) -> ProoflineError:
     try:
         body = response.json()
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
+        # Nesting deeper than the decoder allows still fits in 8 MiB.
         body = None
     if not isinstance(body, dict):
         return ProoflineError(
@@ -461,6 +462,7 @@ class RetryTransport(httpx2.BaseTransport):
                 response = self._inner.handle_request(request)
             finally:
                 IO_DEADLINE.reset(marker)
+            RESPONDED.set(True)
             if 300 <= response.status_code < 400:
                 response.close()
                 raise redirect_error(response.status_code) from None
@@ -472,7 +474,6 @@ class RetryTransport(httpx2.BaseTransport):
                 raise unreadable_problem(response.status_code)
             response.stream = DeadlineStream(response.stream, response.status_code, deadline)
             if 200 <= response.status_code < 300:
-                RESPONDED.set(True)
                 return response
             try:
                 response.read()
@@ -513,6 +514,7 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
                     response = await self._inner.handle_async_request(request)
             except TimeoutError:
                 raise httpx2.ReadTimeout("The request deadline expired.") from None
+            RESPONDED.set(True)
             if 300 <= response.status_code < 400:
                 await response.aclose()
                 raise redirect_error(response.status_code) from None
@@ -524,7 +526,6 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
                 raise unreadable_problem(response.status_code)
             response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
             if 200 <= response.status_code < 300:
-                RESPONDED.set(True)
                 return response
             try:
                 await response.aread()
