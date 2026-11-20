@@ -61,8 +61,10 @@ def sync_detailed(
 
      Stops the holder's own pending or running withheld patch, commit or named-file review. Requires a
     personal or CLI device token with live GitHub read access to the review's repository. Organization,
-    CI job and MCP OAuth tokens cannot stop reviews. The stopped review retains its findings and exact
-    code identity; requesting the same input returns that stopped review.
+    CI job and MCP OAuth tokens cannot stop reviews. A repository audit is refused on this route: only a
+    person with live GitHub write access stops it, through the audit stop, and no token or platform
+    authority does. The stopped review retains its findings and exact code identity; requesting the same
+    input returns that stopped review.
 
     Args:
         org_id (UUID):
@@ -98,8 +100,10 @@ def sync(
 
      Stops the holder's own pending or running withheld patch, commit or named-file review. Requires a
     personal or CLI device token with live GitHub read access to the review's repository. Organization,
-    CI job and MCP OAuth tokens cannot stop reviews. The stopped review retains its findings and exact
-    code identity; requesting the same input returns that stopped review.
+    CI job and MCP OAuth tokens cannot stop reviews. A repository audit is refused on this route: only a
+    person with live GitHub write access stops it, through the audit stop, and no token or platform
+    authority does. The stopped review retains its findings and exact code identity; requesting the same
+    input returns that stopped review.
 
     Args:
         org_id (UUID):
@@ -130,8 +134,10 @@ async def asyncio_detailed(
 
      Stops the holder's own pending or running withheld patch, commit or named-file review. Requires a
     personal or CLI device token with live GitHub read access to the review's repository. Organization,
-    CI job and MCP OAuth tokens cannot stop reviews. The stopped review retains its findings and exact
-    code identity; requesting the same input returns that stopped review.
+    CI job and MCP OAuth tokens cannot stop reviews. A repository audit is refused on this route: only a
+    person with live GitHub write access stops it, through the audit stop, and no token or platform
+    authority does. The stopped review retains its findings and exact code identity; requesting the same
+    input returns that stopped review.
 
     Args:
         org_id (UUID):
@@ -165,8 +171,10 @@ async def asyncio(
 
      Stops the holder's own pending or running withheld patch, commit or named-file review. Requires a
     personal or CLI device token with live GitHub read access to the review's repository. Organization,
-    CI job and MCP OAuth tokens cannot stop reviews. The stopped review retains its findings and exact
-    code identity; requesting the same input returns that stopped review.
+    CI job and MCP OAuth tokens cannot stop reviews. A repository audit is refused on this route: only a
+    person with live GitHub write access stops it, through the audit stop, and no token or platform
+    authority does. The stopped review retains its findings and exact code identity; requesting the same
+    input returns that stopped review.
 
     Args:
         org_id (UUID):

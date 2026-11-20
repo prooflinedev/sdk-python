@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from ..models.refresh_view import RefreshView
     from ..models.related_review import RelatedReview
     from ..models.review_actions import ReviewActions
+    from ..models.review_cost_funding import ReviewCostFunding
     from ..models.review_diff_stats import ReviewDiffStats
     from ..models.review_investigation_finding import ReviewInvestigationFinding
     from ..models.review_open_items import ReviewOpenItems
@@ -107,6 +108,9 @@ class CustomerReviewDetail:
              head GitHub does not have.
         completed_at (datetime.datetime | None | Unset): When the review reached a terminal status. Absent while it is
             still pending or running.
+        cost_funding (None | ReviewCostFunding | Unset): What paid for `cost_microcredits`, read from each debit's own
+            funding
+             records. Present exactly when `cost_microcredits` is.
         cost_microcredits (int | None | Unset): The credits this run was charged so far, in microcredits, whoever
              paid: the plan, the free review month or the organization's credits.
              Null for a caller who is not a member of the organization.
@@ -276,6 +280,7 @@ class CustomerReviewDetail:
     code_assessment: CustomerCodeAssessment | None | Unset = UNSET
     compare_url: None | str | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
+    cost_funding: None | ReviewCostFunding | Unset = UNSET
     cost_microcredits: int | None | Unset = UNSET
     counted_incomplete_causes: (
         list[IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]] | Unset
@@ -339,6 +344,7 @@ class CustomerReviewDetail:
         from ..models.provider_wait import ProviderWait  # noqa: PLC0415
         from ..models.pull_request_merge_gate import PullRequestMergeGate  # noqa: PLC0415
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
+        from ..models.review_cost_funding import ReviewCostFunding  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
         from ..models.run_progress import RunProgress  # noqa: PLC0415
@@ -456,6 +462,14 @@ class CustomerReviewDetail:
             completed_at = self.completed_at.isoformat()
         else:
             completed_at = self.completed_at
+
+        cost_funding: dict[str, Any] | None | Unset
+        if isinstance(self.cost_funding, Unset):
+            cost_funding = UNSET
+        elif isinstance(self.cost_funding, ReviewCostFunding):
+            cost_funding = self.cost_funding.to_dict()
+        else:
+            cost_funding = self.cost_funding
 
         cost_microcredits: int | None | Unset
         if isinstance(self.cost_microcredits, Unset):
@@ -829,6 +843,8 @@ class CustomerReviewDetail:
             field_dict["compare_url"] = compare_url
         if completed_at is not UNSET:
             field_dict["completed_at"] = completed_at
+        if cost_funding is not UNSET:
+            field_dict["cost_funding"] = cost_funding
         if cost_microcredits is not UNSET:
             field_dict["cost_microcredits"] = cost_microcredits
         if counted_incomplete_causes is not UNSET:
@@ -945,6 +961,7 @@ class CustomerReviewDetail:
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.related_review import RelatedReview  # noqa: PLC0415
         from ..models.review_actions import ReviewActions  # noqa: PLC0415
+        from ..models.review_cost_funding import ReviewCostFunding  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_investigation_finding import ReviewInvestigationFinding  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
@@ -1130,6 +1147,23 @@ class CustomerReviewDetail:
             return cast(datetime.datetime | None | Unset, data)
 
         completed_at = _parse_completed_at(d.pop("completed_at", UNSET))
+
+        def _parse_cost_funding(data: object) -> None | ReviewCostFunding | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                cost_funding_type_0 = ReviewCostFunding.from_dict(data)
+
+                return cost_funding_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | ReviewCostFunding | Unset, data)
+
+        cost_funding = _parse_cost_funding(d.pop("cost_funding", UNSET))
 
         def _parse_cost_microcredits(data: object) -> int | None | Unset:
             if data is None:
@@ -1800,6 +1834,7 @@ class CustomerReviewDetail:
             code_assessment=code_assessment,
             compare_url=compare_url,
             completed_at=completed_at,
+            cost_funding=cost_funding,
             cost_microcredits=cost_microcredits,
             counted_incomplete_causes=counted_incomplete_causes,
             current_head_commit_sha=current_head_commit_sha,
