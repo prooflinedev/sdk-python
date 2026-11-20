@@ -17,7 +17,7 @@ from typing import Any, TypeAlias, cast
 from urllib.parse import urlsplit
 
 import anyio
-import httpx
+import httpx2
 from pydantic import SecretStr
 
 from ._generated.models import (
@@ -38,7 +38,7 @@ from ._generated.types import Unset
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
 
-VERSION = "6.4.0"
+VERSION = "7.0.0"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 FULL_WEEKDAY = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
@@ -67,11 +67,13 @@ RunNowRefusal: TypeAlias = (
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
 
 
-class BearerAuth(httpx.Auth):
+class BearerAuth(httpx2.Auth):
     def __init__(self, token: SecretStr) -> None:
         self._token = token
 
-    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+    def auth_flow(
+        self, request: httpx2.Request
+    ) -> Generator[httpx2.Request, httpx2.Response, None]:
         request.headers.pop("Cookie", None)
         request.headers["Authorization"] = f"Bearer {self._token.get_secret_value()}"
         yield request
@@ -138,9 +140,9 @@ def base_url(value: str) -> str:
             loopback = False
         if parts.scheme != "https" and not (parts.scheme == "http" and loopback):
             raise ValueError
-        httpx.URL(value)
+        httpx2.URL(value)
         parts.port
-    except (ValueError, httpx.InvalidURL):
+    except (ValueError, httpx2.InvalidURL):
         raise ValueError("Use an HTTPS origin, or HTTP with a literal loopback address.") from None
     return value.rstrip("/")
 
@@ -151,8 +153,8 @@ def invalid_response() -> ProoflineError:
     )
 
 
-def network_error(error: httpx.HTTPError) -> ProoflineError:
-    if isinstance(error, httpx.TimeoutException):
+def network_error(error: httpx2.HTTPError) -> ProoflineError:
+    if isinstance(error, httpx2.TimeoutException):
         return timeout_error()
     return ProoflineError(
         0, "urn:proofline:sdk:transport-unavailable", "Could not reach the Proofline API."
@@ -165,7 +167,7 @@ def operation_errors() -> Iterator[None]:
         yield
     except ProoflineError:
         raise
-    except httpx.HTTPError as error:
+    except httpx2.HTTPError as error:
         raise network_error(error) from None
     except Exception:
         raise invalid_response() from None
@@ -180,7 +182,7 @@ def remaining() -> float | None:
     return None if deadline is None else max(0.0, deadline - monotonic())
 
 
-def limit_timeout(request: httpx.Request) -> None:
+def limit_timeout(request: httpx2.Request) -> None:
     budget = remaining()
     if budget is None:
         return
@@ -274,7 +276,7 @@ REFUSAL_SHAPES: dict[str, Callable[[dict[str, Any]], bool]] = {
 }
 
 
-def problem(response: httpx.Response, token: SecretStr) -> ProoflineError:
+def problem(response: httpx2.Response, token: SecretStr) -> ProoflineError:
     try:
         body = response.json()
     except (ValueError, UnicodeError):
@@ -345,7 +347,7 @@ def unreadable_problem(status: int) -> ProoflineError:
     return ProoflineError(status, "about:blank", "Proofline returned an unreadable HTTP problem.")
 
 
-def encoded_response(response: httpx.Response) -> bool:
+def encoded_response(response: httpx2.Response) -> bool:
     return response.headers.get("Content-Encoding", "identity").strip().lower() != "identity"
 
 
@@ -378,12 +380,12 @@ def io_deadline(deadline: float) -> float:
 def io_budget(deadline: float) -> float:
     budget = io_deadline(deadline) - monotonic()
     if budget <= 0:
-        raise httpx.ReadTimeout("The request deadline expired.")
+        raise httpx2.ReadTimeout("The request deadline expired.")
     return budget
 
 
-class DeadlineStream(httpx.SyncByteStream):
-    def __init__(self, inner: httpx.SyncByteStream, status: int, deadline: float) -> None:
+class DeadlineStream(httpx2.SyncByteStream):
+    def __init__(self, inner: httpx2.SyncByteStream, status: int, deadline: float) -> None:
         self._inner = inner
         self._status = status
         self._deadline = deadline
@@ -404,8 +406,8 @@ class DeadlineStream(httpx.SyncByteStream):
         self._inner.close()
 
 
-class AsyncDeadlineStream(httpx.AsyncByteStream):
-    def __init__(self, inner: httpx.AsyncByteStream, status: int, deadline: float) -> None:
+class AsyncDeadlineStream(httpx2.AsyncByteStream):
+    def __init__(self, inner: httpx2.AsyncByteStream, status: int, deadline: float) -> None:
         self._inner = inner
         self._status = status
         self._deadline = deadline
@@ -420,7 +422,7 @@ class AsyncDeadlineStream(httpx.AsyncByteStream):
             except StopAsyncIteration:
                 break
             except TimeoutError:
-                raise httpx.ReadTimeout("The request deadline expired.") from None
+                raise httpx2.ReadTimeout("The request deadline expired.") from None
             size += len(chunk)
             check_stream(size, self._status, self._deadline)
             yield chunk
@@ -430,13 +432,13 @@ class AsyncDeadlineStream(httpx.AsyncByteStream):
         await self._inner.aclose()
 
 
-class RetryTransport(httpx.BaseTransport):
+class RetryTransport(httpx2.BaseTransport):
     def __init__(self, token: SecretStr, timeout: float) -> None:
         self._token = token
         self._timeout = timeout
         self._inner = SyncHTTPTransport()
 
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
             limit_timeout(request)
             deadline = monotonic() + self._timeout
@@ -451,7 +453,7 @@ class RetryTransport(httpx.BaseTransport):
             if encoded_response(response):
                 response.close()
                 raise encoding_error(response.status_code) from None
-            if not isinstance(response.stream, httpx.SyncByteStream):
+            if not isinstance(response.stream, httpx2.SyncByteStream):
                 response.close()
                 raise unreadable_problem(response.status_code)
             response.stream = DeadlineStream(response.stream, response.status_code, deadline)
@@ -460,7 +462,7 @@ class RetryTransport(httpx.BaseTransport):
             try:
                 response.read()
                 error = problem(response, self._token)
-            except httpx.HTTPError:
+            except httpx2.HTTPError:
                 if response.status_code in (429, 503):
                     raise
                 error = unreadable_problem(response.status_code)
@@ -481,13 +483,13 @@ class RetryTransport(httpx.BaseTransport):
         self._inner.close()
 
 
-class AsyncRetryTransport(httpx.AsyncBaseTransport):
+class AsyncRetryTransport(httpx2.AsyncBaseTransport):
     def __init__(self, token: SecretStr, timeout: float) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = httpx.AsyncHTTPTransport()
+        self._inner = httpx2.AsyncHTTPTransport()
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
             limit_timeout(request)
             deadline = monotonic() + self._timeout
@@ -495,14 +497,14 @@ class AsyncRetryTransport(httpx.AsyncBaseTransport):
                 with anyio.fail_after(io_budget(deadline)):
                     response = await self._inner.handle_async_request(request)
             except TimeoutError:
-                raise httpx.ReadTimeout("The request deadline expired.") from None
+                raise httpx2.ReadTimeout("The request deadline expired.") from None
             if 300 <= response.status_code < 400:
                 await response.aclose()
                 raise redirect_error(response.status_code) from None
             if encoded_response(response):
                 await response.aclose()
                 raise encoding_error(response.status_code) from None
-            if not isinstance(response.stream, httpx.AsyncByteStream):
+            if not isinstance(response.stream, httpx2.AsyncByteStream):
                 await response.aclose()
                 raise unreadable_problem(response.status_code)
             response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
@@ -511,7 +513,7 @@ class AsyncRetryTransport(httpx.AsyncBaseTransport):
             try:
                 await response.aread()
                 error = problem(response, self._token)
-            except httpx.HTTPError:
+            except httpx2.HTTPError:
                 if response.status_code in (429, 503):
                     raise
                 error = unreadable_problem(response.status_code)

@@ -83,6 +83,7 @@ from .finding_validations_export_row import FindingValidationsExportRow
 from .findings_export_row import FindingsExportRow
 from .gate_status import GateStatus
 from .incomplete_cause_type_0 import IncompleteCauseType0
+from .linked_issue_capture import LinkedIssueCapture
 from .local_reverification import LocalReverification
 from .local_reverification_outcome import LocalReverificationOutcome
 from .matched_local_finding import MatchedLocalFinding
@@ -250,6 +251,7 @@ __all__ = (
     "FindingValidationsExportRow",
     "GateStatus",
     "IncompleteCauseType0",
+    "LinkedIssueCapture",
     "LocalReverification",
     "LocalReverificationOutcome",
     "MatchedLocalFinding",

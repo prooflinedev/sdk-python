@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
-import httpx
+import httpx2
 import pytest
 from pydantic import SecretStr
 
@@ -1471,22 +1471,24 @@ async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
     with monkeypatch.context() as patch:
         clock = Clock(patch)
         sync_request = _sync_http.Transport.handle_request
-        async_request = httpx.AsyncHTTPTransport.handle_async_request
+        async_request = httpx2.AsyncHTTPTransport.handle_async_request
 
-        def expire_sync(transport: _sync_http.Transport, request: httpx.Request) -> httpx.Response:
+        def expire_sync(
+            transport: _sync_http.Transport, request: httpx2.Request
+        ) -> httpx2.Response:
             response = sync_request(transport, request)
             clock.now += 10
             return response
 
         async def expire_async(
-            transport: httpx.AsyncHTTPTransport, request: httpx.Request
-        ) -> httpx.Response:
+            transport: httpx2.AsyncHTTPTransport, request: httpx2.Request
+        ) -> httpx2.Response:
             response = await async_request(transport, request)
             clock.now += 10
             return response
 
         patch.setattr(_sync_http.Transport, "handle_request", expire_sync)
-        patch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", expire_async)
+        patch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", expire_async)
         with Server(lambda request, index: Reply(status, body, split=8, pause=0.2)) as server:
             async with session(mode, server.url) as client:
                 if status == 200:
@@ -1530,22 +1532,22 @@ async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
     attempts = 0
     with monkeypatch.context() as patch:
         sync_request = _sync_http.Transport.handle_request
-        async_request = httpx.AsyncHTTPTransport.handle_async_request
+        async_request = httpx2.AsyncHTTPTransport.handle_async_request
 
-        def count_sync(transport: _sync_http.Transport, request: httpx.Request) -> httpx.Response:
+        def count_sync(transport: _sync_http.Transport, request: httpx2.Request) -> httpx2.Response:
             nonlocal attempts
             attempts += 1
             return sync_request(transport, request)
 
         async def count_async(
-            transport: httpx.AsyncHTTPTransport, request: httpx.Request
-        ) -> httpx.Response:
+            transport: httpx2.AsyncHTTPTransport, request: httpx2.Request
+        ) -> httpx2.Response:
             nonlocal attempts
             attempts += 1
             return await async_request(transport, request)
 
         patch.setattr(_sync_http.Transport, "handle_request", count_sync)
-        patch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", count_async)
+        patch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", count_async)
         with Server(lambda request, index: Reply(status, body, header_pause=2.0)) as server:
             async with session(mode, server.url) as client:
                 started = time.monotonic()
@@ -1660,7 +1662,7 @@ def test_sync_transport_connects_to_each_resolved_address_under_the_original_hos
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
     with Server(lambda request, index: Reply(body=finding())) as server:
         port = server.url.rsplit(":", 1)[1]
-        with httpx.Client(transport=_sync_http.Transport()) as client:
+        with httpx2.Client(transport=_sync_http.Transport()) as client:
             response = client.get(f"http://service.proofline.invalid:{port}/finding")
             assert response.json()["id"] == str(FINDING)
             assert server.requests[0].headers["Host"] == f"service.proofline.invalid:{port}"
@@ -1670,10 +1672,10 @@ def test_sync_transport_connects_to_each_resolved_address_under_the_original_hos
             assert server.requests[1].headers["Host"] == f"scoped.proofline.invalid:{port}"
             assert ("scoped.proofline.invalid", "proofline-dns") in lookups
             assert scoped_connections == ["fe80::1%41", "fe80::1%42"]
-            with pytest.raises(httpx.TransportError) as raised:
+            with pytest.raises(httpx2.TransportError) as raised:
                 client.get(f"http://missing.proofline.invalid:{port}/finding")
-            assert not isinstance(raised.value, httpx.TimeoutException)
-            with pytest.raises(httpx.TransportError):
+            assert not isinstance(raised.value, httpx2.TimeoutException)
+            with pytest.raises(httpx2.TransportError):
                 client.get(f"http://127.0.0.1:{closed_port}/finding")
         assert len(server.requests) == 2
 

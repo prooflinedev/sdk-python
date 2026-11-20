@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, NotRequired, TypedDict, cast
 
-import httpx
+import httpx2
 
 from ._transport import ProoflineError
 
@@ -39,7 +39,7 @@ def _body(method: str, params: dict[str, Any] | None, identity: int | None) -> b
     return data
 
 
-def _decode(response: httpx.Response, identity: int | None) -> dict[str, Any]:
+def _decode(response: httpx2.Response, identity: int | None) -> dict[str, Any]:
     if (
         response.status_code != (202 if identity is None else 200)
         or "mcp-session-id" in response.headers
@@ -92,7 +92,7 @@ def _repository(repository: str, commit: str | None) -> dict[str, Any]:
 class McpTools:
     """Knowledge operations preserve MCP result wrappers and isError refusals."""
 
-    def __init__(self, http: httpx.Client) -> None:
+    def __init__(self, http: httpx2.Client) -> None:
         self._http = http
 
     def _call(
@@ -128,7 +128,7 @@ class McpTools:
                 headers["MCP-Protocol-Version"] = PROTOCOL
             try:
                 response = self._http.post("/mcp", content=data, headers=headers)
-            except httpx.HTTPError:
+            except httpx2.HTTPError:
                 raise ProoflineError(
                     0, "urn:proofline:sdk:transport", "MCP transport failed."
                 ) from None
@@ -141,7 +141,7 @@ class McpTools:
 class AsyncMcpTools:
     """Knowledge operations preserve MCP result wrappers and isError refusals."""
 
-    def __init__(self, http: httpx.AsyncClient) -> None:
+    def __init__(self, http: httpx2.AsyncClient) -> None:
         self._http = http
 
     async def _call(
@@ -177,7 +177,7 @@ class AsyncMcpTools:
                 headers["MCP-Protocol-Version"] = PROTOCOL
             try:
                 response = await self._http.post("/mcp", content=data, headers=headers)
-            except httpx.HTTPError:
+            except httpx2.HTTPError:
                 raise ProoflineError(
                     0, "urn:proofline:sdk:transport", "MCP transport failed."
                 ) from None

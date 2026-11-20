@@ -18,14 +18,16 @@ class EnvironmentCheck:
 
        Attributes:
            environment_display_name (str): The environment's display name.
+           environment_external_key (str): The environment's key, which names its console pages.
            state (Literal['CHECKED'] | Literal['CHECKING'] | Literal['NOT_APPLICABLE'] | Literal['NOT_CHECKED']):
-           reason (Literal['ENDED'] | Literal['FORK_PULL_REQUEST'] | Literal['NOT_COVERED'] |
-               Literal['PULL_REQUEST_REVIEWS_OFF'] | Literal['UNFINISHED'] | None | Unset): Why the environment was not checked
-               or does not apply. Null when it
+           reason (Literal['ENDED'] | Literal['FORK_PULL_REQUEST'] | Literal['NO_CLOUD_ACCOUNT'] | Literal['NOT_COVERED'] |
+               Literal['PULL_REQUEST_REVIEWS_OFF'] | Literal['READS_REFUSED'] | Literal['UNFINISHED'] | None | Unset): Why the
+               environment was not checked or does not apply. Null when it
                 was checked or its check is still running.
     """
 
     environment_display_name: str
+    environment_external_key: str
     state: (
         Literal["CHECKED"]
         | Literal["CHECKING"]
@@ -35,8 +37,10 @@ class EnvironmentCheck:
     reason: (
         Literal["ENDED"]
         | Literal["FORK_PULL_REQUEST"]
+        | Literal["NO_CLOUD_ACCOUNT"]
         | Literal["NOT_COVERED"]
         | Literal["PULL_REQUEST_REVIEWS_OFF"]
+        | Literal["READS_REFUSED"]
         | Literal["UNFINISHED"]
         | None
         | Unset
@@ -45,6 +49,8 @@ class EnvironmentCheck:
 
     def to_dict(self) -> dict[str, Any]:
         environment_display_name = self.environment_display_name
+
+        environment_external_key = self.environment_external_key
 
         state: (
             Literal["CHECKED"]
@@ -57,8 +63,10 @@ class EnvironmentCheck:
         reason: (
             Literal["ENDED"]
             | Literal["FORK_PULL_REQUEST"]
+            | Literal["NO_CLOUD_ACCOUNT"]
             | Literal["NOT_COVERED"]
             | Literal["PULL_REQUEST_REVIEWS_OFF"]
+            | Literal["READS_REFUSED"]
             | Literal["UNFINISHED"]
             | None
             | Unset
@@ -73,6 +81,7 @@ class EnvironmentCheck:
         field_dict.update(
             {
                 "environment_display_name": environment_display_name,
+                "environment_external_key": environment_external_key,
                 "state": state,
             }
         )
@@ -85,6 +94,8 @@ class EnvironmentCheck:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
         environment_display_name = d.pop("environment_display_name")
+
+        environment_external_key = d.pop("environment_external_key")
 
         def _parse_state(
             data: object,
@@ -145,8 +156,10 @@ class EnvironmentCheck:
         ) -> (
             Literal["ENDED"]
             | Literal["FORK_PULL_REQUEST"]
+            | Literal["NO_CLOUD_ACCOUNT"]
             | Literal["NOT_COVERED"]
             | Literal["PULL_REQUEST_REVIEWS_OFF"]
+            | Literal["READS_REFUSED"]
             | Literal["UNFINISHED"]
             | None
             | Unset
@@ -169,60 +182,88 @@ class EnvironmentCheck:
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             try:
-                if not (type(data) is str and data == "FORK_PULL_REQUEST"):
+                if not (type(data) is str and data == "NO_CLOUD_ACCOUNT"):
                     raise TypeError()
                 componentsschemas_environment_check_reason_type_1 = cast(
-                    Literal["FORK_PULL_REQUEST"], data
+                    Literal["NO_CLOUD_ACCOUNT"], data
                 )
-                if componentsschemas_environment_check_reason_type_1 != "FORK_PULL_REQUEST":
+                if componentsschemas_environment_check_reason_type_1 != "NO_CLOUD_ACCOUNT":
                     raise ValueError(
-                        f"/components/schemas/EnvironmentCheckReason_type_1 must match const 'FORK_PULL_REQUEST', got '{componentsschemas_environment_check_reason_type_1}'"
+                        f"/components/schemas/EnvironmentCheckReason_type_1 must match const 'NO_CLOUD_ACCOUNT', got '{componentsschemas_environment_check_reason_type_1}'"
                     )
                 return componentsschemas_environment_check_reason_type_1
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             try:
-                if not (type(data) is str and data == "UNFINISHED"):
+                if not (type(data) is str and data == "READS_REFUSED"):
                     raise TypeError()
                 componentsschemas_environment_check_reason_type_2 = cast(
-                    Literal["UNFINISHED"], data
+                    Literal["READS_REFUSED"], data
                 )
-                if componentsschemas_environment_check_reason_type_2 != "UNFINISHED":
+                if componentsschemas_environment_check_reason_type_2 != "READS_REFUSED":
                     raise ValueError(
-                        f"/components/schemas/EnvironmentCheckReason_type_2 must match const 'UNFINISHED', got '{componentsschemas_environment_check_reason_type_2}'"
+                        f"/components/schemas/EnvironmentCheckReason_type_2 must match const 'READS_REFUSED', got '{componentsschemas_environment_check_reason_type_2}'"
                     )
                 return componentsschemas_environment_check_reason_type_2
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             try:
-                if not (type(data) is str and data == "ENDED"):
+                if not (type(data) is str and data == "FORK_PULL_REQUEST"):
                     raise TypeError()
-                componentsschemas_environment_check_reason_type_3 = cast(Literal["ENDED"], data)
-                if componentsschemas_environment_check_reason_type_3 != "ENDED":
+                componentsschemas_environment_check_reason_type_3 = cast(
+                    Literal["FORK_PULL_REQUEST"], data
+                )
+                if componentsschemas_environment_check_reason_type_3 != "FORK_PULL_REQUEST":
                     raise ValueError(
-                        f"/components/schemas/EnvironmentCheckReason_type_3 must match const 'ENDED', got '{componentsschemas_environment_check_reason_type_3}'"
+                        f"/components/schemas/EnvironmentCheckReason_type_3 must match const 'FORK_PULL_REQUEST', got '{componentsschemas_environment_check_reason_type_3}'"
                     )
                 return componentsschemas_environment_check_reason_type_3
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             try:
-                if not (type(data) is str and data == "PULL_REQUEST_REVIEWS_OFF"):
+                if not (type(data) is str and data == "UNFINISHED"):
                     raise TypeError()
                 componentsschemas_environment_check_reason_type_4 = cast(
-                    Literal["PULL_REQUEST_REVIEWS_OFF"], data
+                    Literal["UNFINISHED"], data
                 )
-                if componentsschemas_environment_check_reason_type_4 != "PULL_REQUEST_REVIEWS_OFF":
+                if componentsschemas_environment_check_reason_type_4 != "UNFINISHED":
                     raise ValueError(
-                        f"/components/schemas/EnvironmentCheckReason_type_4 must match const 'PULL_REQUEST_REVIEWS_OFF', got '{componentsschemas_environment_check_reason_type_4}'"
+                        f"/components/schemas/EnvironmentCheckReason_type_4 must match const 'UNFINISHED', got '{componentsschemas_environment_check_reason_type_4}'"
                     )
                 return componentsschemas_environment_check_reason_type_4
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not (type(data) is str and data == "ENDED"):
+                    raise TypeError()
+                componentsschemas_environment_check_reason_type_5 = cast(Literal["ENDED"], data)
+                if componentsschemas_environment_check_reason_type_5 != "ENDED":
+                    raise ValueError(
+                        f"/components/schemas/EnvironmentCheckReason_type_5 must match const 'ENDED', got '{componentsschemas_environment_check_reason_type_5}'"
+                    )
+                return componentsschemas_environment_check_reason_type_5
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not (type(data) is str and data == "PULL_REQUEST_REVIEWS_OFF"):
+                    raise TypeError()
+                componentsschemas_environment_check_reason_type_6 = cast(
+                    Literal["PULL_REQUEST_REVIEWS_OFF"], data
+                )
+                if componentsschemas_environment_check_reason_type_6 != "PULL_REQUEST_REVIEWS_OFF":
+                    raise ValueError(
+                        f"/components/schemas/EnvironmentCheckReason_type_6 must match const 'PULL_REQUEST_REVIEWS_OFF', got '{componentsschemas_environment_check_reason_type_6}'"
+                    )
+                return componentsschemas_environment_check_reason_type_6
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             return cast(
                 Literal["ENDED"]
                 | Literal["FORK_PULL_REQUEST"]
+                | Literal["NO_CLOUD_ACCOUNT"]
                 | Literal["NOT_COVERED"]
                 | Literal["PULL_REQUEST_REVIEWS_OFF"]
+                | Literal["READS_REFUSED"]
                 | Literal["UNFINISHED"]
                 | None
                 | Unset,
@@ -233,6 +274,7 @@ class EnvironmentCheck:
 
         environment_check = cls(
             environment_display_name=environment_display_name,
+            environment_external_key=environment_external_key,
             state=state,
             reason=reason,
         )

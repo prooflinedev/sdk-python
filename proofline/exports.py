@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-import httpx
+import httpx2
 
 from ._csv import parse_csv
 from ._transport import MAX_RESPONSE_BYTES, ProoflineError
@@ -31,7 +31,7 @@ class ExportPage:
 
 
 def decode_export(
-    response: httpx.Response, format: ExportFormat, dataset: ExportDataset
+    response: httpx2.Response, format: ExportFormat, dataset: ExportDataset
 ) -> ExportPage:
     try:
         if len(response.content) > MAX_RESPONSE_BYTES:

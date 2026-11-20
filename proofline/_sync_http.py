@@ -17,8 +17,8 @@ from contextvars import ContextVar
 from time import monotonic
 from typing import Any
 
-import httpcore
-import httpx
+import httpcore2
+import httpx2
 
 IO_DEADLINE: ContextVar[float | None] = ContextVar("proofline_io_deadline", default=None)
 
@@ -29,7 +29,7 @@ def bounded_timeout(timeout: float | None) -> float | None:
         return timeout
     remaining = deadline - monotonic()
     if remaining <= 0:
-        raise httpcore.ReadTimeout("The request deadline expired.")
+        raise httpcore2.ReadTimeout("The request deadline expired.")
     return remaining if timeout is None else min(timeout, remaining)
 
 
@@ -57,9 +57,9 @@ class Lookup:
 
     def addresses(self, timeout: float | None) -> list[str]:
         if not self._finished.wait(timeout):
-            raise httpcore.ConnectTimeout("The host name lookup did not finish in time.")
+            raise httpcore2.ConnectTimeout("The host name lookup did not finish in time.")
         if not self._addresses:
-            raise httpcore.ConnectError("The host name did not resolve.")
+            raise httpcore2.ConnectError("The host name did not resolve.")
         return self._addresses
 
 
@@ -73,8 +73,8 @@ def resolve(host: str, port: int, timeout: float | None) -> list[str]:
     return [host]
 
 
-class NetworkStream(httpcore.NetworkStream):
-    def __init__(self, inner: httpcore.NetworkStream) -> None:
+class NetworkStream(httpcore2.NetworkStream):
+    def __init__(self, inner: httpcore2.NetworkStream) -> None:
         self._inner = inner
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
@@ -91,7 +91,7 @@ class NetworkStream(httpcore.NetworkStream):
         ssl_context: ssl.SSLContext,
         server_hostname: str | None = None,
         timeout: float | None = None,
-    ) -> httpcore.NetworkStream:
+    ) -> httpcore2.NetworkStream:
         return NetworkStream(
             self._inner.start_tls(ssl_context, server_hostname, bounded_timeout(timeout))
         )
@@ -100,7 +100,7 @@ class NetworkStream(httpcore.NetworkStream):
         return self._inner.get_extra_info(info)
 
 
-class NetworkBackend(httpcore.SyncBackend):
+class NetworkBackend(httpcore2.SyncBackend):
     def connect_tcp(
         self,
         host: str,
@@ -108,32 +108,32 @@ class NetworkBackend(httpcore.SyncBackend):
         timeout: float | None = None,
         local_address: str | None = None,
         socket_options: Iterable[Any] | None = None,
-    ) -> httpcore.NetworkStream:
-        failure: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
+    ) -> httpcore2.NetworkStream:
+        failure: httpcore2.ConnectError | httpcore2.ConnectTimeout | None = None
         for address in resolve(host, port, bounded_timeout(timeout)):
             try:
                 stream = super().connect_tcp(
                     address, port, bounded_timeout(timeout), local_address, socket_options
                 )
-            except (httpcore.ConnectError, httpcore.ConnectTimeout) as error:
+            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as error:
                 failure = error
             else:
                 return NetworkStream(stream)
-        raise failure or httpcore.ConnectError("The host name did not resolve.")
+        raise failure or httpcore2.ConnectError("The host name did not resolve.")
 
 
 @contextmanager
 def mapped_errors() -> Iterator[None]:
     try:
         yield
-    except httpcore.TimeoutException:
-        raise httpx.ReadTimeout("The request deadline expired.") from None
-    except (httpcore.NetworkError, httpcore.ProtocolError):
-        raise httpx.TransportError("The HTTP transport failed.") from None
+    except httpcore2.TimeoutException:
+        raise httpx2.ReadTimeout("The request deadline expired.") from None
+    except (httpcore2.NetworkError, httpcore2.ProtocolError):
+        raise httpx2.TransportError("The HTTP transport failed.") from None
 
 
-class ResponseStream(httpx.SyncByteStream):
-    def __init__(self, response: httpcore.Response) -> None:
+class ResponseStream(httpx2.SyncByteStream):
+    def __init__(self, response: httpcore2.Response) -> None:
         self._response = response
 
     def __iter__(self) -> Iterator[bytes]:
@@ -145,22 +145,22 @@ class ResponseStream(httpx.SyncByteStream):
             self._response.close()
 
 
-class Transport(httpx.BaseTransport):
+class Transport(httpx2.BaseTransport):
     def __init__(self) -> None:
-        self._pool = httpcore.ConnectionPool(
-            ssl_context=httpcore.default_ssl_context(),
+        self._pool = httpcore2.ConnectionPool(
+            ssl_context=httpcore2.default_ssl_context(),
             network_backend=NetworkBackend(),
             max_connections=100,
             max_keepalive_connections=20,
             keepalive_expiry=5,
         )
 
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if not isinstance(request.stream, httpx.SyncByteStream):
-            raise httpx.TransportError("The synchronous request has an invalid stream.")
-        core_request = httpcore.Request(
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        if not isinstance(request.stream, httpx2.SyncByteStream):
+            raise httpx2.TransportError("The synchronous request has an invalid stream.")
+        core_request = httpcore2.Request(
             method=request.method,
-            url=httpcore.URL(
+            url=httpcore2.URL(
                 scheme=request.url.raw_scheme,
                 host=request.url.raw_host,
                 port=request.url.port,
@@ -172,7 +172,7 @@ class Transport(httpx.BaseTransport):
         )
         with mapped_errors():
             response = self._pool.handle_request(core_request)
-        return httpx.Response(
+        return httpx2.Response(
             response.status,
             headers=response.headers,
             stream=ResponseStream(response),

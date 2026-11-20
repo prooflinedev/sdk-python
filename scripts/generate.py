@@ -13,7 +13,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-VERSION = "0.29.1"
+VERSION = "0.30.0"
 RUFF_VERSION = "0.17.5"
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENT = ROOT / "openapi.public.json"
@@ -108,12 +108,12 @@ def generate_json(destination: Path, document: Path) -> None:
     from openapi_python_client.config import ConfigFile
 
     config = Config.from_sources(
-        ConfigFile.load_from_path(ROOT / "generator.json"),
-        MetaType.NONE,
-        document,
-        "utf-8",
-        False,
-        destination,
+        config_file=ConfigFile.load_from_path(ROOT / "generator.json"),
+        meta_type=MetaType.NONE,
+        document_source=document,
+        file_encoding="utf-8",
+        overwrite=False,
+        output_path=destination,
     )
     data = GeneratorData.from_dict(json.loads(document.read_bytes()), config=config)
     if isinstance(data, GeneratorError):

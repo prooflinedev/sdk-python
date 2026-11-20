@@ -12,7 +12,7 @@ from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
 from urllib.parse import quote
 from uuid import UUID
 
-import httpx
+import httpx2
 from pydantic import SecretStr
 
 from . import _transport
@@ -134,7 +134,7 @@ def _configuration(
     return AuthenticatedClient(
         base_url=_transport.base_url(base_url),
         token=_transport.token_value(token),
-        timeout=httpx.Timeout(timeout),
+        timeout=httpx2.Timeout(timeout),
     )
 
 
@@ -223,14 +223,14 @@ class ProoflineClient(Operations):
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
-        self._http = httpx.Client(
+        self._http = httpx2.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
             headers={
                 "User-Agent": f"proofline-python/{_transport.VERSION}",
                 "Accept-Encoding": "identity",
             },
-            timeout=httpx.Timeout(timeout),
+            timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
             transport=_transport.RetryTransport(self._api.token, timeout),
@@ -301,7 +301,7 @@ class ProoflineClient(Operations):
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )
             return decode_export(response, format, dataset)
-        except httpx.HTTPError as error:
+        except httpx2.HTTPError as error:
             raise _transport.network_error(error) from None
 
     def iter_export_pages(
@@ -593,14 +593,14 @@ class AsyncProoflineClient(AsyncOperations):
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
-        self._http = httpx.AsyncClient(
+        self._http = httpx2.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
             headers={
                 "User-Agent": f"proofline-python/{_transport.VERSION}",
                 "Accept-Encoding": "identity",
             },
-            timeout=httpx.Timeout(timeout),
+            timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
             transport=_transport.AsyncRetryTransport(self._api.token, timeout),
@@ -671,7 +671,7 @@ class AsyncProoflineClient(AsyncOperations):
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )
             return decode_export(response, format, dataset)
-        except httpx.HTTPError as error:
+        except httpx2.HTTPError as error:
             raise _transport.network_error(error) from None
 
     async def iter_export_pages(

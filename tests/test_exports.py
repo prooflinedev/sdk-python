@@ -5,7 +5,7 @@ import io
 from concurrent.futures import ThreadPoolExecutor
 from itertools import product
 
-import httpx
+import httpx2
 import pytest
 
 from proofline import ProoflineError
@@ -13,8 +13,8 @@ from proofline._transport import MAX_RESPONSE_BYTES
 from proofline.exports import decode_export
 
 
-def response(text: str) -> httpx.Response:
-    return httpx.Response(
+def response(text: str) -> httpx2.Response:
+    return httpx2.Response(
         200,
         content=text.encode(),
         headers={

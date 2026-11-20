@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from ..models.customer_code_assessment import CustomerCodeAssessment
     from ..models.deep_review_escalation import DeepReviewEscalation
     from ..models.environment_check import EnvironmentCheck
+    from ..models.linked_issue_capture import LinkedIssueCapture
     from ..models.local_reverification import LocalReverification
     from ..models.open_items_view import OpenItemsView
     from ..models.provider_wait import ProviderWait
@@ -147,6 +148,13 @@ class CustomerReviewDetail:
              published, by assessment in recorded order, including those the
              pull-request Check left off its list. Absent when there are none.
         is_deep_review (bool | Unset): Present and true when this run is a Deep Review.
+        linked_issues (LinkedIssueCapture | None | Unset): What this review's linked-issue receipt recorded, read from
+            the
+             receipt and never from current settings, so a later allowlist change
+             does not alter it. Null when the review kept no receipt: a kind that
+             reads no linked issues, a run that has not prepared its context yet,
+             a run that predates receipts, or a receipt that does not decode. Null
+             never means that no issue was captured.
         local_reverifications (list[LocalReverification] | Unset): For a patch review requested with
             `verify_finding_ids`, each finding
              it re-verifies against the patch and the outcome. The outcome is
@@ -283,6 +291,7 @@ class CustomerReviewDetail:
     incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
     investigation_findings: list[ReviewInvestigationFinding] | Unset = UNSET
     is_deep_review: bool | Unset = UNSET
+    linked_issues: LinkedIssueCapture | None | Unset = UNSET
     local_reverifications: list[LocalReverification] | Unset = UNSET
     merge_gate: None | PullRequestMergeGate | Unset = UNSET
     merge_group_pull_request_numbers: list[int] | Unset = UNSET
@@ -325,6 +334,7 @@ class CustomerReviewDetail:
         from ..models.change_summary import ChangeSummary  # noqa: PLC0415
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
+        from ..models.linked_issue_capture import LinkedIssueCapture  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
         from ..models.provider_wait import ProviderWait  # noqa: PLC0415
         from ..models.pull_request_merge_gate import PullRequestMergeGate  # noqa: PLC0415
@@ -534,6 +544,14 @@ class CustomerReviewDetail:
                 investigation_findings.append(investigation_findings_item)
 
         is_deep_review = self.is_deep_review
+
+        linked_issues: dict[str, Any] | None | Unset
+        if isinstance(self.linked_issues, Unset):
+            linked_issues = UNSET
+        elif isinstance(self.linked_issues, LinkedIssueCapture):
+            linked_issues = self.linked_issues.to_dict()
+        else:
+            linked_issues = self.linked_issues
 
         local_reverifications: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.local_reverifications, Unset):
@@ -837,6 +855,8 @@ class CustomerReviewDetail:
             field_dict["investigation_findings"] = investigation_findings
         if is_deep_review is not UNSET:
             field_dict["is_deep_review"] = is_deep_review
+        if linked_issues is not UNSET:
+            field_dict["linked_issues"] = linked_issues
         if local_reverifications is not UNSET:
             field_dict["local_reverifications"] = local_reverifications
         if merge_gate is not UNSET:
@@ -917,6 +937,7 @@ class CustomerReviewDetail:
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
         from ..models.environment_check import EnvironmentCheck  # noqa: PLC0415
+        from ..models.linked_issue_capture import LinkedIssueCapture  # noqa: PLC0415
         from ..models.local_reverification import LocalReverification  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
         from ..models.provider_wait import ProviderWait  # noqa: PLC0415
@@ -1293,6 +1314,23 @@ class CustomerReviewDetail:
                 investigation_findings.append(investigation_findings_item)
 
         is_deep_review = d.pop("is_deep_review", UNSET)
+
+        def _parse_linked_issues(data: object) -> LinkedIssueCapture | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                linked_issues_type_0 = LinkedIssueCapture.from_dict(data)
+
+                return linked_issues_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(LinkedIssueCapture | None | Unset, data)
+
+        linked_issues = _parse_linked_issues(d.pop("linked_issues", UNSET))
 
         _local_reverifications = d.pop("local_reverifications", UNSET)
         local_reverifications: list[LocalReverification] | Unset = UNSET
@@ -1775,6 +1813,7 @@ class CustomerReviewDetail:
             incomplete_causes=incomplete_causes,
             investigation_findings=investigation_findings,
             is_deep_review=is_deep_review,
+            linked_issues=linked_issues,
             local_reverifications=local_reverifications,
             merge_gate=merge_gate,
             merge_group_pull_request_numbers=merge_group_pull_request_numbers,
