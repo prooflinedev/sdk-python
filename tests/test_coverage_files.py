@@ -110,6 +110,18 @@ def test_a_symlink_out_of_the_root_is_refused(tmp_path: Path) -> None:
         build_coverage_request(SHA, ["lcov.info"], root=root)
 
 
+def test_explicit_name_does_not_bypass_the_root(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = write(tmp_path / "secret.txt", "token\n")
+    target = write(tmp_path / "other.txt", "token\n")
+    (root / "link.info").symlink_to(target)
+    with pytest.raises(ValueError, match="outside the root"):
+        build_coverage_request(SHA, [CoverageFile(outside, "ok.info")], root=root)
+    with pytest.raises(ValueError, match="outside the root"):
+        build_coverage_request(SHA, [CoverageFile("link.info", "ok.info")], root=root)
+
+
 def test_non_utf8_report_is_refused(tmp_path: Path) -> None:
     (tmp_path / "lcov.info").write_bytes(b"SF:\xff\xfe\n")
     with pytest.raises(ValueError, match="not UTF-8"):
@@ -125,6 +137,19 @@ def test_body_over_thirty_mebibytes_is_refused(tmp_path: Path) -> None:
     write(tmp_path / "big.info", "x" * (MAX_BODY_BYTES + 1))
     with pytest.raises(ValueError, match="30 MiB"):
         build_coverage_request(SHA, ["big.info"], root=tmp_path)
+
+
+def test_size_limit_counts_the_serialized_body(tmp_path: Path) -> None:
+    # Every newline becomes two bytes of JSON, so the raw content fits but the body does not.
+    write(tmp_path / "escaped.info", "\n" * (MAX_BODY_BYTES // 2))
+    with pytest.raises(ValueError, match="30 MiB"):
+        build_coverage_request(SHA, ["escaped.info"], root=tmp_path)
+
+
+def test_body_just_under_the_limit_is_accepted(tmp_path: Path) -> None:
+    write(tmp_path / "large.info", "x" * (MAX_BODY_BYTES - 1024))
+    request = build_coverage_request(SHA, ["large.info"], root=tmp_path)
+    assert len(request.reports) == 1
 
 
 @MODES
