@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from inspect import isawaitable
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -545,6 +546,7 @@ class ProoflineClient(Operations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        on_poll: Callable[[CustomerReviewDetail], None] | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
@@ -553,6 +555,9 @@ class ProoflineClient(Operations):
 
         head_commit_sha holds the outcome to that commit. A review pinned to
         another head ends the wait on that read and is never COMPLETED.
+
+        When on_poll is provided, it is called on each review poll with the
+        latest CustomerReviewDetail.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -570,6 +575,8 @@ class ProoflineClient(Operations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
+                if on_poll is not None:
+                    on_poll(last)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
@@ -940,7 +947,19 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        on_poll: Callable[[CustomerReviewDetail], Awaitable[None] | None] | None = None,
     ) -> ReviewOutcome:
+        """Wait for recorded review completion or return TIMED_OUT.
+
+        A name lookup still running at the deadline returns TIMED_OUT; it never
+        reports completion.
+
+        head_commit_sha holds the outcome to that commit. A review pinned to
+        another head ends the wait on that read and is never COMPLETED.
+
+        When on_poll is provided, it is invoked on each review poll with the
+        latest CustomerReviewDetail (supports both sync and async callbacks).
+        """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         _head_commit(head_commit_sha)
@@ -956,6 +975,10 @@ class AsyncProoflineClient(AsyncOperations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
+                if on_poll is not None:
+                    res = on_poll(last)
+                    if isawaitable(res):
+                        await res
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)

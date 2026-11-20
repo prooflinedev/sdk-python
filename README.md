@@ -48,6 +48,7 @@ outcome = client.wait_for_review(
     organization_id,
     requested.review_id,
     head_commit_sha=head_commit_sha,
+    on_poll=lambda review: print(f"Review status: {review.status}"),
 )
 if outcome.status != "COMPLETED":
     print(outcome.status, outcome.reason)
