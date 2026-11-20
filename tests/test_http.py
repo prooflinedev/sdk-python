@@ -2301,6 +2301,173 @@ async def test_fixes_preserve_unavailable_context_and_never_retry(mode: str) -> 
             assert len(observed) == 5
 
 
+def mcp_tool_reply(
+    request: Request,
+    result: dict[str, Any] | None = None,
+    *,
+    status: int = 200,
+    problem: dict[str, Any] | None = None,
+) -> Reply:
+    message = json.loads(request.body)
+    if message["method"] == "initialize":
+        return Reply(body={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-11-25"}})
+    if message["method"] == "notifications/initialized":
+        return Reply(status=202, body=b"")
+    if status != 200:
+        return Reply(status, problem or {"detail": "unavailable"})
+    return Reply(body={"jsonrpc": "2.0", "id": 2, "result": result})
+
+
+def reverification_result(
+    *outcomes: str,
+    status: str | None = None,
+    error: bool = False,
+    wrapped: bool = False,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if outcomes:
+        payload["findings"] = [
+            {"finding_id": str(FINDING), "outcome": outcome, "checks": []} for outcome in outcomes
+        ]
+    if status is not None:
+        payload["status"] = status
+    structured = {"ok": True, "data": payload} if wrapped else payload
+    result: dict[str, Any] = {
+        "content": [{"type": "text", "text": "untrusted source"}],
+        "structuredContent": structured,
+    }
+    if error:
+        result["isError"] = True
+    return result
+
+
+def tool_params(server: Server) -> list[dict[str, Any]]:
+    params = []
+    for request in server.requests:
+        message = json.loads(request.body)
+        if message.get("method") == "tools/call":
+            params.append(message["params"])
+    return params
+
+
+@MODES
+async def test_wait_for_reverification_returns_after_pending_polls(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    request_id = str(REVIEW)
+    organization_id = str(ORG)
+    responses = [
+        reverification_result("PENDING", status="PENDING"),
+        reverification_result("RESOLVED_VERIFIED", "PENDING", status="PENDING"),
+        reverification_result("RESOLVED_VERIFIED", "NOT_VERIFIED"),
+    ]
+    seen = 0
+
+    def respond(request: Request, index: int) -> Reply:
+        nonlocal seen
+        message = json.loads(request.body)
+        if message["method"] == "tools/call":
+            result = responses[seen]
+            seen += 1
+        else:
+            result = None
+        return mcp_tool_reply(request, result)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_reverification",
+                request_id,
+                timeout=100,
+                organization_id=organization_id,
+            )
+        assert result == responses[2]
+        assert (
+            tool_params(server)
+            == [
+                {
+                    "name": "get_reverification",
+                    "arguments": {"request_id": request_id, "organization_id": organization_id},
+                }
+            ]
+            * 3
+        )
+        assert clock.delays == [5, 10]
+    # A finished outcome, including one that does not establish a fix, returns on that read.
+    for outcome in ("STILL_PRESENT", "NOT_VERIFIED"):
+        body = reverification_result(outcome, wrapped=True)
+        with Server(lambda request, index: mcp_tool_reply(request, body)) as server:
+            async with session(mode, server.url) as client:
+                assert await call(client, "wait_for_reverification", request_id) == body
+            assert len(tool_params(server)) == 1
+    unavailable = reverification_result(status="UNAVAILABLE")
+    with Server(lambda request, index: mcp_tool_reply(request, unavailable)) as server:
+        async with session(mode, server.url) as client:
+            assert await call(client, "wait_for_reverification", request_id) == unavailable
+        assert len(tool_params(server)) == 1
+        assert clock.delays == [5, 10]
+
+
+@MODES
+async def test_wait_for_reverification_returns_tool_errors_immediately(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    refused = reverification_result("PENDING", status="PENDING", error=True)
+    with Server(lambda request, index: mcp_tool_reply(request, refused)) as server:
+        async with session(mode, server.url) as client:
+            assert await call(client, "wait_for_reverification", str(REVIEW)) == refused
+        assert tool_params(server) == [
+            {"name": "get_reverification", "arguments": {"request_id": str(REVIEW)}}
+        ]
+        assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_reverification_raises_proofline_error(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+
+    def respond(request: Request, index: int) -> Reply:
+        return mcp_tool_reply(request, status=503, problem={"detail": "unavailable"})
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_reverification", str(REVIEW), timeout=100)
+            assert raised.value.status == 503
+            assert raised.value.type == "about:blank"
+            assert raised.value.detail == "unavailable"
+        assert len(tool_params(server)) == 1
+        assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_reverification_backs_off_until_timeout(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    pending = reverification_result("PENDING", status="PENDING")
+    with Server(lambda request, index: mcp_tool_reply(request, pending)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError, match="finite nonnegative"):
+                await call(client, "wait_for_reverification", str(REVIEW), timeout=float("nan"))
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_reverification", str(REVIEW), timeout=0)
+            assert raised.value.status == 0
+            assert raised.value.type == "urn:proofline:sdk:timeout"
+            assert server.requests == []
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_reverification", str(REVIEW), timeout=260)
+            assert raised.value.type == "urn:proofline:sdk:timeout"
+            assert raised.value.status == 0
+        assert clock.delays == [5, 10, 20, 40, 60, 60, 60, 5]
+        assert len(tool_params(server)) == 8
+
+
 @MODES
 async def test_shared_review_outcome_contract(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
     Clock(monkeypatch)
@@ -2530,6 +2697,7 @@ def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> No
         'fixes.get_fix_context("finding-id")',
         'fixes.request_reverification("review-id", ["finding-id"], "a" * 40, note="fixed")',
         'fixes.get_reverification("request-id")',
+        'wait_for_reverification("request-id", timeout=30)',
     ]
     for prefix, kind, wait in [
         ("", "ProoflineClient", ""),

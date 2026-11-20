@@ -70,10 +70,10 @@ from ._generated.models.run_now_response import RunNowResponse
 from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
-from ._mcp import AsyncMcpClient, McpClient
+from ._mcp import AsyncMcpClient, KnowledgeResult, McpClient
 from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
-from .fixes import AsyncFixesClient, FixesClient
+from .fixes import AsyncFixesClient, FixesClient, _reverification_in_progress
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
 
@@ -582,6 +582,51 @@ class ProoflineClient(Operations):
         finally:
             _transport.DEADLINE.reset(deadline)
 
+    def wait_for_reverification(
+        self,
+        request_id: str,
+        *,
+        timeout: float = 300,
+        organization_id: str | None = None,
+    ) -> KnowledgeResult:
+        """Wait until a re-verification records a finished outcome.
+
+        Polls fixes.get_reverification, waiting 5 seconds at first and doubling
+        up to 60. PENDING means the review is still running. RESOLVED_VERIFIED,
+        STILL_PRESENT and NOT_VERIFIED finish the wait. NOT_VERIFIED does not
+        establish a fix. A result with isError returns immediately. Any other
+        ProoflineError propagates. The deadline raises ProoflineError with type
+        urn:proofline:sdk:timeout.
+        """
+
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(
+                "The re-verification timeout must be a finite nonnegative number of seconds."
+            )
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    result = self.fixes.get_reverification(
+                        request_id, organization_id=organization_id
+                    )
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                if result.get("isError"):
+                    return result
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                if not _reverification_in_progress(result):
+                    return result
+                sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            raise _transport.timeout_error()
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
 
 class AsyncProoflineClient(AsyncOperations):
     def __init__(
@@ -965,5 +1010,40 @@ class AsyncProoflineClient(AsyncOperations):
                 interval = min(60, interval * 2)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
+    async def wait_for_reverification(
+        self,
+        request_id: str,
+        *,
+        timeout: float = 300,
+        organization_id: str | None = None,
+    ) -> KnowledgeResult:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(
+                "The re-verification timeout must be a finite nonnegative number of seconds."
+            )
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    result = await self.fixes.get_reverification(
+                        request_id, organization_id=organization_id
+                    )
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                if result.get("isError"):
+                    return result
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                if not _reverification_in_progress(result):
+                    return result
+                await async_sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            raise _transport.timeout_error()
         finally:
             _transport.DEADLINE.reset(deadline)

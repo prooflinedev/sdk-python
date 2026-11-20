@@ -31,7 +31,14 @@ def main() -> None:
     from proofline import AsyncProoflineClient, ProoflineClient
 
     for client in (ProoflineClient, AsyncProoflineClient):
-        helpers = {"close", "aclose", "iter_export_pages", "iter_reviews", "wait_for_review"}
+        helpers = {
+            "close",
+            "aclose",
+            "iter_export_pages",
+            "iter_reviews",
+            "wait_for_review",
+            "wait_for_reverification",
+        }
         exposed = {
             name
             for name in dir(client)
