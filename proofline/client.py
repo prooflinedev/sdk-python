@@ -105,6 +105,7 @@ _REVIEW_ROUTING_MODELS: _ReviewRoutingModels = (
 
 class ReviewFilters(TypedDict, total=False):
     attention: str | None
+    audits: str | None
     author: str | None
     cursor: str | None
     environment: UUID | None
