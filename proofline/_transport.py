@@ -65,6 +65,9 @@ RunNowRefusal: TypeAlias = (
     | RunNowRefusalViewType9
 )
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
+# Set once a successful response reaches the client, so operation_errors can tell a
+# body Proofline returned from an error raised before any request left the process.
+RESPONDED: ContextVar[bool] = ContextVar("proofline_response_received", default=False)
 
 
 class BearerAuth(httpx2.Auth):
@@ -163,6 +166,13 @@ def network_error(error: httpx2.HTTPError) -> ProoflineError:
 
 @contextmanager
 def operation_errors() -> Iterator[None]:
+    """Map failures inside one generated operation to ProoflineError.
+
+    Only a response that arrived can be an invalid API response. An error raised
+    while the request is still being built, such as an unknown keyword or a body
+    of the wrong type, is the caller's and propagates unchanged.
+    """
+    marker = RESPONDED.set(False)
     try:
         yield
     except ProoflineError:
@@ -170,7 +180,11 @@ def operation_errors() -> Iterator[None]:
     except httpx2.HTTPError as error:
         raise network_error(error) from None
     except Exception:
+        if not RESPONDED.get():
+            raise
         raise invalid_response() from None
+    finally:
+        RESPONDED.reset(marker)
 
 
 def timeout_error() -> ProoflineError:
@@ -458,6 +472,7 @@ class RetryTransport(httpx2.BaseTransport):
                 raise unreadable_problem(response.status_code)
             response.stream = DeadlineStream(response.stream, response.status_code, deadline)
             if 200 <= response.status_code < 300:
+                RESPONDED.set(True)
                 return response
             try:
                 response.read()
@@ -509,6 +524,7 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
                 raise unreadable_problem(response.status_code)
             response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
             if 200 <= response.status_code < 300:
+                RESPONDED.set(True)
                 return response
             try:
                 await response.aread()
