@@ -119,6 +119,26 @@ def token_value(token: str | SecretStr | None) -> SecretStr:
     return secret
 
 
+DEFAULT_BASE_URL = "https://proofline.sh"
+
+
+def configured_base_url(value: str | None) -> str:
+    """``base_url``, else a non-empty ``PROOFLINE_BASE_URL``, else the hosted origin."""
+    if value is not None:
+        return base_url(value)
+    # An empty variable, as a CI template leaves behind, counts as unset.
+    environment = os.environ.get("PROOFLINE_BASE_URL", "")
+    if not environment:
+        return base_url(DEFAULT_BASE_URL)
+    try:
+        return base_url(environment)
+    except ValueError:
+        # Name the setting to fix, never the value: it may carry credentials.
+        raise ValueError(
+            "PROOFLINE_BASE_URL must be an HTTPS origin, or HTTP with a literal loopback address."
+        ) from None
+
+
 def base_url(value: str) -> str:
     try:
         parts = urlsplit(value)

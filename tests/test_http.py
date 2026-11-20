@@ -1737,6 +1737,52 @@ async def test_cursor_pagination_preserves_filters_and_refuses_cycles_or_bounds(
             assert raised.value.type == "urn:proofline:sdk:pagination-limit"
 
 
+@MODES
+async def test_base_url_defaults_to_the_environment_then_the_hosted_origin(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PROOFLINE_TOKEN", TOKEN)
+    with Server(lambda request, index: Reply(body=review())) as server:
+        monkeypatch.setenv("PROOFLINE_BASE_URL", server.url)
+        client = ProoflineClient() if mode == "sync" else AsyncProoflineClient()
+        assert client._base_url == server.url
+        result = await call(client, "get_review", ORG, REVIEW)
+        assert isinstance(result, CustomerReviewDetail)
+        closed = client.close() if mode == "sync" else await client.aclose()
+        assert closed is None
+    assert [request.path for request in server.requests] == [
+        f"/api/v1/organizations/{ORG}/reviews/{REVIEW}"
+    ]
+    assert server.requests[0].headers["Authorization"] == f"Bearer {TOKEN}"
+
+    # An explicit base_url wins over the variable.
+    with ProoflineClient(base_url="http://127.0.0.1:9") as explicit:
+        assert explicit._base_url == "http://127.0.0.1:9"
+
+    # Unset or empty (as a CI template leaves it): the hosted origin.
+    for unset in (None, ""):
+        if unset is None:
+            monkeypatch.delenv("PROOFLINE_BASE_URL")
+        else:
+            monkeypatch.setenv("PROOFLINE_BASE_URL", unset)
+        with ProoflineClient() as hosted:
+            assert hosted._base_url == "https://proofline.sh"
+        async with AsyncProoflineClient() as hosted_async:
+            assert hosted_async._base_url == "https://proofline.sh"
+
+    # A bad value is refused by name, without echoing it, before any request.
+    secret = "https://user:hunter2@proofline.example"
+    for value in [secret, "http://api.example", "https://proofline.sh/api"]:
+        monkeypatch.setenv("PROOFLINE_BASE_URL", value)
+        for factory in (ProoflineClient, AsyncProoflineClient):
+            with pytest.raises(ValueError, match="^PROOFLINE_BASE_URL must be") as caught:
+                factory()
+            assert "hunter2" not in str(caught.value)
+    # A bad explicit base_url keeps the existing message.
+    with pytest.raises(ValueError, match="^Use an HTTPS origin"):
+        ProoflineClient(base_url="http://api.example")
+
+
 def test_token_environment_and_https_origin_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROOFLINE_TOKEN", TOKEN)
     with ProoflineClient() as client:
