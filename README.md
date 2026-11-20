@@ -38,6 +38,22 @@ except ProoflineError as error:
         print(error.detail)
 ```
 
+## Finding a repository by name
+
+Review requests and coverage uploads take the repository's stable Proofline ID. When you only have the provider's `owner/name`, such as `GITHUB_REPOSITORY` in a GitHub Actions job, `find_repository` resolves it with one `list_repositories` read.
+
+```python
+import os
+from uuid import UUID
+
+with ProoflineClient() as client:
+    organization_id = UUID(os.environ["PROOFLINE_ORGANIZATION_ID"])
+    repository = client.find_repository(organization_id, os.environ["GITHUB_REPOSITORY"])
+    requested = client.request_review(organization_id, repository.id, 12)
+```
+
+The match ignores ASCII case, as GitHub does, and a repository spelled exactly as you wrote it wins over one that differs only in case. A name that is not exactly `owner/name` raises `ValueError` before a request. A name the token cannot see raises `ProoflineError` with type `urn:proofline:sdk:repository-not-found`; a repository-restricted token sees only its allowlist, and a renamed repository is listed under its new name. More than one match raises `urn:proofline:sdk:ambiguous-repository`. Both carry the name you passed in `repository_name`. Store `repository.id` rather than the name, since the name can change on a rename. Use `await` with `AsyncProoflineClient`.
+
 ## Holding a wait to a commit
 
 `request_review` names a pull request, and its response names no commit: the review belongs to the head the pull request has when the request arrives. To accept a result only for the commit you hold, pass that commit to `wait_for_review`.
