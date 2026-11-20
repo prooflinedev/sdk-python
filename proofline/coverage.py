@@ -74,9 +74,8 @@ def build_coverage_request(
         item = spec if isinstance(spec, CoverageFile) else CoverageFile(spec)
         path = Path(item.path)
         resolved = (path if path.is_absolute() else base / path).resolve()
-        name = (
-            _explicit_name(item.name) if item.name is not None else _relative_name(resolved, base)
-        )
+        relative = _relative_name(resolved, base)
+        name = _explicit_name(item.name) if item.name is not None else relative
         if name in seen:
             raise ValueError(f"Report name {name!r} is used twice.")
         seen.add(name)
