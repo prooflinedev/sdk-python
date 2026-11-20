@@ -55,6 +55,29 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Failing a job on open findings
+
+`ReviewOutcome.gate(fail_on)` measures a review against a `WARNING` or `SERIOUS` threshold with the rules of `proofline ci review --fail-on`, so a Python pipeline can fail the same way the CLI does.
+
+```python
+import sys
+
+outcome = client.wait_for_review(organization_id, review_id)
+result = outcome.gate(fail_on="SERIOUS")
+if result != "NOT_REACHED":
+    print(f"Proofline: {result}, {outcome.review_url}")
+    sys.exit({"REACHED": 3, "NOT_COMPLETE": 2, "UNAVAILABLE": 4}[result])
+```
+
+- `REACHED`: the completed review has an open finding at or above the threshold.
+- `NOT_REACHED`: the completed review has none.
+- `NOT_COMPLETE`: the outcome is `INCOMPLETE`, `FAILED`, or `STOPPED`, whatever the review found. This includes a review pinned to another head than the `head_commit_sha` passed to `wait_for_review`.
+- `UNAVAILABLE`: the wait timed out, or the completed review lacks the server's open-finding counts, so the threshold cannot be measured.
+
+The server counts open findings from their current decisions, so dismissed findings and unexpired risk acceptances do not count. A code-only finding counts while it is not `RESOLVED` and its CODE assessment is complete, meaning `COMPLETED` with no incompleteness kind and no reason codes, and is of the review's own commits. A severity the SDK does not know reaches every threshold. The exit codes above are the CLI's.
+
+The threshold is the caller's, as with `--fail-on`. The gate follows `ci review --fail-on` for every kind of review, so a review the server returns without open-finding counts is `UNAVAILABLE`. For patch, commit, and file reviews, which have no finding decisions, `proofline review --fail-on` counts their unresolved findings instead; `gate()` does not. An organization that opts in to a merge gate instead gets the server's frozen `ALLOW` or `BLOCK` decision for a pull request head in `outcome.review.merge_gate`, which is null otherwise.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
