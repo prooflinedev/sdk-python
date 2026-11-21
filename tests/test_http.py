@@ -2673,75 +2673,90 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=failed_future_callback,
                     )
 
-        # Assert async callback signals cancellation and client returns without blocking on cleanup
-        cancellation_requested = asyncio.Event()
-        cleanup_blocked = asyncio.Event()
+        # Assert synchronous callback returning pending Future is cancelled on deadline expiry
+        pending_fut: asyncio.Future[None] | None = None
 
-        async def blocking_cleanup_callback(r: Any) -> None:
-            try:
-                await asyncio.sleep(5.0)
-            except asyncio.CancelledError:
-                cancellation_requested.set()
-                await cleanup_blocked.wait()
-                raise
+        def pending_future_callback(r: Any) -> asyncio.Future[None]:
+            nonlocal pending_fut
+            loop = asyncio.get_running_loop()
+            pending_fut = loop.create_future()
+            return pending_fut
 
         with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
             async with session("async", server.url) as client:
-                client_task = asyncio.create_task(
-                    client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=0.2,
-                        on_poll=blocking_cleanup_callback,
-                    )
+                res = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=pending_future_callback,
                 )
-                try:
-                    done, _ = await asyncio.wait({client_task}, timeout=2.0)
-                    assert client_task in done
-                    res = client_task.result()
-                    assert res.status == "TIMED_OUT"
-                    await asyncio.sleep(0)
-                    assert cancellation_requested.is_set()
-                finally:
-                    cleanup_blocked.set()
-                    if not client_task.done():
-                        client_task.cancel()
-                        await asyncio.wait({client_task})
+                assert res.status == "TIMED_OUT"
+                assert pending_fut is not None
+                assert pending_fut.cancelled()
 
-        # Assert classified outcome survives callback expiration
-        cancellation_requested_term = asyncio.Event()
-        cleanup_blocked_term = asyncio.Event()
+        # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
+        # tasks cannot stall teardown.
+        watchdog_code = """
+import asyncio
+from typing import Any
+from tests.test_http import session, Server, Reply, review, ORG, REVIEW
 
-        async def blocking_cleanup_callback_term(r: Any) -> None:
-            try:
-                await asyncio.sleep(5.0)
-            except asyncio.CancelledError:
-                cancellation_requested_term.set()
-                await cleanup_blocked_term.wait()
-                raise
+async def main() -> None:
+    cancellation_requested = asyncio.Event()
+    cleanup_blocked = asyncio.Event()
 
-        with Server(lambda request, index: Reply(body=review())) as server:
-            async with session("async", server.url) as client:
-                term_task = asyncio.create_task(
-                    client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=0.2,
-                        on_poll=blocking_cleanup_callback_term,
-                    )
-                )
-                try:
-                    done, _ = await asyncio.wait({term_task}, timeout=2.0)
-                    assert term_task in done
-                    res = term_task.result()
-                    assert res.status == "COMPLETED"
-                    await asyncio.sleep(0)
-                    assert cancellation_requested_term.is_set()
-                finally:
-                    cleanup_blocked_term.set()
-                    if not term_task.done():
-                        term_task.cancel()
-                        await asyncio.wait({term_task})
+    async def blocking_cleanup_callback(r: Any) -> None:
+        try:
+            await asyncio.sleep(5.0)
+        except asyncio.CancelledError:
+            cancellation_requested.set()
+            await cleanup_blocked.wait()
+            raise
+
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session("async", server.url) as client:
+            res = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=0.2,
+                on_poll=blocking_cleanup_callback,
+            )
+            assert res.status == "TIMED_OUT"
+            await asyncio.sleep(0)
+            assert cancellation_requested.is_set()
+            cleanup_blocked.set()
+
+    cancellation_requested_term = asyncio.Event()
+    cleanup_blocked_term = asyncio.Event()
+
+    async def blocking_cleanup_callback_term(r: Any) -> None:
+        try:
+            await asyncio.sleep(5.0)
+        except asyncio.CancelledError:
+            cancellation_requested_term.set()
+            await cleanup_blocked_term.wait()
+            raise
+
+    with Server(lambda request, index: Reply(body=review())) as server:
+        async with session("async", server.url) as client:
+            res = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=0.2,
+                on_poll=blocking_cleanup_callback_term,
+            )
+            assert res.status == "COMPLETED"
+            await asyncio.sleep(0)
+            assert cancellation_requested_term.is_set()
+            cleanup_blocked_term.set()
+
+asyncio.run(main())
+"""
+        subprocess.run(
+            [sys.executable, "-c", watchdog_code],
+            check=True,
+            timeout=10,
+        )
 
     # Assert callback modifying review does not mutate returned review in both sync and async
     mutated_count = 0

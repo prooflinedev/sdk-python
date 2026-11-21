@@ -1058,7 +1058,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     cb_finished_in_budget = bool(completed_at) and (
                                         deadline_val is None or completed_at[0] <= deadline_val
                                     )
-                                    if cb_finished_in_budget or res in done:
+                                    if cb_finished_in_budget and res in done:
                                         res.result()
                                     else:
                                         res.cancel()
