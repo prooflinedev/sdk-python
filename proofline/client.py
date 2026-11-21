@@ -1048,7 +1048,11 @@ class AsyncProoflineClient(AsyncOperations):
                                         else None
                                     )
 
+                                wrapper_started = False
+
                                 async def _runner() -> None:
+                                    nonlocal wrapper_started
+                                    wrapper_started = True
                                     try:
                                         await coro
                                     finally:
@@ -1070,6 +1074,8 @@ class AsyncProoflineClient(AsyncOperations):
                                         res.add_done_callback(
                                             lambda t: t.exception() if not t.cancelled() else None
                                         )
+                                    elif isinstance(res, Coroutine) and not wrapper_started:
+                                        res.close()
                                     raise
                                 # Record completion time in runner to decide whether to propagate
                                 deadline_val = _transport.DEADLINE.get()
@@ -1090,6 +1096,8 @@ class AsyncProoflineClient(AsyncOperations):
                                         res.add_done_callback(
                                             lambda t: t.exception() if not t.cancelled() else None
                                         )
+                                    elif isinstance(res, Coroutine) and not wrapper_started:
+                                        res.close()
                                     if result is not None:
                                         return result
                                     break

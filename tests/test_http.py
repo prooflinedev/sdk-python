@@ -2704,6 +2704,41 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         client_task.cancel()
                         await asyncio.wait({client_task})
 
+        # Assert classified outcome survives callback expiration
+        cancellation_requested_term = asyncio.Event()
+        cleanup_blocked_term = asyncio.Event()
+
+        async def blocking_cleanup_callback_term(r: Any) -> None:
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                cancellation_requested_term.set()
+                await cleanup_blocked_term.wait()
+                raise
+
+        with Server(lambda request, index: Reply(body=review())) as server:
+            async with session("async", server.url) as client:
+                term_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=0.2,
+                        on_poll=blocking_cleanup_callback_term,
+                    )
+                )
+                try:
+                    done, _ = await asyncio.wait({term_task}, timeout=2.0)
+                    assert term_task in done
+                    res = term_task.result()
+                    assert res.status == "COMPLETED"
+                    await asyncio.sleep(0)
+                    assert cancellation_requested_term.is_set()
+                finally:
+                    cleanup_blocked_term.set()
+                    if not term_task.done():
+                        term_task.cancel()
+                        await asyncio.wait({term_task})
+
     # Assert callback modifying review does not mutate returned review in both sync and async
     mutated_count = 0
 
