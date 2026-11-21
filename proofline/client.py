@@ -510,7 +510,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             )
             if val_id in memo:
                 res_tuple = memo[val_id]
-            elif all(a is b for a, b in zip(orig_val, temp_list)):
+            elif type(orig_val) is tuple and all(a is b for a, b in zip(orig_val, temp_list)):
                 res_tuple = orig_val
                 memo[val_id] = res_tuple
             else:
@@ -549,10 +549,45 @@ def _safe_cleanup_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
             if not fut.cancelled():
                 fut.exception()
             return
-        fut.cancel()
-        fut.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        try:
+            fut.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        except BaseException:
+            pass
+        try:
+            fut.cancel()
+        except BaseException:
+            pass
     except BaseException:
         pass
+
+
+def _safe_cleanup_task(
+    task: AsyncTask[Any],
+    res: Any,
+    wrapper_started: bool,
+) -> None:
+    try:
+        try:
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        except BaseException:
+            pass
+        try:
+            task.cancel()
+        except BaseException:
+            pass
+    except BaseException:
+        pass
+    if not wrapper_started:
+        if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
+            try:
+                res.close()
+            except BaseException:
+                pass
+        elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
+            try:
+                res.close()
+            except BaseException:
+                pass
 
 
 def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
@@ -1323,7 +1358,7 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
-        on_poll: Callable[[CustomerReviewDetail], Awaitable[None] | None] | None = None,
+        on_poll: Callable[[CustomerReviewDetail], Awaitable[object] | None] | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
@@ -1415,6 +1450,12 @@ class AsyncProoflineClient(AsyncOperations):
                                     res.add_done_callback(
                                         lambda _: completed_at.append(monotonic())
                                     )
+                                    remaining_budget = _transport.remaining()
+                                    if remaining_budget is not None and remaining_budget <= 0:
+                                        _safe_cleanup_future(res)
+                                        if result is not None:
+                                            return result
+                                        break
                                     try:
                                         done, _ = await async_wait({res}, timeout=remaining_budget)
                                     except BaseException:
@@ -1464,30 +1505,16 @@ class AsyncProoflineClient(AsyncOperations):
                                         completed_at.append(monotonic())
 
                                 task = async_create_task(_runner())
+                                remaining_budget = _transport.remaining()
+                                if remaining_budget is not None and remaining_budget <= 0:
+                                    _safe_cleanup_task(task, res, wrapper_started)
+                                    if result is not None:
+                                        return result
+                                    break
                                 try:
                                     done, _ = await async_wait({task}, timeout=remaining_budget)
                                 except BaseException:
-                                    task.cancel()
-                                    task.add_done_callback(
-                                        lambda t: t.exception() if not t.cancelled() else None
-                                    )
-                                    if not wrapper_started:
-                                        if (
-                                            iscoroutine(res)
-                                            and getcoroutinestate(res) == CORO_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
-                                        elif (
-                                            isgenerator(res)
-                                            and getgeneratorstate(res) == GEN_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
+                                    _safe_cleanup_task(task, res, wrapper_started)
                                     raise
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
@@ -1496,27 +1523,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 if cb_finished_in_budget and task in done:
                                     task.result()
                                 else:
-                                    task.cancel()
-                                    task.add_done_callback(
-                                        lambda t: t.exception() if not t.cancelled() else None
-                                    )
-                                    if not wrapper_started:
-                                        if (
-                                            iscoroutine(res)
-                                            and getcoroutinestate(res) == CORO_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
-                                        elif (
-                                            isgenerator(res)
-                                            and getgeneratorstate(res) == GEN_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
+                                    _safe_cleanup_task(task, res, wrapper_started)
                                     if result is not None:
                                         return result
                                     break

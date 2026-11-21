@@ -2708,11 +2708,21 @@ async def main() -> None:
     ) as client:
         # Case 1: Pending same-loop Future that times out
         pending_fut: asyncio.Future[None] | None = None
+        fut_cancelled_time = 0.0
+        cb_return_t1 = 0.0
 
         def pending_future_callback(r: Any) -> asyncio.Future[None]:
-            nonlocal pending_fut
+            nonlocal pending_fut, cb_return_t1
+            time.sleep(0.1)
             loop = asyncio.get_running_loop()
             pending_fut = loop.create_future()
+
+            def record_cancel(_: Any) -> None:
+                nonlocal fut_cancelled_time
+                fut_cancelled_time = time.monotonic()
+
+            pending_fut.add_done_callback(record_cancel)
+            cb_return_t1 = time.monotonic()
             return pending_fut
 
         client.get_review = fake_running  # type: ignore
@@ -2721,14 +2731,17 @@ async def main() -> None:
         res = await client.wait_for_review(
             ORG,
             REVIEW,
-            timeout=0.2,
+            timeout=0.3,
             on_poll=pending_future_callback,
         )
         elapsed1 = time.monotonic() - start_t1
         assert res.status == "TIMED_OUT"
+        await asyncio.sleep(0)
         assert pending_fut is not None
         assert pending_fut.cancelled()
-        assert 0.18 <= elapsed1 <= 0.35
+        wait_duration1 = fut_cancelled_time - cb_return_t1
+        assert 0.16 <= wait_duration1 <= 0.26
+        assert 0.27 <= elapsed1 <= 0.45
 
         # Case 2: Pending same-loop Future that completes within budget without cancellation
         completed_fut = asyncio.get_running_loop().create_future()
@@ -2758,7 +2771,7 @@ async def main() -> None:
         cleanup_blocked = asyncio.Event()
         cancellation_time = 0.0
 
-        async def blocking_cleanup_callback(r: Any) -> None:
+        async def blocking_cleanup_coro(r: Any) -> None:
             nonlocal cancellation_time
             try:
                 await asyncio.sleep(5.0)
@@ -2768,21 +2781,30 @@ async def main() -> None:
                 await cleanup_blocked.wait()
                 raise
 
+        cb_return_t3 = 0.0
+
+        def blocking_cleanup_callback(r: Any) -> Any:
+            nonlocal cb_return_t3
+            time.sleep(0.1)
+            cb_return_t3 = time.monotonic()
+            return blocking_cleanup_coro(r)
+
         client.get_review = fake_running  # type: ignore
 
         start_t3 = time.monotonic()
         res = await client.wait_for_review(
             ORG,
             REVIEW,
-            timeout=0.2,
+            timeout=0.3,
             on_poll=blocking_cleanup_callback,
         )
         elapsed3 = time.monotonic() - start_t3
         assert res.status == "TIMED_OUT"
         await asyncio.sleep(0)
         assert cancellation_requested.is_set()
-        assert cancellation_time >= start_t3 + 0.2 - 0.02
-        assert 0.18 <= elapsed3 <= 0.35
+        wait_duration3 = cancellation_time - cb_return_t3
+        assert 0.16 <= wait_duration3 <= 0.26
+        assert 0.27 <= elapsed3 <= 0.45
         cleanup_blocked.set()
 
         # Case 4: Blocking cleanup callback on terminal review
@@ -2790,7 +2812,7 @@ async def main() -> None:
         cleanup_blocked_term = asyncio.Event()
         cancellation_time_term = 0.0
 
-        async def blocking_cleanup_callback_term(r: Any) -> None:
+        async def blocking_cleanup_coro_term(r: Any) -> None:
             nonlocal cancellation_time_term
             try:
                 await asyncio.sleep(5.0)
@@ -2800,21 +2822,30 @@ async def main() -> None:
                 await cleanup_blocked_term.wait()
                 raise
 
+        cb_return_t4 = 0.0
+
+        def blocking_cleanup_callback_term(r: Any) -> Any:
+            nonlocal cb_return_t4
+            time.sleep(0.1)
+            cb_return_t4 = time.monotonic()
+            return blocking_cleanup_coro_term(r)
+
         client.get_review = fake_completed  # type: ignore
 
         start_t4 = time.monotonic()
         res = await client.wait_for_review(
             ORG,
             REVIEW,
-            timeout=0.2,
+            timeout=0.3,
             on_poll=blocking_cleanup_callback_term,
         )
         elapsed4 = time.monotonic() - start_t4
         assert res.status == "COMPLETED"
         await asyncio.sleep(0)
         assert cancellation_requested_term.is_set()
-        assert cancellation_time_term >= start_t4 + 0.2 - 0.02
-        assert 0.18 <= elapsed4 <= 0.35
+        wait_duration4 = cancellation_time_term - cb_return_t4
+        assert 0.16 <= wait_duration4 <= 0.26
+        assert 0.27 <= elapsed4 <= 0.45
         cleanup_blocked_term.set()
 
         # Case 5: Suspending callback that succeeds within budget
@@ -3016,6 +3047,38 @@ asyncio.run(main())
         except asyncio.CancelledError:
             pass
 
+        # Unrestricted awaitables returning values (e.g. int) accepted and result discarded
+        async def int_returning_callback(r: Any) -> int:
+            return 42
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_int = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=int_returning_callback,
+                )
+                assert res_int.status == "COMPLETED"
+
+        # Pending future exception during cancellation does not replace TIMED_OUT outcome
+        async def failing_cancel_coro(r: Any) -> None:
+            fut = asyncio.get_running_loop().create_future()
+            try:
+                await fut
+            except asyncio.CancelledError:
+                raise RuntimeError("error during cancellation")
+
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                res_clean = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.1,
+                    on_poll=failing_cancel_coro,
+                )
+                assert res_clean.status == "TIMED_OUT"
+
     # Cyclic tuple whose list points back to it
     cyclic_list: list[Any] = []
     cyclic_tuple = (cyclic_list, "tuple_leaf")
@@ -3175,3 +3238,22 @@ asyncio.run(main())
     detail_huge_ct = CustomerReviewDetail.from_dict(responses[1])
     detail_huge_ct.additional_properties["huge_ct"] = huge_ct
     assert _snapshot_review(detail_huge_ct) is None
+
+    # Nonempty tuple subclass with identical elements constructs distinct subclass instance
+    class IdenticalTuple(tuple[Any, ...]):
+        pass
+
+    itup = IdenticalTuple((1, "str", False))
+    itup.attr = ["orig_attr"]  # type: ignore[attr-defined]
+    detail_itup = CustomerReviewDetail.from_dict(responses[1])
+    detail_itup.additional_properties["itup"] = itup
+
+    snap_itup = _snapshot_review(detail_itup)
+    assert snap_itup is not None
+    copied_itup = snap_itup.additional_properties["itup"]
+    assert type(copied_itup) is IdenticalTuple
+    assert copied_itup is not itup
+    assert copied_itup.attr is not itup.attr
+    assert copied_itup.attr == ["orig_attr"]
+    copied_itup.attr.append("mutated")
+    assert itup.attr == ["orig_attr"]
