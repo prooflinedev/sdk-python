@@ -2586,3 +2586,98 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+async def test_review_filters_forward_audits_across_lists_and_pagination(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        parsed = urlsplit(request.path)
+        query = parse_qs(parsed.query)
+        if index == 0:
+            assert parsed.path == f"/api/v1/organizations/{ORG}/reviews"
+            assert query == {"kind": ["REVISION_SCAN"], "audits": ["none"]}
+            return Reply(body=page())
+        if index == 1:
+            assert parsed.path == f"/api/v1/organizations/{ORG}/reviews/pr/repo%2Fname/42"
+            assert query == {"audits": ["only"], "repository": [str(REPOSITORY)]}
+            return Reply(body=page())
+        if index == 2:
+            assert parsed.path == f"/api/v1/organizations/{ORG}/reviews"
+            assert query == {}
+            return Reply(body=page())
+        assert parsed.path == f"/api/v1/organizations/{ORG}/reviews"
+        assert query["kind"] == ["REVISION_SCAN"]
+        assert query["audits"] == ["none"]
+        assert query["limit"] == ["2"]
+        if index == 3:
+            assert "cursor" not in query
+            return Reply(body=page(cursor="opaque+/cursor", truncated=True))
+        assert query["cursor"] == ["opaque+/cursor"]
+        return Reply(body=page())
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            listed = await call(client, "list_reviews", ORG, kind="REVISION_SCAN", audits="none")
+            assert [item.id for item in listed.items] == [REVIEW]
+            pr_listed = await call(
+                client,
+                "list_pull_request_reviews",
+                ORG,
+                "repo/name",
+                42,
+                filters={"audits": "only", "repository": REPOSITORY},
+            )
+            assert [item.id for item in pr_listed.items] == [REVIEW]
+            unfiltered = await call(client, "list_reviews", ORG, audits=None)
+            assert [item.id for item in unfiltered.items] == [REVIEW]
+            items = await collect(
+                client,
+                page_size=2,
+                filters={"kind": "REVISION_SCAN", "audits": "none"},
+            )
+            assert [item.id for item in items] == [REVIEW, REVIEW]
+        assert len(server.requests) == 5
+
+
+def test_review_filter_public_types_accept_contract_parameters(tmp_path: Path) -> None:
+    lines = [
+        "from uuid import UUID",
+        "from proofline import AsyncProoflineClient, ProoflineClient, ReviewFilters, ReviewPage",
+        "",
+        "def build_filters(org: UUID) -> ReviewFilters:",
+        "    return {",
+        '        "attention": "needed",',
+        '        "audits": "none",',
+        '        "author": "mine",',
+        '        "cursor": None,',
+        '        "environment": org,',
+        '        "findings": "present",',
+        '        "kind": "REVISION_SCAN",',
+        '        "limit": 25,',
+        '        "query": "status:COMPLETED",',
+        '        "repository": org,',
+        '        "search": "timeout",',
+        '        "status": "COMPLETED",',
+        "    }",
+        "",
+        "def use_sync(client: ProoflineClient, org: UUID) -> None:",
+        "    filters = build_filters(org)",
+        '    page: ReviewPage = client.list_reviews(org, kind="REVISION_SCAN", audits="none")',
+        "    page = client.list_reviews(org, **filters)",
+        '    page = client.list_pull_request_reviews(org, "repo", 7, filters={"audits": "only"})',
+        "    for _ in client.iter_reviews(org, filters=filters):",
+        "        pass",
+        "",
+        "async def use_async(client: AsyncProoflineClient, org: UUID) -> None:",
+        "    filters = build_filters(org)",
+        '    scan = client.list_reviews(org, kind="REVISION_SCAN", audits="none")',
+        "    page: ReviewPage = await scan",
+        "    page = await client.list_reviews(org, **filters)",
+        '    await client.list_pull_request_reviews(org, "repo", 7, filters={"audits": "only"})',
+        "    async for _ in client.iter_reviews(org, filters=filters):",
+        "        pass",
+    ]
+    fixture = tmp_path / "review_filter_types.py"
+    fixture.write_text("\n".join(lines))
+    subprocess.run([sys.executable, "-m", "mypy", str(fixture)], check=True)
