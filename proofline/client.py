@@ -1033,7 +1033,15 @@ class AsyncProoflineClient(AsyncOperations):
                                 break
 
                             coro = res if isinstance(res, Coroutine) else _await_res(res)
-                            task = async_create_task(coro)
+                            completed_at: list[float] = []
+
+                            async def _runner() -> None:
+                                try:
+                                    await coro
+                                finally:
+                                    completed_at.append(monotonic())
+
+                            task = async_create_task(_runner())
                             try:
                                 done, pending = await async_wait({task}, timeout=remaining_budget)
                             except BaseException:
@@ -1047,12 +1055,16 @@ class AsyncProoflineClient(AsyncOperations):
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
                                 raise
-                            # Latch against absolute deadline before propagating callback errors
-                            if (_transport.remaining() or 0) > 0 and task in done:
-                                # Callback completed before deadline expired
+                            # Record completion time in runner to decide whether to propagate
+                            deadline_val = _transport.DEADLINE.get()
+                            cb_finished_in_budget = bool(completed_at) and (
+                                deadline_val is None or completed_at[0] <= deadline_val
+                            )
+                            if cb_finished_in_budget and task in done:
+                                # Callback finished within budget: propagate any error or success
                                 task.result()
                             else:
-                                # Deadline expired
+                                # Deadline expired before callback finished
                                 task.cancel()
                                 task.add_done_callback(
                                     lambda t: t.exception() if not t.cancelled() else None

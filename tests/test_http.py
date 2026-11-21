@@ -2650,7 +2650,18 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=failing_callback,
                     )
 
-        # Assert async callback that stays pending beyond the budget times out under watchdog
+        # Assert async callback signals cancellation and client returns without blocking on cleanup
+        cancellation_requested = asyncio.Event()
+        cleanup_blocked = asyncio.Event()
+
+        async def blocking_cleanup_callback(r: Any) -> None:
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                cancellation_requested.set()
+                await cleanup_blocked.wait()
+                raise
+
         with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
             async with session("async", server.url) as client:
                 res = await asyncio.wait_for(
@@ -2658,11 +2669,14 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         ORG,
                         REVIEW,
                         timeout=0.2,
-                        on_poll=lambda r: asyncio.sleep(5.0),
+                        on_poll=blocking_cleanup_callback,
                     ),
                     timeout=2.0,
                 )
                 assert res.status == "TIMED_OUT"
+                await asyncio.sleep(0)
+                assert cancellation_requested.is_set()
+                cleanup_blocked.set()
 
     # Assert callback modifying review does not mutate returned review in both sync and async
     mutated_count = 0
