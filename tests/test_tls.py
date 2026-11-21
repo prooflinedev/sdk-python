@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -17,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Self
 
+import httpx2
 import pytest
 
 from proofline import (
@@ -36,6 +38,7 @@ MODES = pytest.mark.parametrize("mode", ["sync", "async"])
 @dataclass(frozen=True)
 class TlsMaterial:
     ca_a: Path
+    ca_a_hash_dir: Path
     ca_b: Path
     server_a_cert: Path
     server_a_key: Path
@@ -53,15 +56,15 @@ def _openssl() -> str:
     return binary
 
 
-def _run_openssl(*args: str, cwd: Path) -> None:
-    subprocess.run(
+def _run_openssl(*args: str, cwd: Path) -> str:
+    completed = subprocess.run(
         [_openssl(), *args],
         cwd=cwd,
         check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
+    return completed.stdout
 
 
 def _create_ca(directory: Path, name: str, common_name: str) -> tuple[Path, Path]:
@@ -162,6 +165,13 @@ def tls_material(tmp_path_factory: pytest.TempPathFactory) -> TlsMaterial:
     directory = tmp_path_factory.mktemp("proofline-tls")
     ca_a, ca_a_key = _create_ca(directory, "ca-a", "Proofline Test Root A")
     ca_b, ca_b_key = _create_ca(directory, "ca-b", "Proofline Test Root B")
+
+    # Populate a real OpenSSL subject-hash directory so capath/SSL_CERT_DIR genuinely resolves ca_a.
+    ca_a_hash_dir = directory / "ca-a-hash-dir"
+    ca_a_hash_dir.mkdir()
+    subject_hash = _run_openssl("x509", "-in", str(ca_a), "-subject_hash", "-noout", cwd=directory)
+    shutil.copyfile(ca_a, ca_a_hash_dir / f"{subject_hash.strip()}.0")
+
     server_a_cert, server_a_key = _create_leaf(
         directory,
         "server-a",
@@ -201,6 +211,7 @@ def tls_material(tmp_path_factory: pytest.TempPathFactory) -> TlsMaterial:
     )
     return TlsMaterial(
         ca_a=ca_a,
+        ca_a_hash_dir=ca_a_hash_dir,
         ca_b=ca_b,
         server_a_cert=server_a_cert,
         server_a_key=server_a_key,
@@ -224,10 +235,16 @@ class _QuietTlsServer(ThreadingHTTPServer):
         self._ssl_context = ssl_context
         super().__init__(address, handler)
 
-    def get_request(self) -> tuple[socket.socket, Any]:
-        connection, client_address = super().get_request()
-        wrapped = self._ssl_context.wrap_socket(connection, server_side=True)
-        return wrapped, client_address
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        # Perform the TLS handshake on the worker thread with a bounded socket timeout
+        # so a stalled or rejecting peer can never block the server accept loop.
+        request.settimeout(5.0)
+        try:
+            wrapped = self._ssl_context.wrap_socket(request, server_side=True)
+        except (OSError, ssl.SSLError):
+            self.shutdown_request(request)
+            return
+        super().process_request_thread(wrapped, client_address)
 
     def handle_error(self, request: object, client_address: object) -> None:
         # Expected TLS handshake rejections from negative tests should stay quiet.
@@ -266,7 +283,8 @@ class TlsServer(AbstractContextManager["TlsServer"]):
         self._thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
         )
-        self.url = f"https://127.0.0.1:{self._server.server_port}"
+        self.port = self._server.server_port
+        self.url = f"https://127.0.0.1:{self.port}"
 
     def __enter__(self) -> Self:
         self._thread.start()
@@ -306,6 +324,12 @@ def clear_tls_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(variable, raising=False)
 
 
+def _handshake(port: int, context: ssl.SSLContext, server_hostname: str) -> None:
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as raw_sock:
+        with context.wrap_socket(raw_sock, server_hostname=server_hostname):
+            pass
+
+
 @MODES
 async def test_https_fails_without_ca_cert(mode: str, tls_material: TlsMaterial) -> None:
     with TlsServer(tls_material.server_a_cert, tls_material.server_a_key) as server:
@@ -318,12 +342,25 @@ async def test_https_fails_without_ca_cert(mode: str, tls_material: TlsMaterial)
 
 
 @MODES
-async def test_https_ignores_ssl_cert_file_and_ssl_cert_dir(
-    mode: str, tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("env_var", ["SSL_CERT_FILE", "SSL_CERT_DIR"])
+async def test_https_ignores_ambient_ssl_cert_env_vars(
+    mode: str, env_var: str, tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SSL_CERT_FILE", str(tls_material.ca_a))
-    monkeypatch.setenv("SSL_CERT_DIR", str(tls_material.ca_a.parent))
+    env_value = (
+        str(tls_material.ca_a) if env_var == "SSL_CERT_FILE" else str(tls_material.ca_a_hash_dir)
+    )
+    monkeypatch.setenv(env_var, env_value)
+
     with TlsServer(tls_material.server_a_cert, tls_material.server_a_key) as server:
+        # Positive control: OpenSSL default context honoring this env var trusts server_a.
+        control_ctx = (
+            ssl.create_default_context(cafile=env_value)
+            if env_var == "SSL_CERT_FILE"
+            else ssl.create_default_context(capath=env_value)
+        )
+        _handshake(server.port, control_ctx, "127.0.0.1")
+
+        # Proofline clients must ignore the ambient env var and reject the untrusted root.
         async with client_session(mode, server.url) as client:
             with pytest.raises(ProoflineError) as caught:
                 await fetch_finding(client)
@@ -406,6 +443,14 @@ async def test_https_enforces_hostname_verification_with_trusted_ca(
     mode: str, tls_material: TlsMaterial
 ) -> None:
     with TlsServer(tls_material.wrong_host_cert, tls_material.wrong_host_key) as server:
+        # Positive control against the exact same leaf: verifying with its matching SAN succeeds,
+        # while verifying against 127.0.0.1 specifically raises SSLCertVerificationError.
+        ctx = _tls.build_ssl_context(tls_material.ca_a)
+        _handshake(server.port, ctx, "wrong.example.invalid")
+        with pytest.raises(ssl.SSLCertVerificationError):
+            _handshake(server.port, ctx, "127.0.0.1")
+
+        # Client connecting to https://127.0.0.1 must therefore fail verification.
         async with client_session(mode, server.url, ca_cert=tls_material.ca_a) as client:
             with pytest.raises(ProoflineError) as caught:
                 await fetch_finding(client)
@@ -438,6 +483,9 @@ def test_ca_cert_validation_fails_fast_before_requests(
     monkeypatch.delenv("PROOFLINE_CA_CERT")
 
     valid_pem = tls_material.ca_a.read_text(encoding="utf-8")
+    valid_lines = valid_pem.splitlines()
+    punctuated_pem = "\n".join([valid_lines[0], "!" + valid_lines[1], *valid_lines[2:]]) + "\n"
+
     invalid_cases: dict[str, bytes] = {
         "empty.pem": b"",
         "plain.pem": b"not a certificate\n",
@@ -446,6 +494,7 @@ def test_ca_cert_validation_fails_fast_before_requests(
             b"-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE\n"
             b"-----END PUBLIC KEY-----\n"
         ),
+        "empty-block.pem": b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
         "unterminated.pem": b"-----BEGIN CERTIFICATE-----\nAAAA\n",
         "nested-begin.pem": (
             b"-----BEGIN CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\n"
@@ -455,6 +504,7 @@ def test_ca_cert_validation_fails_fast_before_requests(
         "bad-base64.pem": (
             b"-----BEGIN CERTIFICATE-----\n***invalid***\n-----END CERTIFICATE-----\n"
         ),
+        "punctuated-base64.pem": punctuated_pem.encode("utf-8"),
         "invalid-asn1.pem": b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
         "mixed-valid-and-invalid-b64.pem": (
             valid_pem + "\n-----BEGIN CERTIFICATE-----\n***invalid***\n-----END CERTIFICATE-----\n"
@@ -473,6 +523,66 @@ def test_ca_cert_validation_fails_fast_before_requests(
     oversized.write_bytes(b"a" * (_tls.MAX_CA_CERT_BYTES + 1))
     with pytest.raises(ValueError, match="limit"):
         factory(TOKEN, ca_cert=oversized)
+
+
+def test_read_bounded_stops_at_limit_plus_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    oversized = tmp_path / "very-large.pem"
+    oversized.write_bytes(b"a" * (_tls.MAX_CA_CERT_BYTES + 65_536))
+    requested_sizes: list[int] = []
+    real_fdopen = os.fdopen
+
+    class TrackingHandle:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def __enter__(self) -> Self:
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            requested_sizes.append(size)
+            return bytes(self._inner.read(size))
+
+    monkeypatch.setattr(
+        _tls.os, "fdopen", lambda fd, mode="r": TrackingHandle(real_fdopen(fd, mode))
+    )
+    with pytest.raises(ValueError, match="limit"):
+        _tls._read_bounded(oversized)
+    assert requested_sizes == [_tls.MAX_CA_CERT_BYTES + 1]
+
+
+def test_ca_cert_rejects_fifo_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mkfifo = getattr(os, "mkfifo", None)
+    if mkfifo is not None:
+        fifo = tmp_path / "blocking.fifo"
+        mkfifo(fifo)
+        with pytest.raises(ValueError, match="regular file"):
+            _tls.build_ssl_context(fifo)
+        return
+
+    # On Windows (no POSIX mkfifo), verify the fstat non-regular-file guard directly.
+    import stat
+
+    dummy = tmp_path / "dummy.pem"
+    dummy.write_bytes(b"")
+    real_fstat = os.fstat
+
+    class FakeFifoStat:
+        def __init__(self, inner: os.stat_result) -> None:
+            self.st_mode = stat.S_IFIFO | 0o600
+            self._inner = inner
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_tls.os, "fstat", lambda fd: FakeFifoStat(real_fstat(fd)))
+        with pytest.raises(ValueError, match="regular file"):
+            _tls.build_ssl_context(dummy)
 
 
 def test_build_ssl_context_preserves_verification_invariants(tls_material: TlsMaterial) -> None:
@@ -520,13 +630,14 @@ async def test_https_accepts_utf8_bom_pem(
             assert loaded.id == FINDING
 
 
-def test_direct_transports_ignore_ssl_cert_env(
-    tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("env_var", ["SSL_CERT_FILE", "SSL_CERT_DIR"])
+def test_direct_transports_ignore_ambient_ssl_cert_env(
+    env_var: str, tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import httpx2
-
-    monkeypatch.setenv("SSL_CERT_FILE", str(tls_material.ca_a))
-    monkeypatch.setenv("SSL_CERT_DIR", str(tls_material.ca_a.parent))
+    env_value = (
+        str(tls_material.ca_a) if env_var == "SSL_CERT_FILE" else str(tls_material.ca_a_hash_dir)
+    )
+    monkeypatch.setenv(env_var, env_value)
     with TlsServer(tls_material.server_a_cert, tls_material.server_a_key) as server:
         sync_transport = _sync_http.Transport()
         try:
@@ -542,7 +653,5 @@ def test_direct_transports_ignore_ssl_cert_env(
                     await async_transport.handle_async_request(httpx2.Request("GET", server.url))
             finally:
                 await async_transport.aclose()
-
-        import asyncio
 
         asyncio.run(run_async())

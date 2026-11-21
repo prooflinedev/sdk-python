@@ -9,8 +9,12 @@ verification.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import errno
 import os
 import ssl
+import stat
 from pathlib import Path
 
 import httpcore2
@@ -38,7 +42,22 @@ def _resolve_path(ca_cert: str | os.PathLike[str] | None) -> Path | None:
 
 
 def _read_bounded(path: Path) -> bytes:
-    with open(path, "rb") as handle:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    owned = True
+    try:
+        metadata = os.fstat(fd)
+        if stat.S_ISDIR(metadata.st_mode):
+            raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(path))
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"The CA certificate path {path} must be a regular file.")
+        owned = False
+        handle = os.fdopen(fd, "rb")
+    except BaseException:
+        if owned:
+            os.close(fd)
+        raise
+    with handle:
         data = handle.read(MAX_CA_CERT_BYTES + 1)
     if len(data) > MAX_CA_CERT_BYTES:
         raise ValueError(
@@ -56,7 +75,7 @@ def _parse_pem_certificates(raw: bytes, path: Path) -> list[str]:
     certificates: list[str] = []
     seen: set[bytes] = set()
     in_block = False
-    current: list[str] = []
+    body_lines: list[str] = []
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -64,15 +83,18 @@ def _parse_pem_certificates(raw: bytes, path: Path) -> list[str]:
             if in_block:
                 raise ValueError(f"The CA certificate file {path} has malformed PEM framing.")
             in_block = True
-            current = [stripped]
+            body_lines = []
         elif stripped == _PEM_END:
             if not in_block:
                 raise ValueError(f"The CA certificate file {path} has malformed PEM framing.")
-            current.append(stripped)
-            block = "\n".join(current) + "\n"
+            body = "".join(body_lines)
+            if not body:
+                raise ValueError(
+                    f"The CA certificate file {path} contains an empty PEM certificate."
+                )
             try:
-                der = ssl.PEM_cert_to_DER_cert(block)
-            except ValueError:
+                der = base64.b64decode(body.encode("ascii"), validate=True)
+            except (UnicodeEncodeError, binascii.Error, ValueError):
                 raise ValueError(
                     f"The CA certificate file {path} contains an invalid PEM certificate."
                 ) from None
@@ -80,9 +102,9 @@ def _parse_pem_certificates(raw: bytes, path: Path) -> list[str]:
                 seen.add(der)
                 certificates.append(ssl.DER_cert_to_PEM_cert(der))
             in_block = False
-            current = []
+            body_lines = []
         elif in_block:
-            current.append(stripped)
+            body_lines.append(stripped)
 
     if in_block:
         raise ValueError(f"The CA certificate file {path} has an unterminated PEM certificate.")
