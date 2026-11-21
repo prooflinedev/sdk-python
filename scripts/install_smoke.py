@@ -116,9 +116,14 @@ def main() -> None:
             assert history.items == []
             assert [item async for item in client.iter_reviews(ORG, filters=filters)] == []
             assert (await client.get_finding(ORG, FINDING)).id == FINDING
-            result = await client.wait_for_review(ORG, REVIEW, timeout=2)
+            result = await client.wait_for_review(
+                ORG, REVIEW, timeout=2, required_environment_key="production"
+            )
             assert result.status == "INCOMPLETE"
             assert result.gaps[0].reason_codes[0] == "WORLD_UNAVAILABLE"
+            assert any(
+                "REQUIRED_ENVIRONMENT_UNAVAILABLE" in gap.reason_codes for gap in result.gaps
+            )
             assert TOKEN not in repr(client)
 
     try:
@@ -128,9 +133,14 @@ def main() -> None:
             assert history.items == []
             assert list(client.iter_reviews(ORG, filters=filters)) == []
             assert client.get_finding(ORG, FINDING).id == FINDING
-            result = client.wait_for_review(ORG, REVIEW, timeout=2)
+            result = client.wait_for_review(
+                ORG, REVIEW, timeout=2, required_environment_key="production"
+            )
             assert result.status == "INCOMPLETE"
             assert result.gaps[0].reason_codes[0] == "WORLD_UNAVAILABLE"
+            assert any(
+                "REQUIRED_ENVIRONMENT_UNAVAILABLE" in gap.reason_codes for gap in result.gaps
+            )
             assert TOKEN not in repr(client)
         asyncio.run(asynchronous())
         assert len(calls) == 10
