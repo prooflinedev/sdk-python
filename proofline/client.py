@@ -162,6 +162,11 @@ def _head_commit(value: str | None) -> None:
         raise ValueError("The head commit must be a full 40 or 64 character hexadecimal SHA.")
 
 
+def _required_environment_key(value: str | None) -> None:
+    if value is not None and (not isinstance(value, str) or not value):
+        raise ValueError("The required environment key must be a nonempty string.")
+
+
 def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
     if not isinstance(page.truncated, bool):
         raise _transport.invalid_response()
@@ -545,6 +550,7 @@ class ProoflineClient(Operations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        required_environment_key: str | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
@@ -553,11 +559,15 @@ class ProoflineClient(Operations):
 
         head_commit_sha holds the outcome to that commit. A review pinned to
         another head ends the wait on that read and is never COMPLETED.
+
+        required_environment_key requires one environment with that exact
+        environment_external_key to have state CHECKED before COMPLETED is returned.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         _head_commit(head_commit_sha)
+        _required_environment_key(required_environment_key)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -572,12 +582,25 @@ class ProoflineClient(Operations):
                     raise
                 if (_transport.remaining() or 0) <= 0:
                     break
-                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
+                result = outcome(
+                    last,
+                    url,
+                    review_id=review_id,
+                    head_commit_sha=head_commit_sha,
+                    required_environment_key=required_environment_key,
+                )
                 if result is not None:
                     return result
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
-            timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
+            timed_out = outcome(
+                last,
+                url,
+                "TIMED_OUT",
+                review_id=review_id,
+                head_commit_sha=head_commit_sha,
+                required_environment_key=required_environment_key,
+            )
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)
@@ -940,10 +963,12 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        required_environment_key: str | None = None,
     ) -> ReviewOutcome:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         _head_commit(head_commit_sha)
+        _required_environment_key(required_environment_key)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -958,12 +983,25 @@ class AsyncProoflineClient(AsyncOperations):
                     raise
                 if (_transport.remaining() or 0) <= 0:
                     break
-                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
+                result = outcome(
+                    last,
+                    url,
+                    review_id=review_id,
+                    head_commit_sha=head_commit_sha,
+                    required_environment_key=required_environment_key,
+                )
                 if result is not None:
                     return result
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
-            timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
+            timed_out = outcome(
+                last,
+                url,
+                "TIMED_OUT",
+                review_id=review_id,
+                head_commit_sha=head_commit_sha,
+                required_environment_key=required_environment_key,
+            )
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)

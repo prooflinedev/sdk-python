@@ -55,6 +55,39 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Requiring an environment check
+
+A pull-request review can finish for the expected commit after checking only staging. If a CI job needs production coverage, pass the production environment's Proofline key to `wait_for_review`. The key appears in the environment's console URL. This example reads it from a variable set by the job.
+
+```python
+import os
+
+target_environment_key = os.environ["PROOFLINE_TARGET_ENVIRONMENT_KEY"]
+outcome = client.wait_for_review(
+    organization_id,
+    review_id,
+    head_commit_sha=head_commit_sha,
+    required_environment_key=target_environment_key,
+)
+if outcome.status != "COMPLETED":
+    detail = outcome.reason or "Inspect the review's assessment gaps."
+    raise SystemExit(f"{outcome.status}: {detail} {outcome.review_url}")
+```
+
+Both clients compare `required_environment_key` with `environment_external_key` exactly, including case. A review must satisfy the usual commit and assessment checks to return `COMPLETED`. When a target is required, exactly one entry must also match its key and report `CHECKED`. Omitting the keyword or passing `None` preserves the usual behavior.
+
+For a settled review, inspect `outcome.gaps` for the environment result:
+
+| Environment gap code | Meaning |
+| --- | --- |
+| `REQUIRED_ENVIRONMENT_UNAVAILABLE` | The review has no entry for the requested key. |
+| `REQUIRED_ENVIRONMENT_AMBIGUOUS` | More than one entry has that key. |
+| `REQUIRED_ENVIRONMENT_NOT_CHECKED` | The matching entry reports `CHECKING`, `NOT_CHECKED`, or `NOT_APPLICABLE`. |
+
+Any of these gaps makes an otherwise completed review `INCOMPLETE`. A running review can still record the check. If the target was skipped, the matching entry in `outcome.review.environments` can explain why. For `PULL_REQUEST_REVIEWS_OFF`, check the repository's link to the environment. For `READS_REFUSED`, its Setup page lists the reads the cloud role refused. A checked environment establishes coverage. Use the findings and your deployment policy to decide whether to ship.
+
+A supplied key must be a nonempty string. Invalid arguments raise `ValueError` before the first request. A malformed key encountered during matching, or an unknown state on any environment entry during decoding, raises `ProoflineError` with type `urn:proofline:sdk:invalid-response`.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
