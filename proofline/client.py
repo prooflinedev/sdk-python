@@ -988,16 +988,16 @@ class AsyncProoflineClient(AsyncOperations):
         head_commit_sha holds the outcome to that commit. A review pinned to
         another head ends the wait on that read and is never COMPLETED.
 
-        When on_poll is provided, it is invoked on each review poll with the
-        latest CustomerReviewDetail (supports both sync and async callbacks).
-        Only reviews fetched and validated before the callback is reached are
-        delivered; deadline expiry can suppress delivery. Inline failures and
-        awaitable failures observed before the deadline propagate (though
-        awaitables that complete or are observed after the deadline or during
-        cancellation do not). on_poll exceptions propagate even when a terminal
-        outcome has already been determined. Synchronous callbacks must return
-        before a terminal result can be delivered and the polling deadline
-        cannot interrupt them.
+        When on_poll is provided, it must be a callable that accepts the review
+        snapshot and returns None or an awaitable (supporting both sync and
+        async callbacks). Only reviews fetched and validated before the callback
+        is reached are delivered; deadline expiry can suppress delivery. Inline
+        failures and awaitable failures observed before the deadline propagate,
+        but failures occurring after the polling wait cancels or discards the
+        callback are suppressed. on_poll exceptions propagate even when a
+        terminal outcome has already been determined. Synchronous callbacks must
+        return before a terminal result can be delivered and the polling
+        deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -1026,7 +1026,10 @@ class AsyncProoflineClient(AsyncOperations):
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
                                 if isinstance(res, (Coroutine, Generator)):
-                                    res.close()
+                                    try:
+                                        res.close()
+                                    except BaseException:
+                                        pass
                                 elif isinstance(res, (AsyncTask, AsyncFuture)):
                                     res.cancel()
                                     res.add_done_callback(
@@ -1095,7 +1098,10 @@ class AsyncProoflineClient(AsyncOperations):
                                         isinstance(res, (Coroutine, Generator))
                                         and not wrapper_started
                                     ):
-                                        res.close()
+                                        try:
+                                            res.close()
+                                        except BaseException:
+                                            pass
                                     raise
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
@@ -1112,7 +1118,10 @@ class AsyncProoflineClient(AsyncOperations):
                                         isinstance(res, (Coroutine, Generator))
                                         and not wrapper_started
                                     ):
-                                        res.close()
+                                        try:
+                                            res.close()
+                                        except BaseException:
+                                            pass
                                     if result is not None:
                                         return result
                                     break

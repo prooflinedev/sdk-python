@@ -2629,6 +2629,11 @@ async def test_wait_for_review_invokes_on_poll_callback(
     # Assert async client also works with regular synchronous callbacks returning None
     if mode == "async":
         sync_calls: list[str] = []
+
+        def inline_sync_cb(r: Any) -> None:
+            sync_calls.append(r.status)
+            r.status = "MUTATED"
+
         with Server(lambda request, index: Reply(body=responses[index])) as server:
             async with session("async", server.url) as client:
                 result = await call(
@@ -2637,10 +2642,11 @@ async def test_wait_for_review_invokes_on_poll_callback(
                     ORG,
                     REVIEW,
                     timeout=100,
-                    on_poll=lambda r: sync_calls.append(r.status),
+                    on_poll=inline_sync_cb,
                 )
                 assert result.status == "COMPLETED"
                 assert sync_calls == ["RUNNING", "COMPLETED"]
+                assert result.review.status == "COMPLETED"
 
         # Assert callback TimeoutError before deadline propagates
         async def failing_callback(r: Any) -> None:
@@ -2673,27 +2679,6 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=failed_future_callback,
                     )
 
-        # Assert synchronous callback returning pending Future is cancelled on deadline expiry
-        pending_fut: asyncio.Future[None] | None = None
-
-        def pending_future_callback(r: Any) -> asyncio.Future[None]:
-            nonlocal pending_fut
-            loop = asyncio.get_running_loop()
-            pending_fut = loop.create_future()
-            return pending_fut
-
-        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
-            async with session("async", server.url) as client:
-                res = await client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=0.2,
-                    on_poll=pending_future_callback,
-                )
-                assert res.status == "TIMED_OUT"
-                assert pending_fut is not None
-                assert pending_fut.cancelled()
-
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
         # tasks cannot stall teardown.
         watchdog_code = """
@@ -2702,6 +2687,26 @@ from typing import Any
 from tests.test_http import session, Server, Reply, review, ORG, REVIEW
 
 async def main() -> None:
+    pending_fut: asyncio.Future[None] | None = None
+
+    def pending_future_callback(r: Any) -> asyncio.Future[None]:
+        nonlocal pending_fut
+        loop = asyncio.get_running_loop()
+        pending_fut = loop.create_future()
+        return pending_fut
+
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session("async", server.url) as client:
+            res = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=0.2,
+                on_poll=pending_future_callback,
+            )
+            assert res.status == "TIMED_OUT"
+            assert pending_fut is not None
+            assert pending_fut.cancelled()
+
     cancellation_requested = asyncio.Event()
     cleanup_blocked = asyncio.Event()
 
