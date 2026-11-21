@@ -775,6 +775,74 @@ async def test_successful_private_body_decoder_failure_is_static(mode: str) -> N
 
 
 @MODES
+async def test_caller_errors_before_any_request_are_not_reported_as_api_responses(
+    mode: str,
+) -> None:
+    # Nothing reaches Proofline, so nothing can be an invalid Proofline response: the
+    # caller's mistake keeps its own type, message and traceback.
+    with Server(lambda request, index: Reply(body=finding())) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(TypeError, match="limt"):
+                await call(client, "list_reviews", ORG, limt=5)
+            with pytest.raises(AttributeError, match="to_dict"):
+                await call(client, "request_patch_review", ORG, REPOSITORY, body={"patch": "x"})
+            # Methods generated from the contract share the same mapping.
+            with pytest.raises(AttributeError, match="to_dict"):
+                await call(client, "request_scan", ORG, REPOSITORY, body={"budget_credits": 1})
+            with pytest.raises(TypeError) as raised:
+                await call(client, "get_finding", ORG)
+            assert raised.value.__traceback__ is not None
+            assert not isinstance(raised.value, ProoflineError)
+        assert server.requests == []
+
+
+@MODES
+async def test_a_body_that_arrives_still_decodes_to_the_static_sdk_problem(mode: str) -> None:
+    # A caller error earlier on the same client must not change how a later reply maps.
+    with Server(lambda request, index: Reply(body={"id": PRIVATE})) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(TypeError):
+                await call(client, "list_reviews", ORG, limt=5)
+            scan = models.ScanRequestBody(budget_credits=1, request_id=REVIEW)
+            for name, args, kwargs in [
+                ("get_finding", (ORG, FINDING), {}),
+                ("request_scan", (ORG, REPOSITORY), {"body": scan}),
+            ]:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, name, *args, **kwargs)
+                assert raised.value.type == "urn:proofline:sdk:invalid-response"
+                assert PRIVATE not in "".join(traceback.format_exception(raised.value))
+        assert len(server.requests) == 2
+
+
+@MODES
+@pytest.mark.parametrize("status", [400, 500])
+async def test_problem_nested_past_the_decoder_limit_stays_a_typed_problem(
+    mode: str, status: int
+) -> None:
+    # Nesting deeper than json allows fits well inside 8 MiB and raises RecursionError.
+    deep = b"[" * 100_000 + b"]" * 100_000
+    with Server(lambda request, index: Reply(status, deep)) as server:
+        async with session(mode, server.url) as client:
+            scan = models.ScanRequestBody(budget_credits=1, request_id=REVIEW)
+            for name, args, kwargs in [
+                ("get_finding", (ORG, FINDING), {}),
+                ("request_scan", (ORG, REPOSITORY), {"body": scan}),
+                (
+                    "export_reviews",
+                    (ORG, "reviews"),
+                    {"from_time": "2026-10-01T00:00:00Z", "to_time": "2026-10-02T00:00:00Z"},
+                ),
+            ]:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, name, *args, **kwargs)
+                assert raised.value.status == status
+                assert raised.value.detail == (
+                    "Proofline returned an HTTP error without a problem document."
+                )
+
+
+@MODES
 async def test_redirect_never_contacts_other_origin(mode: str) -> None:
     with Server(lambda request, index: Reply(body=finding())) as other:
         with Server(
