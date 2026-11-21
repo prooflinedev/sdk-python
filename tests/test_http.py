@@ -2755,6 +2755,24 @@ async def main() -> None:
             assert cancellation_requested_term.is_set()
             cleanup_blocked_term.set()
 
+    resumed_within_budget = False
+
+    async def suspending_callback(r: Any) -> None:
+        nonlocal resumed_within_budget
+        await asyncio.sleep(0.05)
+        resumed_within_budget = True
+
+    with Server(lambda request, index: Reply(body=review())) as server:
+        async with session("async", server.url) as client:
+            res = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=5.0,
+                on_poll=suspending_callback,
+            )
+            assert res.status == "COMPLETED"
+            assert resumed_within_budget
+
 asyncio.run(main())
 """
         subprocess.run(

@@ -18,9 +18,9 @@ from asyncio import (
 from asyncio import (
     wait as async_wait,
 )
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Generator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from copy import deepcopy
-from inspect import isawaitable
+from inspect import CORO_CREATED, getcoroutinestate, isawaitable, iscoroutine
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -211,6 +211,31 @@ def _pagination_limit(resource: str = "Review") -> ProoflineError:
 def _export_page_limit(max_pages: int) -> None:
     if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= 1_000:
         raise ValueError("Export pagination requires max_pages 1..1000.")
+
+
+class _DeadlineExhausted(Exception):
+    """Raised to abort deepcopy when the transport deadline expires."""
+
+
+class _DeadlineMemo(dict[int, Any]):
+    def __contains__(self, key: object) -> bool:
+        if (_transport.remaining() or 0) <= 0:
+            raise _DeadlineExhausted()
+        return super().__contains__(key)
+
+    def __setitem__(self, key: int, value: Any) -> None:
+        if (_transport.remaining() or 0) <= 0:
+            raise _DeadlineExhausted()
+        super().__setitem__(key, value)
+
+
+def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | None:
+    if (_transport.remaining() or 0) <= 0:
+        return None
+    try:
+        return deepcopy(detail, _DeadlineMemo({id(UNSET): UNSET}))
+    except _DeadlineExhausted:
+        return None
 
 
 def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
@@ -604,8 +629,8 @@ class ProoflineClient(Operations):
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
-                    snapshot = deepcopy(last, {id(UNSET): UNSET})
-                    if (_transport.remaining() or 0) > 0:
+                    snapshot = _snapshot_review(last)
+                    if snapshot is not None and (_transport.remaining() or 0) > 0:
                         on_poll(snapshot)
                 if result is not None:
                     return result
@@ -993,11 +1018,11 @@ class AsyncProoflineClient(AsyncOperations):
         async callbacks). Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Inline
         failures and awaitable failures observed before the deadline propagate,
-        but failures occurring after the polling wait cancels or discards the
-        callback are suppressed. on_poll exceptions propagate even when a
-        terminal outcome has already been determined. Synchronous callbacks must
-        return before a terminal result can be delivered and the polling
-        deadline cannot interrupt them.
+        but the deadline can suppress awaitable failures even before cancellation
+        or discard, including when an outcome is already classified. on_poll
+        exceptions propagate even when a terminal outcome has already been
+        determined. Synchronous callbacks must return before a terminal result
+        can be delivered and the polling deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -1019,22 +1044,26 @@ class AsyncProoflineClient(AsyncOperations):
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
-                    snapshot = deepcopy(last, {id(UNSET): UNSET})
-                    if (_transport.remaining() or 0) > 0:
+                    snapshot = _snapshot_review(last)
+                    if snapshot is not None and (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
                         if isawaitable(res):
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
-                                if isinstance(res, (Coroutine, Generator)):
+                                if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
                                     try:
                                         res.close()
                                     except BaseException:
                                         pass
                                 elif isinstance(res, (AsyncTask, AsyncFuture)):
-                                    res.cancel()
-                                    res.add_done_callback(
-                                        lambda t: t.exception() if not t.cancelled() else None
-                                    )
+                                    if res.done():
+                                        if not res.cancelled():
+                                            res.exception()
+                                    else:
+                                        res.cancel()
+                                        res.add_done_callback(
+                                            lambda t: t.exception() if not t.cancelled() else None
+                                        )
                                 if result is not None:
                                     return result
                                 break
@@ -1064,10 +1093,16 @@ class AsyncProoflineClient(AsyncOperations):
                                     if cb_finished_in_budget and res in done:
                                         res.result()
                                     else:
-                                        res.cancel()
-                                        res.add_done_callback(
-                                            lambda t: t.exception() if not t.cancelled() else None
-                                        )
+                                        if res.done():
+                                            if not res.cancelled():
+                                                res.exception()
+                                        else:
+                                            res.cancel()
+                                            res.add_done_callback(
+                                                lambda t: t.exception()
+                                                if not t.cancelled()
+                                                else None
+                                            )
                                         if result is not None:
                                             return result
                                         break
@@ -1095,8 +1130,9 @@ class AsyncProoflineClient(AsyncOperations):
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
                                     if (
-                                        isinstance(res, (Coroutine, Generator))
+                                        iscoroutine(res)
                                         and not wrapper_started
+                                        and getcoroutinestate(res) == CORO_CREATED
                                     ):
                                         try:
                                             res.close()
@@ -1115,8 +1151,9 @@ class AsyncProoflineClient(AsyncOperations):
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
                                     if (
-                                        isinstance(res, (Coroutine, Generator))
+                                        iscoroutine(res)
                                         and not wrapper_started
+                                        and getcoroutinestate(res) == CORO_CREATED
                                     ):
                                         try:
                                             res.close()
