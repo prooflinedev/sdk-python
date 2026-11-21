@@ -21,7 +21,6 @@ from asyncio import (
     wait as async_wait,
 )
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from copy import deepcopy
 from inspect import CORO_CREATED, getcoroutinestate, isawaitable, iscoroutine
 from string import hexdigits
 from time import monotonic, sleep
@@ -246,108 +245,171 @@ def _get_obj_attrs(obj: Any) -> list[tuple[str, Any]]:
     return result
 
 
+_ITEM_TASK = 1
+_DICT_EXPAND = 2
+_LIST_EXPAND = 3
+_OBJ_EXPAND = 4
+_EXPAND_BATCH_SIZE = 64
+
+
+def _deadline_expired() -> bool:
+    budget = _transport.remaining()
+    return budget is not None and budget <= 0
+
+
 def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | None:
-    if (_transport.remaining() or 0) <= 0:
+    if _deadline_expired():
         return None
 
     memo: dict[int, Any] = {id(UNSET): UNSET}
     root = copy.copy(detail)
     memo[id(detail)] = root
 
-    stack: list[tuple[Any, Any, bool, Any]] = []
-    for attr, val in _get_obj_attrs(detail):
-        stack.append((root, attr, True, val))
+    stack: list[Any] = [(_OBJ_EXPAND, root, iter(_get_obj_attrs(detail)))]
 
     while stack:
-        if (_transport.remaining() or 0) <= 0:
+        if _deadline_expired():
             return None
 
-        parent, key, is_attr, val = stack.pop()
+        task_type, target, it_or_key, *extra = stack.pop()
 
-        if _is_immutable(val):
-            if is_attr:
-                setattr(parent, key, val)
-            else:
-                parent[key] = val
-            continue
-
-        val_id = id(val)
-        if val_id in memo:
-            resolved = memo[val_id]
-            if is_attr:
-                setattr(parent, key, resolved)
-            else:
-                parent[key] = resolved
-            continue
-
-        if isinstance(val, dict):
-            new_dict: dict[Any, Any] = {}
-            memo[val_id] = new_dict
-            if is_attr:
-                setattr(parent, key, new_dict)
-            else:
-                parent[key] = new_dict
-            for k, v in val.items():
-                stack.append((new_dict, k, False, v))
-        elif isinstance(val, list):
-            new_list = [None] * len(val)
-            memo[val_id] = new_list
-            if is_attr:
-                setattr(parent, key, new_list)
-            else:
-                parent[key] = new_list
-            for idx, item in enumerate(val):
-                stack.append((new_list, idx, False, item))
-        elif isinstance(val, tuple):
-            if all(_is_immutable(x) for x in val):
+        if task_type == _ITEM_TASK:
+            key, is_attr, val = it_or_key, extra[0], extra[1]
+            if _is_immutable(val):
                 if is_attr:
-                    setattr(parent, key, val)
+                    setattr(target, key, val)
                 else:
-                    parent[key] = val
-            else:
-                new_list = [None] * len(val)
+                    target[key] = val
+                continue
+            val_id = id(val)
+            if val_id in memo:
+                resolved = memo[val_id]
+                if is_attr:
+                    setattr(target, key, resolved)
+                else:
+                    target[key] = resolved
+                continue
+            if isinstance(val, dict):
+                new_dict: dict[Any, Any] = {}
+                memo[val_id] = new_dict
+                if is_attr:
+                    setattr(target, key, new_dict)
+                else:
+                    target[key] = new_dict
+                stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
+            elif isinstance(val, list):
+                new_list: list[Any] = []
                 memo[val_id] = new_list
                 if is_attr:
-                    setattr(parent, key, new_list)
+                    setattr(target, key, new_list)
                 else:
-                    parent[key] = new_list
-                for idx, item in enumerate(val):
-                    stack.append((new_list, idx, False, item))
-        elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
-            new_obj = copy.copy(val)
-            memo[val_id] = new_obj
-            if is_attr:
-                setattr(parent, key, new_obj)
+                    target[key] = new_list
+                stack.append((_LIST_EXPAND, new_list, iter(val)))
+            elif isinstance(val, tuple):
+                if all(_is_immutable(x) for x in val):
+                    resolved = val
+                else:
+                    resolved = tuple(
+                        memo[id(x)]
+                        if id(x) in memo
+                        else (x if _is_immutable(x) else copy.deepcopy(x, memo))
+                        for x in val
+                    )
+                memo[val_id] = resolved
+                if is_attr:
+                    setattr(target, key, resolved)
+                else:
+                    target[key] = resolved
+            elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                new_obj = copy.copy(val)
+                memo[val_id] = new_obj
+                if is_attr:
+                    setattr(target, key, new_obj)
+                else:
+                    target[key] = new_obj
+                stack.append((_OBJ_EXPAND, new_obj, iter(_get_obj_attrs(val))))
             else:
-                parent[key] = new_obj
-            for attr, attr_val in _get_obj_attrs(val):
-                stack.append((new_obj, attr, True, attr_val))
-        else:
-            try:
-                resolved = deepcopy(val, memo)
-            except Exception:
-                resolved = val
-            if is_attr:
-                setattr(parent, key, resolved)
+                try:
+                    resolved = copy.deepcopy(val, memo)
+                except Exception:
+                    resolved = val
+                if is_attr:
+                    setattr(target, key, resolved)
+                else:
+                    target[key] = resolved
+
+        elif task_type == _DICT_EXPAND:
+            target_dict, it = target, it_or_key
+            for _ in range(_EXPAND_BATCH_SIZE):
+                try:
+                    k, v = next(it)
+                except StopIteration:
+                    break
+                if _is_immutable(v):
+                    target_dict[k] = v
+                elif id(v) in memo:
+                    target_dict[k] = memo[id(v)]
+                else:
+                    stack.append((_DICT_EXPAND, target_dict, it))
+                    stack.append((_ITEM_TASK, target_dict, k, False, v))
+                    break
             else:
-                parent[key] = resolved
+                stack.append((_DICT_EXPAND, target_dict, it))
+
+        elif task_type == _LIST_EXPAND:
+            target_list, it = target, it_or_key
+            for _ in range(_EXPAND_BATCH_SIZE):
+                try:
+                    v = next(it)
+                except StopIteration:
+                    break
+                if _is_immutable(v):
+                    target_list.append(v)
+                elif id(v) in memo:
+                    target_list.append(memo[id(v)])
+                else:
+                    idx = len(target_list)
+                    target_list.append(None)
+                    stack.append((_LIST_EXPAND, target_list, it))
+                    stack.append((_ITEM_TASK, target_list, idx, False, v))
+                    break
+            else:
+                stack.append((_LIST_EXPAND, target_list, it))
+
+        elif task_type == _OBJ_EXPAND:
+            new_obj, it = target, it_or_key
+            for _ in range(_EXPAND_BATCH_SIZE):
+                try:
+                    attr, attr_val = next(it)
+                except StopIteration:
+                    break
+                if _is_immutable(attr_val):
+                    setattr(new_obj, attr, attr_val)
+                elif id(attr_val) in memo:
+                    setattr(new_obj, attr, memo[id(attr_val)])
+                else:
+                    stack.append((_OBJ_EXPAND, new_obj, it))
+                    stack.append((_ITEM_TASK, new_obj, attr, True, attr_val))
+                    break
+            else:
+                stack.append((_OBJ_EXPAND, new_obj, it))
 
     return root
 
 
 def _safe_cleanup_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
     try:
-        loop = fut.get_loop()
-        if loop.is_closed():
-            return
         if fut.done():
             if not fut.cancelled():
                 fut.exception()
-        else:
-            fut.cancel()
-            fut.add_done_callback(
-                lambda t: t.exception() if not t.cancelled() else None
-            )
+            return
+        loop = fut.get_loop()
+        if loop.is_closed():
+            return
+        fut.cancel()
+        fut.add_done_callback(
+            lambda t: t.exception() if not t.cancelled() else None
+        )
     except BaseException:
         pass
 
@@ -1129,7 +1191,9 @@ class AsyncProoflineClient(AsyncOperations):
 
         When on_poll is provided, it must be a callable that accepts the review
         snapshot and returns None or an awaitable (supporting both sync and
-        async callbacks). Only reviews fetched and validated before the callback
+        async callbacks). Callbacks must return promptly even when they return
+        an awaitable, because the polling deadline cannot interrupt the
+        invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Inline
         failures and awaitable failures observed before the deadline propagate,
         but the deadline can suppress awaitable failures even before cancellation
@@ -1208,6 +1272,17 @@ class AsyncProoflineClient(AsyncOperations):
                                 async def _runner() -> None:
                                     nonlocal wrapper_started
                                     wrapper_started = True
+                                    deadline_val = _transport.DEADLINE.get()
+                                    if deadline_val is not None and monotonic() > deadline_val:
+                                        if (
+                                            iscoroutine(coro)
+                                            and getcoroutinestate(coro) == CORO_CREATED
+                                        ):
+                                            try:
+                                                coro.close()
+                                            except BaseException:
+                                                pass
+                                        return
                                     try:
                                         await coro
                                     finally:

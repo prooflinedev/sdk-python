@@ -2814,7 +2814,7 @@ asyncio.run(main())
             assert res.review.actions.publish is False
             assert "mutated" not in res.review.additional_properties
 
-    # Assert deeply nested extension fields do not trigger RecursionError in snapshot
+    # Test snapshot directly with an in-memory deep extension and custom tuple to bypass HTTP JSON
     deep_container: dict[str, Any] = {}
     curr = deep_container
     for _ in range(3000):
@@ -2822,23 +2822,20 @@ asyncio.run(main())
         curr = curr["child"]
     curr["val"] = "deepest"
 
-    nested_detail_received = False
+    detail = CustomerReviewDetail.from_dict(responses[1])
+    detail.additional_properties["deep"] = deep_container
+    detail.additional_properties["custom_tuple"] = ({"nested": "val"}, 42)
 
-    def deep_extension_cb(r: Any) -> None:
-        nonlocal nested_detail_received
-        assert r.additional_properties["deep"]["child"] is not None
-        nested_detail_received = True
+    from proofline.client import _snapshot_review
 
-    deep_review = {**responses[1], "deep": deep_container}
-    with Server(lambda request, index: Reply(body=deep_review)) as server:
-        async with session(mode, server.url) as client:
-            res = await call(
-                client,
-                "wait_for_review",
-                ORG,
-                REVIEW,
-                timeout=10,
-                on_poll=deep_extension_cb,
-            )
-            assert res.status == "COMPLETED"
-            assert nested_detail_received
+    snap = _snapshot_review(detail)
+    assert snap is not None
+    assert snap.additional_properties["deep"]["child"] is not None
+    assert snap is not detail
+    assert snap.additional_properties is not detail.additional_properties
+    assert isinstance(snap.additional_properties["custom_tuple"], tuple)
+    assert (
+        snap.additional_properties["custom_tuple"][0]
+        is not detail.additional_properties["custom_tuple"][0]
+    )
+    assert snap.additional_properties["custom_tuple"][0]["nested"] == "val"
