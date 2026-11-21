@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import math
 from asyncio import (
+    create_task as async_create_task,
+)
+from asyncio import (
     sleep as async_sleep,
 )
 from asyncio import (
-    wait_for as async_wait_for,
+    wait as async_wait,
 )
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from copy import deepcopy
 from inspect import isawaitable
 from string import hexdigits
 from time import monotonic, sleep
@@ -84,6 +88,10 @@ from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
 
 T = TypeVar("T")
+
+
+async def _await_res(res: Awaitable[Any]) -> None:
+    await res
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
 _AgentSessionPromptModels = tuple[type[AgentSessionPromptType0], type[AgentSessionPromptType1]]
 _AGENT_SESSION_PROMPT_MODELS: _AgentSessionPromptModels = (
@@ -587,7 +595,7 @@ class ProoflineClient(Operations):
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None:
-                    on_poll(last)
+                    on_poll(deepcopy(last))
                 if result is not None:
                     return result
                 if (_transport.remaining() or 0) <= 0:
@@ -994,7 +1002,7 @@ class AsyncProoflineClient(AsyncOperations):
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None:
-                    res = on_poll(last)
+                    res = on_poll(deepcopy(last))
                     if isawaitable(res):
                         remaining_budget = _transport.remaining()
                         if remaining_budget is not None and remaining_budget <= 0:
@@ -1003,22 +1011,20 @@ class AsyncProoflineClient(AsyncOperations):
                             if result is not None:
                                 return result
                             break
-                        timed_out_box = [False]
 
-                        async def _run() -> None:
-                            try:
-                                await res
-                            except TimeoutError:
-                                # Mark that callback itself raised TimeoutError while running
-                                timed_out_box[0] = True
-                                raise
-
-                        try:
-                            await async_wait_for(_run(), timeout=remaining_budget)
-                        except TimeoutError as exc:
-                            # Re-raise only if callback itself explicitly raised TimeoutError
-                            if timed_out_box[0] and (_transport.remaining() or 0) > 0:
-                                raise exc from None
+                        coro = res if isinstance(res, Coroutine) else _await_res(res)
+                        task = async_create_task(coro)
+                        done, pending = await async_wait({task}, timeout=remaining_budget)
+                        if task in done:
+                            # Re-raise any exception raised by callback
+                            task.result()
+                        else:
+                            # Callback didn't finish within budget: cancel task without waiting
+                            task.cancel()
+                            # Observe task exception to silence unhandled task errors
+                            task.add_done_callback(
+                                lambda t: t.exception() if not t.cancelled() else None
+                            )
                             if result is not None:
                                 return result
                             break

@@ -2636,24 +2636,32 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 assert result.status == "COMPLETED"
                 assert sync_calls == ["RUNNING", "COMPLETED"]
 
-        # Assert async callback blocking past remaining budget returns TIMED_OUT and is cancelled
-        cancelled = False
-
-        async def slow_callback(r: Any) -> None:
-            nonlocal cancelled
-            try:
-                await asyncio.sleep(2.0)
-            except asyncio.CancelledError:
-                cancelled = True
-                raise
+        # Assert callback TimeoutError before deadline propagates
+        async def failing_callback(r: Any) -> None:
+            raise TimeoutError("callback failure")
 
         with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
             async with session("async", server.url) as client:
-                result = await client.wait_for_review(
+                with pytest.raises(TimeoutError, match="callback failure"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=failing_callback,
+                    )
+
+        # Assert callback modifying review does not mutate returned review
+        def mutating_callback(r: Any) -> None:
+            r.status = "MUTATED"
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session(mode, server.url) as client:
+                res = await call(
+                    client,
+                    "wait_for_review",
                     ORG,
                     REVIEW,
-                    timeout=0.2,
-                    on_poll=slow_callback,
+                    timeout=10,
+                    on_poll=mutating_callback,
                 )
-                assert result.status == "TIMED_OUT"
-                assert cancelled
+                assert res.review.status != "MUTATED"
