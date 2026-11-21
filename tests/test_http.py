@@ -2687,6 +2687,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
         # tasks cannot stall teardown.
         watchdog_code = """
 import asyncio
+import time
 from typing import Any
 from tests.test_http import session, Server, Reply, review, ORG, REVIEW
 
@@ -2713,15 +2714,19 @@ async def main() -> None:
 
     cancellation_requested = asyncio.Event()
     cleanup_blocked = asyncio.Event()
+    cancellation_time = 0.0
 
     async def blocking_cleanup_callback(r: Any) -> None:
+        nonlocal cancellation_time
         try:
             await asyncio.sleep(5.0)
         except asyncio.CancelledError:
+            cancellation_time = time.monotonic()
             cancellation_requested.set()
             await cleanup_blocked.wait()
             raise
 
+    start_t = time.monotonic()
     with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
         async with session("async", server.url) as client:
             res = await client.wait_for_review(
@@ -2733,19 +2738,24 @@ async def main() -> None:
             assert res.status == "TIMED_OUT"
             await asyncio.sleep(0)
             assert cancellation_requested.is_set()
+            assert cancellation_time >= start_t + 0.2 - 0.02
             cleanup_blocked.set()
 
     cancellation_requested_term = asyncio.Event()
     cleanup_blocked_term = asyncio.Event()
+    cancellation_time_term = 0.0
 
     async def blocking_cleanup_callback_term(r: Any) -> None:
+        nonlocal cancellation_time_term
         try:
             await asyncio.sleep(5.0)
         except asyncio.CancelledError:
+            cancellation_time_term = time.monotonic()
             cancellation_requested_term.set()
             await cleanup_blocked_term.wait()
             raise
 
+    start_term_t = time.monotonic()
     with Server(lambda request, index: Reply(body=review())) as server:
         async with session("async", server.url) as client:
             res = await client.wait_for_review(
@@ -2757,13 +2767,14 @@ async def main() -> None:
             assert res.status == "COMPLETED"
             await asyncio.sleep(0)
             assert cancellation_requested_term.is_set()
+            assert cancellation_time_term >= start_term_t + 0.2 - 0.02
             cleanup_blocked_term.set()
 
     resumed_within_budget = False
 
     async def suspending_callback(r: Any) -> None:
         nonlocal resumed_within_budget
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
         resumed_within_budget = True
 
     with Server(lambda request, index: Reply(body=review())) as server:
@@ -2870,7 +2881,7 @@ asyncio.run(main())
         curr_l = curr_l[0]
     assert curr_l == "leaf"
 
-    # Assert pending future on closed loop skips wait
+    # Assert pending future on closed loop or foreign loop raises ValueError
     if mode == "async":
         other_loop = asyncio.new_event_loop()
         closed_fut = other_loop.create_future()
@@ -2878,15 +2889,28 @@ asyncio.run(main())
 
         with Server(lambda request, index: Reply(body=responses[1])) as server:
             async with session("async", server.url) as client:
-                res = await call(
-                    client,
-                    "wait_for_review",
-                    ORG,
-                    REVIEW,
-                    timeout=10,
-                    on_poll=lambda r: closed_fut,
-                )
-                assert res.status == "COMPLETED"
+                with pytest.raises(ValueError, match="running event loop"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=lambda r: closed_fut,
+                    )
+
+        foreign_loop = asyncio.new_event_loop()
+        foreign_fut = foreign_loop.create_future()
+        try:
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="running event loop"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=10,
+                            on_poll=lambda r: foreign_fut,
+                        )
+        finally:
+            foreign_loop.close()
 
         # Assert already-suspended native coroutine is closed if deadline is expired
         suspended_cleaned_up = False
@@ -2922,3 +2946,46 @@ asyncio.run(main())
                 )
                 assert res.status == "COMPLETED"
                 assert suspended_cleaned_up
+
+    # Cyclic tuple whose list points back to it
+    cyclic_list: list[Any] = []
+    cyclic_tuple = (cyclic_list, "tuple_leaf")
+    cyclic_list.append(cyclic_tuple)
+
+    detail_cyclic = CustomerReviewDetail.from_dict(responses[1])
+    detail_cyclic.additional_properties["cyclic_tuple"] = cyclic_tuple
+
+    snap_cyclic = _snapshot_review(detail_cyclic)
+    assert snap_cyclic is not None
+    snap_tup = snap_cyclic.additional_properties["cyclic_tuple"]
+    snap_lst = snap_tup[0]
+    assert snap_lst[0] is snap_tup
+
+    # Writable memoryview copied to independent storage
+    orig_bytearray = bytearray(b"hello")
+    orig_view = memoryview(orig_bytearray)
+    detail_view = CustomerReviewDetail.from_dict(responses[1])
+    detail_view.additional_properties["memview"] = orig_view
+
+    snap_view = _snapshot_review(detail_view)
+    assert snap_view is not None
+    copied_view = snap_view.additional_properties["memview"]
+    assert isinstance(copied_view, memoryview)
+    assert not copied_view.readonly
+    copied_view[0] = ord(b"X")
+    assert orig_bytearray == bytearray(b"hello")
+    assert bytes(copied_view) == b"Xello"
+
+    # Unsupported mutable value rejected
+    import threading
+
+    detail_unsupported = CustomerReviewDetail.from_dict(responses[1])
+    detail_unsupported.additional_properties["bad"] = threading.Lock()
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_unsupported)
+
+    # Safe finalization size for tuples skips snapshot delivery
+    huge_tuple = tuple(range(1001))
+    detail_huge = CustomerReviewDetail.from_dict(responses[1])
+    detail_huge.additional_properties["huge"] = huge_tuple
+    assert _snapshot_review(detail_huge) is None

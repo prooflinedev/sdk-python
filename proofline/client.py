@@ -15,6 +15,9 @@ from asyncio import (
     create_task as async_create_task,
 )
 from asyncio import (
+    get_running_loop as async_get_running_loop,
+)
+from asyncio import (
     sleep as async_sleep,
 )
 from asyncio import (
@@ -252,6 +255,7 @@ _OBJ_EXPAND = 4
 _TUPLE_EXPAND = 5
 _TUPLE_FINALIZE = 6
 _EXPAND_BATCH_SIZE = 64
+_MAX_SAFE_TUPLE_SIZE = 1000
 
 
 def _deadline_expired() -> bool:
@@ -308,6 +312,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     target[key] = new_list
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
             elif isinstance(val, tuple):
+                if len(val) > _MAX_SAFE_TUPLE_SIZE:
+                    return None
                 if len(val) == 0:
                     memo[val_id] = ()
                     if is_attr:
@@ -328,6 +334,18 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         )
                     )
                     stack.append((_TUPLE_EXPAND, temp_list, iter(val)))
+            elif isinstance(val, (memoryview, bytearray)):
+                if isinstance(val, bytearray):
+                    resolved = bytearray(val)
+                elif val.readonly:
+                    resolved = memoryview(bytes(val))
+                else:
+                    resolved = memoryview(bytearray(val))
+                memo[val_id] = resolved
+                if is_attr:
+                    setattr(target, key, resolved)
+                else:
+                    target[key] = resolved
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                 new_obj = copy.copy(val)
                 memo[val_id] = new_obj
@@ -339,8 +357,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             else:
                 try:
                     resolved = copy.deepcopy(val, memo)
-                except Exception:
-                    resolved = val
+                except Exception as exc:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    ) from exc
+                memo[val_id] = resolved
                 if is_attr:
                     setattr(target, key, resolved)
                 else:
@@ -430,11 +451,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 extra[2],
                 extra[3],
             )
-            if all(a is b for a, b in zip(orig_val, temp_list)):
+            if val_id in memo:
+                res_tuple = memo[val_id]
+            elif all(a is b for a, b in zip(orig_val, temp_list)):
                 res_tuple = orig_val
+                memo[val_id] = res_tuple
             else:
                 res_tuple = tuple(temp_list)
-            memo[val_id] = res_tuple
+                memo[val_id] = res_tuple
             if is_attr:
                 setattr(target, key, res_tuple)
             else:
@@ -1237,7 +1261,8 @@ class AsyncProoflineClient(AsyncOperations):
 
         When on_poll is provided, it must be a callable that accepts the review
         snapshot and returns None or an awaitable (supporting both sync and
-        async callbacks). Callbacks must return promptly even when they return
+        async callbacks). Any pending futures returned by on_poll must belong to
+        the running event loop. Callbacks must return promptly even when they return
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Inline
@@ -1295,11 +1320,13 @@ class AsyncProoflineClient(AsyncOperations):
                                         res_loop = res.get_loop()
                                     except Exception:
                                         res_loop = None
-                                    if res_loop is not None and res_loop.is_closed():
+                                    running_loop = async_get_running_loop()
+                                    if res_loop is not running_loop or res_loop.is_closed():
                                         _safe_cleanup_future(res)
-                                        if result is not None:
-                                            return result
-                                        break
+                                        raise ValueError(
+                                            "Pending callback futures must belong "
+                                            "to the running event loop."
+                                        )
                                     completed_at: list[float] = []
                                     res.add_done_callback(
                                         lambda _: completed_at.append(monotonic())
