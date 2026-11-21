@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from asyncio import sleep as async_sleep
+from asyncio import wait_for as async_wait_for
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from inspect import isawaitable
 from string import hexdigits
@@ -978,7 +979,13 @@ class AsyncProoflineClient(AsyncOperations):
                 if on_poll is not None:
                     res = on_poll(last)
                     if isawaitable(res):
-                        await res
+                        remaining_budget = _transport.remaining()
+                        if remaining_budget is not None and remaining_budget <= 0:
+                            break
+                        try:
+                            await async_wait_for(res, timeout=remaining_budget)
+                        except TimeoutError:
+                            break
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)

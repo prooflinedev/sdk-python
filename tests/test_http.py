@@ -2619,3 +2619,19 @@ async def test_wait_for_review_invokes_on_poll_callback(
             assert calls == [f"{prefix}:RUNNING", f"{prefix}:COMPLETED"]
         assert len(server.requests) == 2
         assert clock.delays == [5]
+
+    # Assert async client also works with regular synchronous callbacks returning None
+    if mode == "async":
+        sync_calls: list[str] = []
+        with Server(lambda request, index: Reply(body=responses[index])) as server:
+            async with session("async", server.url) as client:
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=100,
+                    on_poll=lambda r: sync_calls.append(r.status),
+                )
+                assert result.status == "COMPLETED"
+                assert sync_calls == ["RUNNING", "COMPLETED"]
