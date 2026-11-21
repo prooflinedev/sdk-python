@@ -86,6 +86,11 @@ def generate(destination: Path) -> None:
     if importlib.metadata.version("ruff") != RUFF_VERSION:
         raise SystemExit(f"Generation requires ruff=={RUFF_VERSION}.")
     document = json.loads(DOCUMENT.read_text())
+    # The 7.2 SDK accepts (checkpoint, due_at, result) positionally. The
+    # generator emits optional constructor arguments in schema property order.
+    checkpoint = document["components"]["schemas"]["DeployCoverageCheckpoint"]
+    properties = checkpoint["properties"]
+    checkpoint["properties"] = {"result": properties["result"], **properties}
     with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
         json_document = Path(temporary) / "openapi.json"
         json_document.write_text(json.dumps(json_operations(document)))

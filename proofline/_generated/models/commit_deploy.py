@@ -10,6 +10,7 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.commit_deploy_rollback import CommitDeployRollback
     from ..models.deploy_coverage_checkpoint import DeployCoverageCheckpoint
 
 
@@ -49,6 +50,11 @@ class CommitDeploy:
         deploy_url (None | str | Unset): The deploy's console page.
         deployment_task (None | str | Unset): The GitHub deployment's task, such as `deploy` or `deploy:web`.
         github_environment (None | str | Unset): The GitHub Environment the deployment named.
+        rollback (CommitDeployRollback | None | Unset): Present when the deploy is a rollback: the previous deploy of
+            the same
+             task ran a commit that a recorded merge into this commit's branch made
+             after this commit, as the deploy's console page reads it. Absent for a
+             forward deploy and when either merge is unrecorded.
         workflow_run_attempt (int | None | Unset): The attempt of that run that created the deployment addressing the
              deploy; above 1 for a rerun.
         workflow_run_attempts (list[int] | Unset): Each distinct attempt of that run that created one of the deploy's
@@ -112,12 +118,15 @@ class CommitDeploy:
     deploy_url: None | str | Unset = UNSET
     deployment_task: None | str | Unset = UNSET
     github_environment: None | str | Unset = UNSET
+    rollback: CommitDeployRollback | None | Unset = UNSET
     workflow_run_attempt: int | None | Unset = UNSET
     workflow_run_attempts: list[int] | Unset = UNSET
     workflow_run_id: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.commit_deploy_rollback import CommitDeployRollback  # noqa: PLC0415
+
         checkpoints = []
         for checkpoints_item_data in self.checkpoints:
             checkpoints_item = checkpoints_item_data.to_dict()
@@ -198,6 +207,14 @@ class CommitDeploy:
         else:
             github_environment = self.github_environment
 
+        rollback: dict[str, Any] | None | Unset
+        if isinstance(self.rollback, Unset):
+            rollback = UNSET
+        elif isinstance(self.rollback, CommitDeployRollback):
+            rollback = self.rollback.to_dict()
+        else:
+            rollback = self.rollback
+
         workflow_run_attempt: int | None | Unset
         if isinstance(self.workflow_run_attempt, Unset):
             workflow_run_attempt = UNSET
@@ -231,6 +248,8 @@ class CommitDeploy:
             field_dict["deployment_task"] = deployment_task
         if github_environment is not UNSET:
             field_dict["github_environment"] = github_environment
+        if rollback is not UNSET:
+            field_dict["rollback"] = rollback
         if workflow_run_attempt is not UNSET:
             field_dict["workflow_run_attempt"] = workflow_run_attempt
         if workflow_run_attempts is not UNSET:
@@ -242,6 +261,7 @@ class CommitDeploy:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.commit_deploy_rollback import CommitDeployRollback  # noqa: PLC0415
         from ..models.deploy_coverage_checkpoint import DeployCoverageCheckpoint  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -946,6 +966,23 @@ class CommitDeploy:
 
         github_environment = _parse_github_environment(d.pop("github_environment", UNSET))
 
+        def _parse_rollback(data: object) -> CommitDeployRollback | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                rollback_type_0 = CommitDeployRollback.from_dict(data)
+
+                return rollback_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(CommitDeployRollback | None | Unset, data)
+
+        rollback = _parse_rollback(d.pop("rollback", UNSET))
+
         def _parse_workflow_run_attempt(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -975,6 +1012,7 @@ class CommitDeploy:
             deploy_url=deploy_url,
             deployment_task=deployment_task,
             github_environment=github_environment,
+            rollback=rollback,
             workflow_run_attempt=workflow_run_attempt,
             workflow_run_attempts=workflow_run_attempts,
             workflow_run_id=workflow_run_id,

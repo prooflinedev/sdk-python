@@ -24,9 +24,11 @@ from .comment_address_outcome import CommentAddressOutcome
 from .comment_reaction import CommentReaction
 from .comment_reaction_view import CommentReactionView
 from .commit_deploy import CommitDeploy
+from .commit_deploy_rollback import CommitDeployRollback
 from .commit_deploy_verifications import CommitDeployVerifications
 from .commit_review_request import CommitReviewRequest
 from .commit_review_response import CommitReviewResponse
+from .commit_rollback_deploy import CommitRollbackDeploy
 from .coverage_refused import CoverageRefused
 from .coverage_upload_request import CoverageUploadRequest
 from .coverage_upload_response import CoverageUploadResponse
@@ -166,6 +168,7 @@ from .stored_check_result import StoredCheckResult
 from .stored_check_result_source import StoredCheckResultSource
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
+from .submitted_review import SubmittedReview
 from .summary_route import SummaryRoute
 from .thread_observation_freshness import ThreadObservationFreshness
 from .thread_observation_view import ThreadObservationView
@@ -202,9 +205,11 @@ __all__ = (
     "CommentReaction",
     "CommentReactionView",
     "CommitDeploy",
+    "CommitDeployRollback",
     "CommitDeployVerifications",
     "CommitReviewRequest",
     "CommitReviewResponse",
+    "CommitRollbackDeploy",
     "CoverageRefused",
     "CoverageUploadRequest",
     "CoverageUploadResponse",
@@ -344,6 +349,7 @@ __all__ = (
     "StoredCheckResultSource",
     "SubjectAuthorization",
     "SubjectView",
+    "SubmittedReview",
     "SummaryRoute",
     "ThreadObservationFreshness",
     "ThreadObservationView",

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ..models.review_open_items import ReviewOpenItems
     from ..models.run_progress import RunProgress
     from ..models.subject_view import SubjectView
+    from ..models.submitted_review import SubmittedReview
     from ..models.walkthrough_view import WalkthroughView
 
 
@@ -245,6 +246,10 @@ class CustomerReviewDetail:
              actor. Null otherwise.
         stopped_from (None | str | Unset): Where the review was stopped: `PROOFLINE` or `PULL_REQUEST`. Null unless
              the stop recorded it.
+        submitted_reviews (list[SubmittedReview] | Unset): Every distinct review Proofline submitted on the pull request
+            for this
+             run, including the early code publisher's, oldest first. Absent when it
+             submitted none.
         superseded_by_review_id (None | Unset | UUID): The newer review that superseded this one. Null when none did or
             the
              caller cannot see it.
@@ -333,6 +338,7 @@ class CustomerReviewDetail:
     stopped_at: datetime.datetime | None | Unset = UNSET
     stopped_by: ActorView | None | Unset = UNSET
     stopped_from: None | str | Unset = UNSET
+    submitted_reviews: list[SubmittedReview] | Unset = UNSET
     superseded_by_review_id: None | Unset | UUID = UNSET
     trigger_source: None | PatchTriggerSource | Unset = UNSET
     walkthrough: None | Unset | WalkthroughView = UNSET
@@ -787,6 +793,13 @@ class CustomerReviewDetail:
         else:
             stopped_from = self.stopped_from
 
+        submitted_reviews: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.submitted_reviews, Unset):
+            submitted_reviews = []
+            for submitted_reviews_item_data in self.submitted_reviews:
+                submitted_reviews_item = submitted_reviews_item_data.to_dict()
+                submitted_reviews.append(submitted_reviews_item)
+
         superseded_by_review_id: None | str | Unset
         if isinstance(self.superseded_by_review_id, Unset):
             superseded_by_review_id = UNSET
@@ -948,6 +961,8 @@ class CustomerReviewDetail:
             field_dict["stopped_by"] = stopped_by
         if stopped_from is not UNSET:
             field_dict["stopped_from"] = stopped_from
+        if submitted_reviews is not UNSET:
+            field_dict["submitted_reviews"] = submitted_reviews
         if superseded_by_review_id is not UNSET:
             field_dict["superseded_by_review_id"] = superseded_by_review_id
         if trigger_source is not UNSET:
@@ -980,6 +995,7 @@ class CustomerReviewDetail:
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
         from ..models.run_progress import RunProgress  # noqa: PLC0415
         from ..models.subject_view import SubjectView  # noqa: PLC0415
+        from ..models.submitted_review import SubmittedReview  # noqa: PLC0415
         from ..models.walkthrough_view import WalkthroughView  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -1778,6 +1794,15 @@ class CustomerReviewDetail:
 
         stopped_from = _parse_stopped_from(d.pop("stopped_from", UNSET))
 
+        _submitted_reviews = d.pop("submitted_reviews", UNSET)
+        submitted_reviews: list[SubmittedReview] | Unset = UNSET
+        if _submitted_reviews is not UNSET:
+            submitted_reviews = []
+            for submitted_reviews_item_data in _submitted_reviews:
+                submitted_reviews_item = SubmittedReview.from_dict(submitted_reviews_item_data)
+
+                submitted_reviews.append(submitted_reviews_item)
+
         def _parse_superseded_by_review_id(data: object) -> None | Unset | UUID:
             if data is None:
                 return data
@@ -1905,6 +1930,7 @@ class CustomerReviewDetail:
             stopped_at=stopped_at,
             stopped_by=stopped_by,
             stopped_from=stopped_from,
+            submitted_reviews=submitted_reviews,
             superseded_by_review_id=superseded_by_review_id,
             trigger_source=trigger_source,
             walkthrough=walkthrough,

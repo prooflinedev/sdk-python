@@ -1,15 +1,29 @@
-"""A compatible schema addition must produce callable sync and async SDK methods."""
+"""Compatibility of generated SDK models and methods."""
 
 import json
 import os
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
+
+from proofline import models
 
 from .http_server import Reply, Server
 
 SDK = Path(__file__).resolve().parents[1]
+
+
+def test_checkpoint_keeps_its_positional_result() -> None:
+    due = datetime(2026, 11, 1, tzinfo=UTC)
+    checkpoint = models.DeployCoverageCheckpoint(models.DeployCheckpoint.HOUR_1, due, "REGRESSED")
+    assert checkpoint.to_dict()["result"] == "REGRESSED"
+    recorded = models.DeployCoverageCheckpoint.from_dict(
+        {**checkpoint.to_dict(), "gaps": ["CHANGE_CHECK_MISSING"]}
+    )
+    assert recorded.result == "REGRESSED"
+    assert recorded.gaps == ["CHANGE_CHECK_MISSING"]
 
 
 def test_new_public_operation(tmp_path: Path) -> None:
