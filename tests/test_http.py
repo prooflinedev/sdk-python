@@ -2689,109 +2689,154 @@ async def test_wait_for_review_invokes_on_poll_callback(
 import asyncio
 import time
 from typing import Any
-from tests.test_http import session, Server, Reply, review, ORG, REVIEW
+from proofline import AsyncProoflineClient
+from proofline._generated.models.customer_review_detail import CustomerReviewDetail
+from tests.test_http import review, ORG, REVIEW
 
 async def main() -> None:
-    pending_fut: asyncio.Future[None] | None = None
+    running_detail = CustomerReviewDetail.from_dict(review("RUNNING"))
+    completed_detail = CustomerReviewDetail.from_dict(review())
 
-    def pending_future_callback(r: Any) -> asyncio.Future[None]:
-        nonlocal pending_fut
-        loop = asyncio.get_running_loop()
-        pending_fut = loop.create_future()
-        return pending_fut
+    async def fake_running(org: Any, rev: Any) -> Any:
+        return running_detail
 
-    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
-        async with session("async", server.url) as client:
-            res = await client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=pending_future_callback,
-            )
-            assert res.status == "TIMED_OUT"
-            assert pending_fut is not None
-            assert pending_fut.cancelled()
+    async def fake_completed(org: Any, rev: Any) -> Any:
+        return completed_detail
 
-    cancellation_requested = asyncio.Event()
-    cleanup_blocked = asyncio.Event()
-    cancellation_time = 0.0
+    async with AsyncProoflineClient(
+        token="test_token", base_url="https://api.proofline.sh"
+    ) as client:
+        # Case 1: Pending same-loop Future that times out
+        pending_fut: asyncio.Future[None] | None = None
 
-    async def blocking_cleanup_callback(r: Any) -> None:
-        nonlocal cancellation_time
-        try:
-            await asyncio.sleep(5.0)
-        except asyncio.CancelledError:
-            cancellation_time = time.monotonic()
-            cancellation_requested.set()
-            await cleanup_blocked.wait()
-            raise
+        def pending_future_callback(r: Any) -> asyncio.Future[None]:
+            nonlocal pending_fut
+            loop = asyncio.get_running_loop()
+            pending_fut = loop.create_future()
+            return pending_fut
 
-    start_t = time.monotonic()
-    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
-        async with session("async", server.url) as client:
-            res = await client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=blocking_cleanup_callback,
-            )
-            assert res.status == "TIMED_OUT"
-            await asyncio.sleep(0)
-            assert cancellation_requested.is_set()
-            assert cancellation_time >= start_t + 0.2 - 0.02
-            cleanup_blocked.set()
+        client.get_review = fake_running  # type: ignore
 
-    cancellation_requested_term = asyncio.Event()
-    cleanup_blocked_term = asyncio.Event()
-    cancellation_time_term = 0.0
+        start_t1 = time.monotonic()
+        res = await client.wait_for_review(
+            ORG,
+            REVIEW,
+            timeout=0.2,
+            on_poll=pending_future_callback,
+        )
+        assert res.status == "TIMED_OUT"
+        assert pending_fut is not None
+        assert pending_fut.cancelled()
+        assert time.monotonic() >= start_t1 + 0.2 - 0.02
 
-    async def blocking_cleanup_callback_term(r: Any) -> None:
-        nonlocal cancellation_time_term
-        try:
-            await asyncio.sleep(5.0)
-        except asyncio.CancelledError:
-            cancellation_time_term = time.monotonic()
-            cancellation_requested_term.set()
-            await cleanup_blocked_term.wait()
-            raise
+        # Case 2: Pending same-loop Future that completes within budget without cancellation
+        completed_fut = asyncio.get_running_loop().create_future()
 
-    start_term_t = time.monotonic()
-    with Server(lambda request, index: Reply(body=review())) as server:
-        async with session("async", server.url) as client:
-            res = await client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=blocking_cleanup_callback_term,
-            )
-            assert res.status == "COMPLETED"
-            await asyncio.sleep(0)
-            assert cancellation_requested_term.is_set()
-            assert cancellation_time_term >= start_term_t + 0.2 - 0.02
-            cleanup_blocked_term.set()
+        async def complete_fut_soon() -> None:
+            await asyncio.sleep(0.05)
+            completed_fut.set_result(None)
 
-    resumed_within_budget = False
+        def completing_future_callback(r: Any) -> asyncio.Future[None]:
+            asyncio.create_task(complete_fut_soon())
+            return completed_fut
 
-    async def suspending_callback(r: Any) -> None:
-        nonlocal resumed_within_budget
-        await asyncio.sleep(0.2)
-        resumed_within_budget = True
+        client.get_review = fake_completed  # type: ignore
 
-    with Server(lambda request, index: Reply(body=review())) as server:
-        async with session("async", server.url) as client:
-            res = await client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=5.0,
-                on_poll=suspending_callback,
-            )
-            assert res.status == "COMPLETED"
-            assert resumed_within_budget
+        res = await client.wait_for_review(
+            ORG,
+            REVIEW,
+            timeout=5.0,
+            on_poll=completing_future_callback,
+        )
+        assert res.status == "COMPLETED"
+        assert completed_fut.done()
+        assert not completed_fut.cancelled()
+
+        # Case 3: Blocking cleanup callback on non-terminal review
+        cancellation_requested = asyncio.Event()
+        cleanup_blocked = asyncio.Event()
+        cancellation_time = 0.0
+
+        async def blocking_cleanup_callback(r: Any) -> None:
+            nonlocal cancellation_time
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                cancellation_time = time.monotonic()
+                cancellation_requested.set()
+                await cleanup_blocked.wait()
+                raise
+
+        client.get_review = fake_running  # type: ignore
+
+        start_t3 = time.monotonic()
+        res = await client.wait_for_review(
+            ORG,
+            REVIEW,
+            timeout=0.2,
+            on_poll=blocking_cleanup_callback,
+        )
+        assert res.status == "TIMED_OUT"
+        await asyncio.sleep(0)
+        assert cancellation_requested.is_set()
+        assert cancellation_time >= start_t3 + 0.2 - 0.02
+        cleanup_blocked.set()
+
+        # Case 4: Blocking cleanup callback on terminal review
+        cancellation_requested_term = asyncio.Event()
+        cleanup_blocked_term = asyncio.Event()
+        cancellation_time_term = 0.0
+
+        async def blocking_cleanup_callback_term(r: Any) -> None:
+            nonlocal cancellation_time_term
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                cancellation_time_term = time.monotonic()
+                cancellation_requested_term.set()
+                await cleanup_blocked_term.wait()
+                raise
+
+        client.get_review = fake_completed  # type: ignore
+
+        start_t4 = time.monotonic()
+        res = await client.wait_for_review(
+            ORG,
+            REVIEW,
+            timeout=0.2,
+            on_poll=blocking_cleanup_callback_term,
+        )
+        assert res.status == "COMPLETED"
+        await asyncio.sleep(0)
+        assert cancellation_requested_term.is_set()
+        assert cancellation_time_term >= start_t4 + 0.2 - 0.02
+        cleanup_blocked_term.set()
+
+        # Case 5: Suspending callback that succeeds within budget
+        resumed_within_budget = False
+
+        async def suspending_callback(r: Any) -> None:
+            nonlocal resumed_within_budget
+            await asyncio.sleep(0.2)
+            resumed_within_budget = True
+
+        client.get_review = fake_completed  # type: ignore
+
+        res = await client.wait_for_review(
+            ORG,
+            REVIEW,
+            timeout=5.0,
+            on_poll=suspending_callback,
+        )
+        assert res.status == "COMPLETED"
+        assert resumed_within_budget
 
 asyncio.run(main())
 """
+        checkout_root = Path(__file__).resolve().parent.parent
         subprocess.run(
             [sys.executable, "-c", watchdog_code],
+            cwd=str(checkout_root),
             check=True,
             timeout=10,
         )
@@ -2876,10 +2921,14 @@ asyncio.run(main())
     snap_nested = _snapshot_review(detail)
     assert snap_nested is not None
     assert isinstance(snap_nested.additional_properties["tuple_with_deep_list"], tuple)
+    orig_l = detail.additional_properties["tuple_with_deep_list"][0]
     curr_l = snap_nested.additional_properties["tuple_with_deep_list"][0]
     for _ in range(3000):
+        assert curr_l is not orig_l
         curr_l = curr_l[0]
+        orig_l = orig_l[0]
     assert curr_l == "leaf"
+    assert orig_l == "leaf"
 
     # Assert pending future on closed loop or foreign loop raises ValueError
     if mode == "async":
@@ -2989,3 +3038,49 @@ asyncio.run(main())
     detail_huge = CustomerReviewDetail.from_dict(responses[1])
     detail_huge.additional_properties["huge"] = huge_tuple
     assert _snapshot_review(detail_huge) is None
+
+    # Oversized buffer skips snapshot delivery
+    oversized_buf = bytearray(65_537)
+    detail_buf = CustomerReviewDetail.from_dict(responses[1])
+    detail_buf.additional_properties["buf"] = oversized_buf
+    assert _snapshot_review(detail_buf) is None
+
+    # Scalar subclass instance and attributes copied
+    class CustomStr(str):
+        pass
+
+    custom_scalar = CustomStr("scalar_val")
+    custom_scalar.attached_list = ["mut"]  # type: ignore[attr-defined]
+    detail_scalar = CustomerReviewDetail.from_dict(responses[1])
+    detail_scalar.additional_properties["scalar"] = custom_scalar
+
+    snap_scalar = _snapshot_review(detail_scalar)
+    assert snap_scalar is not None
+    copied_scalar = snap_scalar.additional_properties["scalar"]
+    assert type(copied_scalar) is CustomStr
+    assert copied_scalar is not custom_scalar
+    assert copied_scalar.attached_list is not custom_scalar.attached_list
+    assert copied_scalar.attached_list == ["mut"]
+
+    # Container subclass (defaultdict) preserves type, default_factory, and attributes
+    from collections import defaultdict
+
+    class CustomDict(defaultdict[str, list[str]]):
+        pass
+
+    dd = CustomDict(list)
+    dd["k"].append("val")
+    dd.extra_attr = ["extra"]  # type: ignore[attr-defined]
+    detail_dd = CustomerReviewDetail.from_dict(responses[1])
+    detail_dd.additional_properties["dd"] = dd
+
+    snap_dd = _snapshot_review(detail_dd)
+    assert snap_dd is not None
+    copied_dd = snap_dd.additional_properties["dd"]
+    assert isinstance(copied_dd, CustomDict)
+    assert copied_dd is not dd
+    assert copied_dd["k"] is not dd["k"]
+    assert copied_dd["k"] == ["val"]
+    assert copied_dd["missing"] == []
+    assert copied_dd.extra_attr is not dd.extra_attr
+    assert copied_dd.extra_attr == ["extra"]

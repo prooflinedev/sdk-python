@@ -217,14 +217,23 @@ def _export_page_limit(max_pages: int) -> None:
         raise ValueError("Export pagination requires max_pages 1..1000.")
 
 
+_IMMUTABLE_TYPES: set[type] = {
+    int,
+    float,
+    str,
+    bool,
+    bytes,
+    UUID,
+    datetime.date,
+    datetime.datetime,
+}
+
+
 def _is_immutable(val: Any) -> bool:
     return (
         val is None
         or val is UNSET
-        or isinstance(
-            val,
-            (int, float, str, bool, bytes, UUID, datetime.date, datetime.datetime),
-        )
+        or type(val) in _IMMUTABLE_TYPES
     )
 
 
@@ -256,6 +265,7 @@ _TUPLE_EXPAND = 5
 _TUPLE_FINALIZE = 6
 _EXPAND_BATCH_SIZE = 64
 _MAX_SAFE_TUPLE_SIZE = 1000
+_MAX_SAFE_BUFFER_SIZE = 65_536
 
 
 def _deadline_expired() -> bool:
@@ -295,7 +305,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 else:
                     target[key] = resolved
                 continue
-            if isinstance(val, dict):
+            if type(val) is dict:
                 new_dict: dict[Any, Any] = {}
                 memo[val_id] = new_dict
                 if is_attr:
@@ -303,7 +313,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 else:
                     target[key] = new_dict
                 stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
-            elif isinstance(val, list):
+            elif type(val) is list:
                 new_list: list[Any] = []
                 memo[val_id] = new_list
                 if is_attr:
@@ -311,7 +321,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 else:
                     target[key] = new_list
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
-            elif isinstance(val, tuple):
+            elif type(val) is tuple:
                 if len(val) > _MAX_SAFE_TUPLE_SIZE:
                     return None
                 if len(val) == 0:
@@ -334,7 +344,31 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         )
                     )
                     stack.append((_TUPLE_EXPAND, temp_list, iter(val)))
+            elif isinstance(val, dict):
+                new_dict = copy.copy(val)
+                new_dict.clear()
+                memo[val_id] = new_dict
+                if is_attr:
+                    setattr(target, key, new_dict)
+                else:
+                    target[key] = new_dict
+                stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
+                if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    stack.append((_OBJ_EXPAND, new_dict, iter(_get_obj_attrs(val))))
+            elif isinstance(val, list):
+                new_list = copy.copy(val)
+                new_list.clear()
+                memo[val_id] = new_list
+                if is_attr:
+                    setattr(target, key, new_list)
+                else:
+                    target[key] = new_list
+                stack.append((_LIST_EXPAND, new_list, iter(val)))
+                if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
             elif isinstance(val, (memoryview, bytearray)):
+                if len(val) > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 if isinstance(val, bytearray):
                     resolved = bytearray(val)
                 elif val.readonly:
@@ -469,12 +503,19 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
 def _safe_cleanup_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
     try:
+        try:
+            loop = fut.get_loop()
+        except Exception:
+            return
+        try:
+            running_loop = async_get_running_loop()
+        except Exception:
+            return
+        if loop is not running_loop or loop.is_closed():
+            return
         if fut.done():
             if not fut.cancelled():
                 fut.exception()
-            return
-        loop = fut.get_loop()
-        if loop.is_closed():
             return
         fut.cancel()
         fut.add_done_callback(
@@ -849,7 +890,10 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery. on_poll exceptions propagate even when a terminal outcome
+        delivery. Oversized tuples or buffers in review extension data skip
+        on_poll snapshot delivery even with time remaining, and snapshot copy
+        errors on unsupported mutable values propagate before on_poll runs.
+        on_poll exceptions propagate even when a terminal outcome
         has already been determined. Synchronous callbacks must return before a
         terminal result can be delivered and the polling deadline cannot
         interrupt them.
@@ -1265,8 +1309,11 @@ class AsyncProoflineClient(AsyncOperations):
         the running event loop. Callbacks must return promptly even when they return
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
-        is reached are delivered; deadline expiry can suppress delivery. Inline
-        failures and awaitable failures observed before the deadline propagate,
+        is reached are delivered; deadline expiry can suppress delivery. Oversized
+        tuples or buffers in review extension data skip on_poll snapshot delivery
+        even with time remaining, and snapshot copy errors on unsupported mutable
+        values propagate before on_poll runs. Inline failures and awaitable failures
+        observed before the deadline propagate,
         but the deadline can suppress awaitable failures even before cancellation
         or discard, including when an outcome is already classified. Synchronous
         callbacks must return before a terminal result can be delivered and the
