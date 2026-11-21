@@ -989,9 +989,11 @@ class AsyncProoflineClient(AsyncOperations):
         When on_poll is provided, it is invoked on each review poll with the
         latest CustomerReviewDetail (supports both sync and async callbacks).
         Only reviews fetched and validated before the callback is reached are
-        delivered; deadline expiry can suppress delivery. Synchronous callbacks
-        must return before a terminal result can be delivered and the polling
-        deadline cannot interrupt them.
+        delivered; deadline expiry can suppress delivery. Inline failures and
+        awaitable failures that finish before the timeout propagate, but
+        cancellation-time failures do not. Synchronous callbacks must return
+        before a terminal result can be delivered and the polling deadline
+        cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -1032,11 +1034,8 @@ class AsyncProoflineClient(AsyncOperations):
 
                             coro = res if isinstance(res, Coroutine) else _await_res(res)
                             task = async_create_task(coro)
-                            timed_out_waiting = False
                             try:
                                 done, pending = await async_wait({task}, timeout=remaining_budget)
-                                if task not in done:
-                                    timed_out_waiting = True
                             except BaseException:
                                 task.cancel()
                                 task.add_done_callback(
@@ -1048,11 +1047,12 @@ class AsyncProoflineClient(AsyncOperations):
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
                                 raise
-                            if not timed_out_waiting and task in done:
-                                # Callback completion won over deadline timeout
+                            # Latch against absolute deadline before propagating callback errors
+                            if (_transport.remaining() or 0) > 0 and task in done:
+                                # Callback completed before deadline expired
                                 task.result()
                             else:
-                                # Timeout won over callback completion
+                                # Deadline expired
                                 task.cancel()
                                 task.add_done_callback(
                                     lambda t: t.exception() if not t.cancelled() else None
