@@ -2635,3 +2635,14 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 )
                 assert result.status == "COMPLETED"
                 assert sync_calls == ["RUNNING", "COMPLETED"]
+
+        # Assert async callback that blocks past the remaining budget returns TIMED_OUT
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+            async with session("async", server.url) as client:
+                result = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=lambda r: asyncio.sleep(2.0),
+                )
+                assert result.status == "TIMED_OUT"

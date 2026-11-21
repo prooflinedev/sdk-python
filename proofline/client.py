@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import math
-from asyncio import sleep as async_sleep
-from asyncio import wait_for as async_wait_for
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from asyncio import (
+    sleep as async_sleep,
+)
+from asyncio import (
+    wait_for as async_wait_for,
+)
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from inspect import isawaitable
 from string import hexdigits
 from time import monotonic, sleep
@@ -576,13 +580,15 @@ class ProoflineClient(Operations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
-                if on_poll is not None:
-                    on_poll(last)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
+                if on_poll is not None:
+                    on_poll(last)
                 if result is not None:
                     return result
+                if (_transport.remaining() or 0) <= 0:
+                    break
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
@@ -976,21 +982,36 @@ class AsyncProoflineClient(AsyncOperations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None:
                     res = on_poll(last)
                     if isawaitable(res):
                         remaining_budget = _transport.remaining()
                         if remaining_budget is not None and remaining_budget <= 0:
+                            if isinstance(res, Coroutine):
+                                res.close()
                             break
+                        timed_out_box = [False]
+
+                        async def _run_callback() -> None:
+                            try:
+                                await res
+                            except TimeoutError:
+                                timed_out_box[0] = True
+                                raise
+
                         try:
-                            await async_wait_for(res, timeout=remaining_budget)
-                        except TimeoutError:
+                            await async_wait_for(_run_callback(), timeout=remaining_budget)
+                        except TimeoutError as exc:
+                            if timed_out_box[0]:
+                                raise exc from None
                             break
-                if (_transport.remaining() or 0) <= 0:
-                    break
-                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
+                if (_transport.remaining() or 0) <= 0:
+                    break
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
