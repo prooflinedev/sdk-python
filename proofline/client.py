@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import datetime
 import math
 from asyncio import (
     Future as AsyncFuture,
@@ -213,29 +215,141 @@ def _export_page_limit(max_pages: int) -> None:
         raise ValueError("Export pagination requires max_pages 1..1000.")
 
 
-class _DeadlineExhausted(Exception):
-    """Raised to abort deepcopy when the transport deadline expires."""
+def _is_immutable(val: Any) -> bool:
+    return (
+        val is None
+        or val is UNSET
+        or isinstance(
+            val,
+            (int, float, str, bool, bytes, UUID, datetime.date, datetime.datetime),
+        )
+    )
 
 
-class _DeadlineMemo(dict[int, Any]):
-    def __contains__(self, key: object) -> bool:
-        if (_transport.remaining() or 0) <= 0:
-            raise _DeadlineExhausted()
-        return super().__contains__(key)
-
-    def __setitem__(self, key: int, value: Any) -> None:
-        if (_transport.remaining() or 0) <= 0:
-            raise _DeadlineExhausted()
-        super().__setitem__(key, value)
+def _get_obj_attrs(obj: Any) -> list[tuple[str, Any]]:
+    if hasattr(obj, "__dict__"):
+        return list(obj.__dict__.items())
+    slots: set[str] = set()
+    for cls in type(obj).__mro__:
+        s = getattr(cls, "__slots__", None)
+        if s:
+            if isinstance(s, str):
+                slots.add(s)
+            else:
+                slots.update(s)
+    result: list[tuple[str, Any]] = []
+    for attr in slots:
+        if attr.startswith("__") and attr.endswith("__"):
+            continue
+        if hasattr(obj, attr):
+            result.append((attr, getattr(obj, attr)))
+    return result
 
 
 def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | None:
     if (_transport.remaining() or 0) <= 0:
         return None
+
+    memo: dict[int, Any] = {id(UNSET): UNSET}
+    root = copy.copy(detail)
+    memo[id(detail)] = root
+
+    stack: list[tuple[Any, Any, bool, Any]] = []
+    for attr, val in _get_obj_attrs(detail):
+        stack.append((root, attr, True, val))
+
+    while stack:
+        if (_transport.remaining() or 0) <= 0:
+            return None
+
+        parent, key, is_attr, val = stack.pop()
+
+        if _is_immutable(val):
+            if is_attr:
+                setattr(parent, key, val)
+            else:
+                parent[key] = val
+            continue
+
+        val_id = id(val)
+        if val_id in memo:
+            resolved = memo[val_id]
+            if is_attr:
+                setattr(parent, key, resolved)
+            else:
+                parent[key] = resolved
+            continue
+
+        if isinstance(val, dict):
+            new_dict: dict[Any, Any] = {}
+            memo[val_id] = new_dict
+            if is_attr:
+                setattr(parent, key, new_dict)
+            else:
+                parent[key] = new_dict
+            for k, v in val.items():
+                stack.append((new_dict, k, False, v))
+        elif isinstance(val, list):
+            new_list = [None] * len(val)
+            memo[val_id] = new_list
+            if is_attr:
+                setattr(parent, key, new_list)
+            else:
+                parent[key] = new_list
+            for idx, item in enumerate(val):
+                stack.append((new_list, idx, False, item))
+        elif isinstance(val, tuple):
+            if all(_is_immutable(x) for x in val):
+                if is_attr:
+                    setattr(parent, key, val)
+                else:
+                    parent[key] = val
+            else:
+                new_list = [None] * len(val)
+                memo[val_id] = new_list
+                if is_attr:
+                    setattr(parent, key, new_list)
+                else:
+                    parent[key] = new_list
+                for idx, item in enumerate(val):
+                    stack.append((new_list, idx, False, item))
+        elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+            new_obj = copy.copy(val)
+            memo[val_id] = new_obj
+            if is_attr:
+                setattr(parent, key, new_obj)
+            else:
+                parent[key] = new_obj
+            for attr, attr_val in _get_obj_attrs(val):
+                stack.append((new_obj, attr, True, attr_val))
+        else:
+            try:
+                resolved = deepcopy(val, memo)
+            except Exception:
+                resolved = val
+            if is_attr:
+                setattr(parent, key, resolved)
+            else:
+                parent[key] = resolved
+
+    return root
+
+
+def _safe_cleanup_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
     try:
-        return deepcopy(detail, _DeadlineMemo({id(UNSET): UNSET}))
-    except _DeadlineExhausted:
-        return None
+        loop = fut.get_loop()
+        if loop.is_closed():
+            return
+        if fut.done():
+            if not fut.cancelled():
+                fut.exception()
+        else:
+            fut.cancel()
+            fut.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
+    except BaseException:
+        pass
 
 
 def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
@@ -1019,10 +1133,9 @@ class AsyncProoflineClient(AsyncOperations):
         is reached are delivered; deadline expiry can suppress delivery. Inline
         failures and awaitable failures observed before the deadline propagate,
         but the deadline can suppress awaitable failures even before cancellation
-        or discard, including when an outcome is already classified. on_poll
-        exceptions propagate even when a terminal outcome has already been
-        determined. Synchronous callbacks must return before a terminal result
-        can be delivered and the polling deadline cannot interrupt them.
+        or discard, including when an outcome is already classified. Synchronous
+        callbacks must return before a terminal result can be delivered and the
+        polling deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -1056,14 +1169,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     except BaseException:
                                         pass
                                 elif isinstance(res, (AsyncTask, AsyncFuture)):
-                                    if res.done():
-                                        if not res.cancelled():
-                                            res.exception()
-                                    else:
-                                        res.cancel()
-                                        res.add_done_callback(
-                                            lambda t: t.exception() if not t.cancelled() else None
-                                        )
+                                    _safe_cleanup_future(res)
                                 if result is not None:
                                     return result
                                 break
@@ -1081,10 +1187,7 @@ class AsyncProoflineClient(AsyncOperations):
                                             {res}, timeout=remaining_budget
                                         )
                                     except BaseException:
-                                        res.cancel()
-                                        res.add_done_callback(
-                                            lambda t: t.exception() if not t.cancelled() else None
-                                        )
+                                        _safe_cleanup_future(res)
                                         raise
                                     deadline_val = _transport.DEADLINE.get()
                                     cb_finished_in_budget = bool(completed_at) and (
@@ -1093,16 +1196,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     if cb_finished_in_budget and res in done:
                                         res.result()
                                     else:
-                                        if res.done():
-                                            if not res.cancelled():
-                                                res.exception()
-                                        else:
-                                            res.cancel()
-                                            res.add_done_callback(
-                                                lambda t: t.exception()
-                                                if not t.cancelled()
-                                                else None
-                                            )
+                                        _safe_cleanup_future(res)
                                         if result is not None:
                                             return result
                                         break

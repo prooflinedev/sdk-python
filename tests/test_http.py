@@ -2788,11 +2788,15 @@ asyncio.run(main())
         nonlocal mutated_count
         mutated_count += 1
         r.status = "MUTATED"
+        r.actions.publish = True
+        r.additional_properties["mutated"] = "mutated_value"
 
     async def async_mutating_callback(r: Any) -> None:
         nonlocal mutated_count
         mutated_count += 1
         r.status = "MUTATED"
+        r.actions.publish = True
+        r.additional_properties["mutated"] = "mutated_value"
 
     with Server(lambda request, index: Reply(body=responses[1])) as server:
         async with session(mode, server.url) as client:
@@ -2807,3 +2811,34 @@ asyncio.run(main())
             )
             assert mutated_count == 1
             assert res.review.status != "MUTATED"
+            assert res.review.actions.publish is False
+            assert "mutated" not in res.review.additional_properties
+
+    # Assert deeply nested extension fields do not trigger RecursionError in snapshot
+    deep_container: dict[str, Any] = {}
+    curr = deep_container
+    for _ in range(3000):
+        curr["child"] = {}
+        curr = curr["child"]
+    curr["val"] = "deepest"
+
+    nested_detail_received = False
+
+    def deep_extension_cb(r: Any) -> None:
+        nonlocal nested_detail_received
+        assert r.additional_properties["deep"]["child"] is not None
+        nested_detail_received = True
+
+    deep_review = {**responses[1], "deep": deep_container}
+    with Server(lambda request, index: Reply(body=deep_review)) as server:
+        async with session(mode, server.url) as client:
+            res = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=10,
+                on_poll=deep_extension_cb,
+            )
+            assert res.status == "COMPLETED"
+            assert nested_detail_received
