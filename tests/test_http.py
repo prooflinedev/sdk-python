@@ -2651,7 +2651,11 @@ async def test_wait_for_review_invokes_on_poll_callback(
                     )
 
     # Assert callback modifying review does not mutate returned review in both sync and async
+    mutated_count = 0
+
     def mutating_callback(r: Any) -> None:
+        nonlocal mutated_count
+        mutated_count += 1
         r.status = "MUTATED"
 
     with Server(lambda request, index: Reply(body=responses[1])) as server:
@@ -2664,4 +2668,5 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 timeout=10,
                 on_poll=mutating_callback,
             )
+            assert mutated_count == 1
             assert res.review.status != "MUTATED"

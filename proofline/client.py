@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 from asyncio import (
+    Task as AsyncTask,
+)
+from asyncio import (
     create_task as async_create_task,
 )
 from asyncio import (
@@ -1008,6 +1011,11 @@ class AsyncProoflineClient(AsyncOperations):
                         if remaining_budget is not None and remaining_budget <= 0:
                             if isinstance(res, Coroutine):
                                 res.close()
+                            elif isinstance(res, AsyncTask):
+                                res.cancel()
+                                res.add_done_callback(
+                                    lambda t: t.exception() if not t.cancelled() else None
+                                )
                             if result is not None:
                                 return result
                             break
