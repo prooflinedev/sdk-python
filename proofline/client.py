@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from string import hexdigits
@@ -15,7 +16,7 @@ from uuid import UUID
 import httpx2
 from pydantic import SecretStr
 
-from . import _transport
+from . import _tls, _transport
 from ._generated.api.default import (
     get_agent_session,
     get_agent_session_prompt,
@@ -220,9 +221,11 @@ class ProoflineClient(Operations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        ca_cert: str | os.PathLike[str] | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        ssl_context = _tls.build_ssl_context(ca_cert)
         self._http = httpx2.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -233,7 +236,7 @@ class ProoflineClient(Operations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(self._api.token, timeout, ssl_context=ssl_context),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
@@ -590,9 +593,11 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        ca_cert: str | os.PathLike[str] | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        ssl_context = _tls.build_ssl_context(ca_cert)
         self._http = httpx2.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -603,7 +608,9 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(
+                self._api.token, timeout, ssl_context=ssl_context
+            ),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)
