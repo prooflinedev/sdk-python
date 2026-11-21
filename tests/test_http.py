@@ -2650,6 +2650,23 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=failing_callback,
                     )
 
+        # Assert already-done failed future propagates inline
+        def failed_future_callback(r: Any) -> asyncio.Future[None]:
+            loop = asyncio.get_running_loop()
+            fut: asyncio.Future[None] = loop.create_future()
+            fut.set_exception(ValueError("inline future error"))
+            return fut
+
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(ValueError, match="inline future error"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=failed_future_callback,
+                    )
+
         # Assert async callback signals cancellation and client returns without blocking on cleanup
         cancellation_requested = asyncio.Event()
         cleanup_blocked = asyncio.Event()
@@ -2664,19 +2681,26 @@ async def test_wait_for_review_invokes_on_poll_callback(
 
         with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
             async with session("async", server.url) as client:
-                res = await asyncio.wait_for(
+                client_task = asyncio.create_task(
                     client.wait_for_review(
                         ORG,
                         REVIEW,
                         timeout=0.2,
                         on_poll=blocking_cleanup_callback,
-                    ),
-                    timeout=2.0,
+                    )
                 )
-                assert res.status == "TIMED_OUT"
-                await asyncio.sleep(0)
-                assert cancellation_requested.is_set()
-                cleanup_blocked.set()
+                try:
+                    done, _ = await asyncio.wait({client_task}, timeout=2.0)
+                    assert client_task in done
+                    res = client_task.result()
+                    assert res.status == "TIMED_OUT"
+                    await asyncio.sleep(0)
+                    assert cancellation_requested.is_set()
+                finally:
+                    cleanup_blocked.set()
+                    if not client_task.done():
+                        client_task.cancel()
+                        await asyncio.wait({client_task})
 
     # Assert callback modifying review does not mutate returned review in both sync and async
     mutated_count = 0

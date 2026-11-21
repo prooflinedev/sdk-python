@@ -578,8 +578,10 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery. Synchronous callbacks must return before a terminal result can
-        be delivered and the polling deadline cannot interrupt them.
+        delivery. on_poll exceptions propagate even when a terminal outcome
+        has already been determined. Synchronous callbacks must return before a
+        terminal result can be delivered and the polling deadline cannot
+        interrupt them.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -990,10 +992,12 @@ class AsyncProoflineClient(AsyncOperations):
         latest CustomerReviewDetail (supports both sync and async callbacks).
         Only reviews fetched and validated before the callback is reached are
         delivered; deadline expiry can suppress delivery. Inline failures and
-        awaitable failures that finish before the timeout propagate, but
-        cancellation-time failures do not. Synchronous callbacks must return
-        before a terminal result can be delivered and the polling deadline
-        cannot interrupt them.
+        awaitable failures that finish before the timeout propagate (though
+        awaitable failures can be suppressed when the callback returns after
+        the deadline), but cancellation-time failures do not. on_poll
+        exceptions propagate even when a terminal outcome has already been
+        determined. Synchronous callbacks must return before a terminal result
+        can be delivered and the polling deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -1032,51 +1036,56 @@ class AsyncProoflineClient(AsyncOperations):
                                     return result
                                 break
 
-                            coro = res if isinstance(res, Coroutine) else _await_res(res)
-                            completed_at: list[float] = []
-
-                            async def _runner() -> None:
-                                try:
-                                    await coro
-                                finally:
-                                    completed_at.append(monotonic())
-
-                            task = async_create_task(_runner())
-                            try:
-                                done, pending = await async_wait({task}, timeout=remaining_budget)
-                            except BaseException:
-                                task.cancel()
-                                task.add_done_callback(
-                                    lambda t: t.exception() if not t.cancelled() else None
-                                )
-                                if isinstance(res, (AsyncTask, AsyncFuture)):
-                                    res.cancel()
-                                    res.add_done_callback(
-                                        lambda t: t.exception() if not t.cancelled() else None
-                                    )
-                                raise
-                            # Record completion time in runner to decide whether to propagate
-                            deadline_val = _transport.DEADLINE.get()
-                            cb_finished_in_budget = bool(completed_at) and (
-                                deadline_val is None or completed_at[0] <= deadline_val
-                            )
-                            if cb_finished_in_budget and task in done:
-                                # Callback finished within budget: propagate any error or success
-                                task.result()
+                            if isinstance(res, (AsyncTask, AsyncFuture)) and res.done():
+                                res.result()
                             else:
-                                # Deadline expired before callback finished
-                                task.cancel()
-                                task.add_done_callback(
-                                    lambda t: t.exception() if not t.cancelled() else None
-                                )
-                                if isinstance(res, (AsyncTask, AsyncFuture)):
-                                    res.cancel()
-                                    res.add_done_callback(
+                                coro = res if isinstance(res, Coroutine) else _await_res(res)
+                                completed_at: list[float] = []
+
+                                async def _runner() -> None:
+                                    try:
+                                        await coro
+                                    finally:
+                                        completed_at.append(monotonic())
+
+                                task = async_create_task(_runner())
+                                try:
+                                    done, pending = await async_wait(
+                                        {task}, timeout=remaining_budget
+                                    )
+                                except BaseException:
+                                    task.cancel()
+                                    task.add_done_callback(
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
-                                if result is not None:
-                                    return result
-                                break
+                                    if isinstance(res, (AsyncTask, AsyncFuture)):
+                                        res.cancel()
+                                        res.add_done_callback(
+                                            lambda t: t.exception() if not t.cancelled() else None
+                                        )
+                                    raise
+                                # Record completion time in runner to decide whether to propagate
+                                deadline_val = _transport.DEADLINE.get()
+                                cb_finished_in_budget = bool(completed_at) and (
+                                    deadline_val is None or completed_at[0] <= deadline_val
+                                )
+                                if cb_finished_in_budget and task in done:
+                                    # Finished in budget: propagate any error or success
+                                    task.result()
+                                else:
+                                    # Deadline expired before callback finished
+                                    task.cancel()
+                                    task.add_done_callback(
+                                        lambda t: t.exception() if not t.cancelled() else None
+                                    )
+                                    if isinstance(res, (AsyncTask, AsyncFuture)):
+                                        res.cancel()
+                                        res.add_done_callback(
+                                            lambda t: t.exception() if not t.cancelled() else None
+                                        )
+                                    if result is not None:
+                                        return result
+                                    break
                 if result is not None:
                     return result
                 if (_transport.remaining() or 0) <= 0:
