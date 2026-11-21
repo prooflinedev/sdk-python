@@ -23,6 +23,8 @@ from .comment_address_evaluation_view import CommentAddressEvaluationView
 from .comment_address_outcome import CommentAddressOutcome
 from .comment_reaction import CommentReaction
 from .comment_reaction_view import CommentReactionView
+from .commit_deploy import CommitDeploy
+from .commit_deploy_verifications import CommitDeployVerifications
 from .commit_review_request import CommitReviewRequest
 from .commit_review_response import CommitReviewResponse
 from .coverage_refused import CoverageRefused
@@ -40,6 +42,8 @@ from .customer_review_detail import CustomerReviewDetail
 from .dataset import Dataset
 from .deep_review_escalation import DeepReviewEscalation
 from .deep_review_escalation_status import DeepReviewEscalationStatus
+from .deploy_checkpoint import DeployCheckpoint
+from .deploy_coverage_checkpoint import DeployCoverageCheckpoint
 from .domain_view import DomainView
 from .earlier_open_finding import EarlierOpenFinding
 from .environment_check import EnvironmentCheck
@@ -86,6 +90,7 @@ from .incomplete_cause_type_0 import IncompleteCauseType0
 from .linked_issue_capture import LinkedIssueCapture
 from .local_reverification import LocalReverification
 from .local_reverification_outcome import LocalReverificationOutcome
+from .local_stored_check import LocalStoredCheck
 from .matched_local_finding import MatchedLocalFinding
 from .not_assessed_view import NotAssessedView
 from .open_finding_counts import OpenFindingCounts
@@ -127,6 +132,7 @@ from .review_investigation_citation import ReviewInvestigationCitation
 from .review_investigation_finding import ReviewInvestigationFinding
 from .review_open_items import ReviewOpenItems
 from .review_page import ReviewPage
+from .review_requirement_target import ReviewRequirementTarget
 from .review_routing_view_type_0 import ReviewRoutingViewType0
 from .review_routing_view_type_1 import ReviewRoutingViewType1
 from .review_routing_view_type_2 import ReviewRoutingViewType2
@@ -155,6 +161,9 @@ from .spend_account_kind import SpendAccountKind
 from .spend_export_row import SpendExportRow
 from .start_session import StartSession
 from .stop_response import StopResponse
+from .stored_check_outcome import StoredCheckOutcome
+from .stored_check_result import StoredCheckResult
+from .stored_check_result_source import StoredCheckResultSource
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
 from .summary_route import SummaryRoute
@@ -192,6 +201,8 @@ __all__ = (
     "CommentAddressOutcome",
     "CommentReaction",
     "CommentReactionView",
+    "CommitDeploy",
+    "CommitDeployVerifications",
     "CommitReviewRequest",
     "CommitReviewResponse",
     "CoverageRefused",
@@ -209,6 +220,8 @@ __all__ = (
     "Dataset",
     "DeepReviewEscalation",
     "DeepReviewEscalationStatus",
+    "DeployCheckpoint",
+    "DeployCoverageCheckpoint",
     "DomainView",
     "EarlierOpenFinding",
     "EnvironmentCheck",
@@ -255,6 +268,7 @@ __all__ = (
     "LinkedIssueCapture",
     "LocalReverification",
     "LocalReverificationOutcome",
+    "LocalStoredCheck",
     "MatchedLocalFinding",
     "NotAssessedView",
     "OpenFindingCounts",
@@ -296,6 +310,7 @@ __all__ = (
     "ReviewInvestigationFinding",
     "ReviewOpenItems",
     "ReviewPage",
+    "ReviewRequirementTarget",
     "ReviewRoutingViewType0",
     "ReviewRoutingViewType1",
     "ReviewRoutingViewType2",
@@ -324,6 +339,9 @@ __all__ = (
     "SpendExportRow",
     "StartSession",
     "StopResponse",
+    "StoredCheckOutcome",
+    "StoredCheckResult",
+    "StoredCheckResultSource",
     "SubjectAuthorization",
     "SubjectView",
     "SummaryRoute",

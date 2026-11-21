@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import UUID
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..models.local_reverification_outcome import LocalReverificationOutcome
+from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.local_stored_check import LocalStoredCheck
+
 
 T = TypeVar("T", bound="LocalReverification")
 
@@ -28,15 +33,23 @@ class LocalReverification:
                 is supported, or a check still finds the mechanism. `NOT_VERIFIED`:
                 anything else, including a review that ended without an answer.
                 `PENDING`: the review is still running.
+           stored_check (LocalStoredCheck | None | Unset): The check a code reproduction stored for the finding, which a
+               pushed
+                head runs again; run its command against the local changes before
+                pushing. The patch review does not run it. Absent for a finding with
+                no stored check.
     """
 
     checks: Any
     finding_id: UUID
     iteration: int
     outcome: LocalReverificationOutcome
+    stored_check: LocalStoredCheck | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.local_stored_check import LocalStoredCheck  # noqa: PLC0415
+
         checks = self.checks
 
         finding_id = str(self.finding_id)
@@ -44,6 +57,14 @@ class LocalReverification:
         iteration = self.iteration
 
         outcome = self.outcome.value
+
+        stored_check: dict[str, Any] | None | Unset
+        if isinstance(self.stored_check, Unset):
+            stored_check = UNSET
+        elif isinstance(self.stored_check, LocalStoredCheck):
+            stored_check = self.stored_check.to_dict()
+        else:
+            stored_check = self.stored_check
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -55,11 +76,15 @@ class LocalReverification:
                 "outcome": outcome,
             }
         )
+        if stored_check is not UNSET:
+            field_dict["stored_check"] = stored_check
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.local_stored_check import LocalStoredCheck  # noqa: PLC0415
+
         d = dict(src_dict)
         checks = d.pop("checks")
 
@@ -69,11 +94,29 @@ class LocalReverification:
 
         outcome = LocalReverificationOutcome(d.pop("outcome"))
 
+        def _parse_stored_check(data: object) -> LocalStoredCheck | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                stored_check_type_0 = LocalStoredCheck.from_dict(data)
+
+                return stored_check_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(LocalStoredCheck | None | Unset, data)
+
+        stored_check = _parse_stored_check(d.pop("stored_check", UNSET))
+
         local_reverification = cls(
             checks=checks,
             finding_id=finding_id,
             iteration=iteration,
             outcome=outcome,
+            stored_check=stored_check,
         )
 
         local_reverification.additional_properties = d

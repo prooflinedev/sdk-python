@@ -173,7 +173,8 @@ class CustomerReviewDetail:
              Proofline has read the group's members.
         open_items (None | OpenItemsView | Unset): What Proofline still has open for the reviewed head, counted from the
              current finding decisions. Absent while the review is `PENDING` or
-             `RUNNING`.
+             `RUNNING`, and for a repository audit, whose findings are in its
+             report.
         open_items_observation (None | ReviewOpenItems | Unset): Dated PR counts with head, evaluated-scope and bounded
             thread proof.
              Absent when that observation is unavailable; scalar counts remain separate.
@@ -228,6 +229,9 @@ class CustomerReviewDetail:
              automatic reviews, and on reviews recorded before requesters were.
         review_comment_url (None | str | Unset): The pull request review Proofline submitted for this review. Null when
              it submitted none.
+        review_cost_microcredits (int | None | Unset): The review work within the total, excluding the separately billed
+            PR
+             walkthrough. Visible to the same callers as the total.
         review_retracted_at (datetime.datetime | None | Unset): When a submitted pull request review was marked
             retracted, a marker
              only older versions set. Null otherwise.
@@ -322,6 +326,7 @@ class CustomerReviewDetail:
     repository_url: None | str | Unset = UNSET
     requested_by: ActorView | None | Unset = UNSET
     review_comment_url: None | str | Unset = UNSET
+    review_cost_microcredits: int | None | Unset = UNSET
     review_retracted_at: datetime.datetime | None | Unset = UNSET
     run_number: int | None | Unset = UNSET
     run_progress: None | RunProgress | Unset = UNSET
@@ -732,6 +737,12 @@ class CustomerReviewDetail:
         else:
             review_comment_url = self.review_comment_url
 
+        review_cost_microcredits: int | None | Unset
+        if isinstance(self.review_cost_microcredits, Unset):
+            review_cost_microcredits = UNSET
+        else:
+            review_cost_microcredits = self.review_cost_microcredits
+
         review_retracted_at: None | str | Unset
         if isinstance(self.review_retracted_at, Unset):
             review_retracted_at = UNSET
@@ -923,6 +934,8 @@ class CustomerReviewDetail:
             field_dict["requested_by"] = requested_by
         if review_comment_url is not UNSET:
             field_dict["review_comment_url"] = review_comment_url
+        if review_cost_microcredits is not UNSET:
+            field_dict["review_cost_microcredits"] = review_cost_microcredits
         if review_retracted_at is not UNSET:
             field_dict["review_retracted_at"] = review_retracted_at
         if run_number is not UNSET:
@@ -1668,6 +1681,17 @@ class CustomerReviewDetail:
 
         review_comment_url = _parse_review_comment_url(d.pop("review_comment_url", UNSET))
 
+        def _parse_review_cost_microcredits(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        review_cost_microcredits = _parse_review_cost_microcredits(
+            d.pop("review_cost_microcredits", UNSET)
+        )
+
         def _parse_review_retracted_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -1874,6 +1898,7 @@ class CustomerReviewDetail:
             repository_url=repository_url,
             requested_by=requested_by,
             review_comment_url=review_comment_url,
+            review_cost_microcredits=review_cost_microcredits,
             review_retracted_at=review_retracted_at,
             run_number=run_number,
             run_progress=run_progress,

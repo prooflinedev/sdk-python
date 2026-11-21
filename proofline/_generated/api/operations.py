@@ -5,13 +5,32 @@ from uuid import UUID
 
 from ... import _transport
 from ..client import AuthenticatedClient
+from ..models.commit_deploy_verifications import CommitDeployVerifications
 from ..models.scan_request_body import ScanRequestBody
 from ..models.scan_response import ScanResponse
+from .default import get_commit_deploy_verifications as operation_get_commit_deploy_verifications
 from .default import request_scan as operation_request_scan
 
 
 class Operations:
     _api: AuthenticatedClient
+
+    def get_commit_deploy_verifications(
+        self,
+        org_id: UUID,
+        repo_id: UUID,
+        commit_sha: str,
+    ) -> CommitDeployVerifications:
+        with _transport.operation_errors():
+            response = operation_get_commit_deploy_verifications.sync_detailed(
+                client=self._api,
+                org_id=org_id,
+                repo_id=repo_id,
+                commit_sha=commit_sha,
+            )
+            if not (response.status_code == 200):
+                raise _transport.invalid_response()
+            return cast(CommitDeployVerifications, response.parsed)
 
     def request_scan(
         self,
@@ -34,6 +53,23 @@ class Operations:
 
 class AsyncOperations:
     _api: AuthenticatedClient
+
+    async def get_commit_deploy_verifications(
+        self,
+        org_id: UUID,
+        repo_id: UUID,
+        commit_sha: str,
+    ) -> CommitDeployVerifications:
+        with _transport.operation_errors():
+            response = await operation_get_commit_deploy_verifications.asyncio_detailed(
+                client=self._api,
+                org_id=org_id,
+                repo_id=repo_id,
+                commit_sha=commit_sha,
+            )
+            if not (response.status_code == 200):
+                raise _transport.invalid_response()
+            return cast(CommitDeployVerifications, response.parsed)
 
     async def request_scan(
         self,
