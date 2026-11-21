@@ -2724,10 +2724,11 @@ async def main() -> None:
             timeout=0.2,
             on_poll=pending_future_callback,
         )
+        elapsed1 = time.monotonic() - start_t1
         assert res.status == "TIMED_OUT"
         assert pending_fut is not None
         assert pending_fut.cancelled()
-        assert time.monotonic() >= start_t1 + 0.2 - 0.02
+        assert 0.18 <= elapsed1 <= 0.35
 
         # Case 2: Pending same-loop Future that completes within budget without cancellation
         completed_fut = asyncio.get_running_loop().create_future()
@@ -2776,10 +2777,12 @@ async def main() -> None:
             timeout=0.2,
             on_poll=blocking_cleanup_callback,
         )
+        elapsed3 = time.monotonic() - start_t3
         assert res.status == "TIMED_OUT"
         await asyncio.sleep(0)
         assert cancellation_requested.is_set()
         assert cancellation_time >= start_t3 + 0.2 - 0.02
+        assert 0.18 <= elapsed3 <= 0.35
         cleanup_blocked.set()
 
         # Case 4: Blocking cleanup callback on terminal review
@@ -2806,10 +2809,12 @@ async def main() -> None:
             timeout=0.2,
             on_poll=blocking_cleanup_callback_term,
         )
+        elapsed4 = time.monotonic() - start_t4
         assert res.status == "COMPLETED"
         await asyncio.sleep(0)
         assert cancellation_requested_term.is_set()
         assert cancellation_time_term >= start_t4 + 0.2 - 0.02
+        assert 0.18 <= elapsed4 <= 0.35
         cleanup_blocked_term.set()
 
         # Case 5: Suspending callback that succeeds within budget
@@ -2961,40 +2966,25 @@ asyncio.run(main())
         finally:
             foreign_loop.close()
 
-        # Assert already-suspended native coroutine is closed if deadline is expired
-        suspended_cleaned_up = False
+        # Assert already-suspended native coroutine is rejected at callback boundary
+        async def dummy_coro() -> None:
+            await asyncio.sleep(0)
 
-        async def coroutine_with_finally() -> None:
-            nonlocal suspended_cleaned_up
-            try:
-                loop = asyncio.get_running_loop()
-                fut: asyncio.Future[None] = loop.create_future()
-                await fut
-            finally:
-                suspended_cleaned_up = True
-
-        suspended_coro = coroutine_with_finally()
+        suspended_coro = dummy_coro()
         try:
             suspended_coro.send(None)
         except StopIteration:
             pass
 
-        def poll_with_expired_suspended_coro(r: Any) -> Any:
-            _transport.DEADLINE.set(0.0)
-            return suspended_coro
-
         with Server(lambda request, index: Reply(body=responses[1])) as server:
             async with session("async", server.url) as client:
-                res = await call(
-                    client,
-                    "wait_for_review",
-                    ORG,
-                    REVIEW,
-                    timeout=10,
-                    on_poll=poll_with_expired_suspended_coro,
-                )
-                assert res.status == "COMPLETED"
-                assert suspended_cleaned_up
+                with pytest.raises(ValueError, match="unstarted coroutines"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=lambda r: suspended_coro,
+                    )
 
     # Cyclic tuple whose list points back to it
     cyclic_list: list[Any] = []
@@ -3007,7 +2997,9 @@ asyncio.run(main())
     snap_cyclic = _snapshot_review(detail_cyclic)
     assert snap_cyclic is not None
     snap_tup = snap_cyclic.additional_properties["cyclic_tuple"]
+    assert snap_tup is not cyclic_tuple
     snap_lst = snap_tup[0]
+    assert snap_lst is not cyclic_list
     assert snap_lst[0] is snap_tup
 
     # Writable memoryview copied to independent storage
@@ -3044,6 +3036,15 @@ asyncio.run(main())
     detail_buf = CustomerReviewDetail.from_dict(responses[1])
     detail_buf.additional_properties["buf"] = oversized_buf
     assert _snapshot_review(detail_buf) is None
+
+    # Multidimensional memoryview checks nbytes against cap
+    multi_dim_raw = bytearray(100_000)
+    multi_dim_view = memoryview(multi_dim_raw).cast("B", shape=[10, 10_000])
+    assert len(multi_dim_view) == 10
+    assert multi_dim_view.nbytes == 100_000
+    detail_multi_dim = CustomerReviewDetail.from_dict(responses[1])
+    detail_multi_dim.additional_properties["multi_dim"] = multi_dim_view
+    assert _snapshot_review(detail_multi_dim) is None
 
     # Scalar subclass instance and attributes copied
     class CustomStr(str):
@@ -3084,3 +3085,37 @@ asyncio.run(main())
     assert copied_dd["missing"] == []
     assert copied_dd.extra_attr is not dd.extra_attr
     assert copied_dd.extra_attr == ["extra"]
+
+    # Traverse dictionary entries and slot descriptors including private slots
+    class SlotBase:
+        __slots__ = ("__private_slot", "public_slot")
+
+        def __init__(self) -> None:
+            self.__private_slot = ["private_secret"]
+            self.public_slot = ["public_secret"]
+
+    class SlotDerived(SlotBase):
+        pass
+
+    slot_obj = SlotDerived()
+    slot_obj.extra_dict_attr = ["extra"]
+
+    detail_slot = CustomerReviewDetail.from_dict(responses[1])
+    detail_slot.additional_properties["slot_obj"] = slot_obj
+
+    snap_slot = _snapshot_review(detail_slot)
+    assert snap_slot is not None
+    copied_slot_obj = snap_slot.additional_properties["slot_obj"]
+    assert copied_slot_obj is not slot_obj
+    assert (
+        copied_slot_obj._SlotBase__private_slot  # type: ignore[attr-defined]
+        is not slot_obj._SlotBase__private_slot
+    )
+    assert (
+        copied_slot_obj._SlotBase__private_slot  # type: ignore[attr-defined]
+        == ["private_secret"]
+    )
+    assert copied_slot_obj.public_slot is not slot_obj.public_slot
+    assert copied_slot_obj.public_slot == ["public_secret"]
+    assert copied_slot_obj.extra_dict_attr is not slot_obj.extra_dict_attr
+    assert copied_slot_obj.extra_dict_attr == ["extra"]

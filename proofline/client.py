@@ -24,7 +24,15 @@ from asyncio import (
     wait as async_wait,
 )
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from inspect import CORO_CREATED, CORO_SUSPENDED, getcoroutinestate, isawaitable, iscoroutine
+from inspect import (
+    CORO_CREATED,
+    GEN_CREATED,
+    getcoroutinestate,
+    getgeneratorstate,
+    isawaitable,
+    iscoroutine,
+    isgenerator,
+)
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -238,23 +246,29 @@ def _is_immutable(val: Any) -> bool:
 
 
 def _get_obj_attrs(obj: Any) -> list[tuple[str, Any]]:
-    if hasattr(obj, "__dict__"):
-        return list(obj.__dict__.items())
-    slots: set[str] = set()
+    result: dict[str, Any] = {}
+    if hasattr(obj, "__dict__") and isinstance(obj.__dict__, dict):
+        result.update(obj.__dict__)
+
     for cls in type(obj).__mro__:
-        s = getattr(cls, "__slots__", None)
-        if s:
-            if isinstance(s, str):
-                slots.add(s)
-            else:
-                slots.update(s)
-    result: list[tuple[str, Any]] = []
-    for attr in slots:
-        if attr.startswith("__") and attr.endswith("__"):
+        raw_slots = getattr(cls, "__slots__", None)
+        if not raw_slots:
             continue
-        if hasattr(obj, attr):
-            result.append((attr, getattr(obj, attr)))
-    return result
+        slot_names = [raw_slots] if isinstance(raw_slots, str) else raw_slots
+        for s in slot_names:
+            if s in ("__dict__", "__weakref__"):
+                continue
+            if s.startswith("__") and not s.endswith("__"):
+                attr_name = f"_{cls.__name__.lstrip('_')}{s}"
+            else:
+                attr_name = s
+            if attr_name not in result and hasattr(obj, attr_name):
+                try:
+                    result[attr_name] = getattr(obj, attr_name)
+                except AttributeError:
+                    pass
+
+    return list(result.items())
 
 
 _ITEM_TASK = 1
@@ -367,7 +381,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
             elif isinstance(val, (memoryview, bytearray)):
-                if len(val) > _MAX_SAFE_BUFFER_SIZE:
+                byte_count = val.nbytes if isinstance(val, memoryview) else len(val)
+                if byte_count > _MAX_SAFE_BUFFER_SIZE:
                     return None
                 if isinstance(val, bytearray):
                     resolved = bytearray(val)
@@ -1343,12 +1358,19 @@ class AsyncProoflineClient(AsyncOperations):
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
                         if isawaitable(res):
+                            if iscoroutine(res) and getcoroutinestate(res) != CORO_CREATED:
+                                raise ValueError("Callbacks must return unstarted coroutines.")
+                            if isgenerator(res) and getgeneratorstate(res) != GEN_CREATED:
+                                raise ValueError("Callbacks must return unstarted coroutines.")
+
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
-                                if (
-                                    iscoroutine(res)
-                                    and getcoroutinestate(res) in (CORO_CREATED, CORO_SUSPENDED)
-                                ):
+                                if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
+                                    try:
+                                        res.close()
+                                    except BaseException:
+                                        pass
+                                elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
                                     try:
                                         res.close()
                                     except BaseException:
@@ -1369,7 +1391,6 @@ class AsyncProoflineClient(AsyncOperations):
                                         res_loop = None
                                     running_loop = async_get_running_loop()
                                     if res_loop is not running_loop or res_loop.is_closed():
-                                        _safe_cleanup_future(res)
                                         raise ValueError(
                                             "Pending callback futures must belong "
                                             "to the running event loop."
@@ -1408,8 +1429,15 @@ class AsyncProoflineClient(AsyncOperations):
                                     if deadline_val is not None and monotonic() > deadline_val:
                                         if (
                                             iscoroutine(coro)
-                                            and getcoroutinestate(coro)
-                                            in (CORO_CREATED, CORO_SUSPENDED)
+                                            and getcoroutinestate(coro) == CORO_CREATED
+                                        ):
+                                            try:
+                                                coro.close()
+                                            except BaseException:
+                                                pass
+                                        elif (
+                                            isgenerator(coro)
+                                            and getgeneratorstate(coro) == GEN_CREATED
                                         ):
                                             try:
                                                 coro.close()
@@ -1431,16 +1459,23 @@ class AsyncProoflineClient(AsyncOperations):
                                     task.add_done_callback(
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
-                                    if (
-                                        iscoroutine(res)
-                                        and not wrapper_started
-                                        and getcoroutinestate(res)
-                                        in (CORO_CREATED, CORO_SUSPENDED)
-                                    ):
-                                        try:
-                                            res.close()
-                                        except BaseException:
-                                            pass
+                                    if not wrapper_started:
+                                        if (
+                                            iscoroutine(res)
+                                            and getcoroutinestate(res) == CORO_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
+                                        elif (
+                                            isgenerator(res)
+                                            and getgeneratorstate(res) == GEN_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
                                     raise
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
@@ -1453,16 +1488,23 @@ class AsyncProoflineClient(AsyncOperations):
                                     task.add_done_callback(
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
-                                    if (
-                                        iscoroutine(res)
-                                        and not wrapper_started
-                                        and getcoroutinestate(res)
-                                        in (CORO_CREATED, CORO_SUSPENDED)
-                                    ):
-                                        try:
-                                            res.close()
-                                        except BaseException:
-                                            pass
+                                    if not wrapper_started:
+                                        if (
+                                            iscoroutine(res)
+                                            and getcoroutinestate(res) == CORO_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
+                                        elif (
+                                            isgenerator(res)
+                                            and getgeneratorstate(res) == GEN_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
                                     if result is not None:
                                         return result
                                     break
