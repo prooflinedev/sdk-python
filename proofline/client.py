@@ -1014,7 +1014,14 @@ class AsyncProoflineClient(AsyncOperations):
 
                         coro = res if isinstance(res, Coroutine) else _await_res(res)
                         task = async_create_task(coro)
-                        done, pending = await async_wait({task}, timeout=remaining_budget)
+                        try:
+                            done, pending = await async_wait({task}, timeout=remaining_budget)
+                        except BaseException:
+                            task.cancel()
+                            task.add_done_callback(
+                                lambda t: t.exception() if not t.cancelled() else None
+                            )
+                            raise
                         if task in done:
                             # Re-raise any exception raised by callback
                             task.result()

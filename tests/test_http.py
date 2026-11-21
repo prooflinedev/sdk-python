@@ -2650,18 +2650,18 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=failing_callback,
                     )
 
-        # Assert callback modifying review does not mutate returned review
-        def mutating_callback(r: Any) -> None:
-            r.status = "MUTATED"
+    # Assert callback modifying review does not mutate returned review in both sync and async
+    def mutating_callback(r: Any) -> None:
+        r.status = "MUTATED"
 
-        with Server(lambda request, index: Reply(body=responses[1])) as server:
-            async with session(mode, server.url) as client:
-                res = await call(
-                    client,
-                    "wait_for_review",
-                    ORG,
-                    REVIEW,
-                    timeout=10,
-                    on_poll=mutating_callback,
-                )
-                assert res.review.status != "MUTATED"
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session(mode, server.url) as client:
+            res = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=10,
+                on_poll=mutating_callback,
+            )
+            assert res.review.status != "MUTATED"
