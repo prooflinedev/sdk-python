@@ -2593,22 +2593,22 @@ async def test_wait_for_review_invokes_on_poll_callback(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Clock(monkeypatch)
-    calls: list[str] = []
-
-    def sync_poll_callback(review_detail: Any) -> None:
-        calls.append(f"sync:{review_detail.status}")
-        if review_detail.status == "RUNNING":
-            assert review_detail.completed_at is UNSET
-
-    async def async_poll_callback(review_detail: Any) -> None:
-        calls.append(f"async:{review_detail.status}")
-        if review_detail.status == "RUNNING":
-            assert review_detail.completed_at is UNSET
-        review_detail.status = "MUTATED"
-
+    calls: list[tuple[str, int]] = []
     responses = [review("RUNNING"), review()]
 
     with Server(lambda request, index: Reply(body=responses[index])) as server:
+
+        def sync_poll_callback(review_detail: Any) -> None:
+            calls.append((f"sync:{review_detail.status}", len(server.requests)))
+            if review_detail.status == "RUNNING":
+                assert review_detail.completed_at is UNSET
+
+        async def async_poll_callback(review_detail: Any) -> None:
+            calls.append((f"async:{review_detail.status}", len(server.requests)))
+            if review_detail.status == "RUNNING":
+                assert review_detail.completed_at is UNSET
+            review_detail.status = "MUTATED"
+
         async with session(mode, server.url) as client:
             cb = async_poll_callback if mode == "async" else sync_poll_callback
             result = await call(
@@ -2621,22 +2621,22 @@ async def test_wait_for_review_invokes_on_poll_callback(
             )
             assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
             prefix = "async" if mode == "async" else "sync"
-            assert calls == [f"{prefix}:RUNNING", f"{prefix}:COMPLETED"]
+            assert calls == [(f"{prefix}:RUNNING", 1), (f"{prefix}:COMPLETED", 2)]
             assert result.review.status == "COMPLETED"
         assert len(server.requests) == 2
         assert clock.delays == [5]
 
     # Assert async client also works with regular synchronous callbacks returning None
     if mode == "async":
-        sync_calls: list[str] = []
-
-        def inline_sync_cb(r: Any) -> None:
-            sync_calls.append(r.status)
-            r.status = "MUTATED"
-            r.actions.publish = True
-            r.additional_properties["mutated"] = "mutated_value"
-
         with Server(lambda request, index: Reply(body=responses[index])) as server:
+            sync_calls: list[tuple[str, int]] = []
+
+            def inline_sync_cb(r: Any) -> None:
+                sync_calls.append((r.status, len(server.requests)))
+                r.status = "MUTATED"
+                r.actions.publish = True
+                r.additional_properties["mutated"] = "mutated_value"
+
             async with session("async", server.url) as client:
                 result = await call(
                     client,
@@ -2647,7 +2647,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
                     on_poll=inline_sync_cb,
                 )
                 assert result.status == "COMPLETED"
-                assert sync_calls == ["RUNNING", "COMPLETED"]
+                assert sync_calls == [("RUNNING", 1), ("COMPLETED", 2)]
                 assert result.review.status == "COMPLETED"
                 assert result.review.actions.publish is False
                 assert "mutated" not in result.review.additional_properties
@@ -2950,6 +2950,7 @@ asyncio.run(main())
                         timeout=10,
                         on_poll=lambda r: closed_fut,
                     )
+        assert not closed_fut.done()
 
         foreign_loop = asyncio.new_event_loop()
         foreign_fut = foreign_loop.create_future()
@@ -2963,6 +2964,7 @@ asyncio.run(main())
                             timeout=10,
                             on_poll=lambda r: foreign_fut,
                         )
+            assert not foreign_fut.done()
         finally:
             foreign_loop.close()
 
@@ -2985,6 +2987,34 @@ asyncio.run(main())
                         timeout=10,
                         on_poll=lambda r: suspended_coro,
                     )
+
+        # Started coroutine left untouched on deadline expiry
+        async def dummy_started() -> None:
+            await asyncio.sleep(10)
+
+        started_c = dummy_started()
+        task_started = asyncio.create_task(started_c)
+        await asyncio.sleep(0)
+
+        def started_coro_cb(r: Any) -> Any:
+            clock.now += 100.0
+            return started_c
+
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                res_expired = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=5.0,
+                    on_poll=started_coro_cb,
+                )
+                assert res_expired.status == "TIMED_OUT"
+                assert inspect.getcoroutinestate(started_c) == inspect.CORO_SUSPENDED
+        task_started.cancel()
+        try:
+            await task_started
+        except asyncio.CancelledError:
+            pass
 
     # Cyclic tuple whose list points back to it
     cyclic_list: list[Any] = []
@@ -3119,3 +3149,29 @@ asyncio.run(main())
     assert copied_slot_obj.public_slot == ["public_secret"]
     assert copied_slot_obj.extra_dict_attr is not slot_obj.extra_dict_attr
     assert copied_slot_obj.extra_dict_attr == ["extra"]
+
+    # Tuple subclass preserves type, isolates elements, copies attributes, and respects size limit
+    class CustomTuple(tuple[Any, ...]):
+        pass
+
+    ct = CustomTuple(([1, 2], {"a": "b"}))
+    ct.extra = ["tuple_attr"]  # type: ignore[attr-defined]
+    detail_ct = CustomerReviewDetail.from_dict(responses[1])
+    detail_ct.additional_properties["ct"] = ct
+
+    snap_ct = _snapshot_review(detail_ct)
+    assert snap_ct is not None
+    copied_ct = snap_ct.additional_properties["ct"]
+    assert type(copied_ct) is CustomTuple
+    assert copied_ct is not ct
+    assert copied_ct[0] is not ct[0]
+    assert copied_ct[0] == [1, 2]
+    assert copied_ct[1] is not ct[1]
+    assert copied_ct[1] == {"a": "b"}
+    assert copied_ct.extra is not ct.extra
+    assert copied_ct.extra == ["tuple_attr"]
+
+    huge_ct = CustomTuple(range(1001))
+    detail_huge_ct = CustomerReviewDetail.from_dict(responses[1])
+    detail_huge_ct.additional_properties["huge_ct"] = huge_ct
+    assert _snapshot_review(detail_huge_ct) is None

@@ -110,6 +110,8 @@ T = TypeVar("T")
 
 async def _await_res(res: Awaitable[Any]) -> None:
     await res
+
+
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
 _AgentSessionPromptModels = tuple[type[AgentSessionPromptType0], type[AgentSessionPromptType1]]
 _AGENT_SESSION_PROMPT_MODELS: _AgentSessionPromptModels = (
@@ -238,11 +240,7 @@ _IMMUTABLE_TYPES: set[type] = {
 
 
 def _is_immutable(val: Any) -> bool:
-    return (
-        val is None
-        or val is UNSET
-        or type(val) in _IMMUTABLE_TYPES
-    )
+    return val is None or val is UNSET or type(val) in _IMMUTABLE_TYPES
 
 
 def _get_obj_attrs(obj: Any) -> list[tuple[str, Any]]:
@@ -335,15 +333,25 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 else:
                     target[key] = new_list
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
-            elif type(val) is tuple:
+            elif isinstance(val, tuple):
                 if len(val) > _MAX_SAFE_TUPLE_SIZE:
                     return None
                 if len(val) == 0:
-                    memo[val_id] = ()
-                    if is_attr:
-                        setattr(target, key, ())
+                    if type(val) is tuple:
+                        res_empty: Any = ()
                     else:
-                        target[key] = ()
+                        try:
+                            val_cls: Any = type(val)
+                            res_empty = val_cls()
+                        except Exception:
+                            res_empty = ()
+                    memo[val_id] = res_empty
+                    if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                        stack.append((_OBJ_EXPAND, res_empty, iter(_get_obj_attrs(val))))
+                    if is_attr:
+                        setattr(target, key, res_empty)
+                    else:
+                        target[key] = res_empty
                 else:
                     temp_list: list[Any] = []
                     stack.append(
@@ -506,8 +514,17 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 res_tuple = orig_val
                 memo[val_id] = res_tuple
             else:
-                res_tuple = tuple(temp_list)
+                if type(orig_val) is tuple:
+                    res_tuple = tuple(temp_list)
+                else:
+                    try:
+                        orig_cls: Any = type(orig_val)
+                        res_tuple = orig_cls(temp_list)
+                    except Exception:
+                        res_tuple = tuple(temp_list)
                 memo[val_id] = res_tuple
+            if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                stack.append((_OBJ_EXPAND, res_tuple, iter(_get_obj_attrs(orig_val))))
             if is_attr:
                 setattr(target, key, res_tuple)
             else:
@@ -533,9 +550,7 @@ def _safe_cleanup_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
                 fut.exception()
             return
         fut.cancel()
-        fut.add_done_callback(
-            lambda t: t.exception() if not t.cancelled() else None
-        )
+        fut.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
     except BaseException:
         pass
 
@@ -1320,8 +1335,9 @@ class AsyncProoflineClient(AsyncOperations):
 
         When on_poll is provided, it must be a callable that accepts the review
         snapshot and returns None or an awaitable (supporting both sync and
-        async callbacks). Any pending futures returned by on_poll must belong to
-        the running event loop. Callbacks must return promptly even when they return
+        async callbacks). Any coroutines returned by on_poll must be unstarted, and
+        any pending futures returned by on_poll must belong to the running event
+        loop. Callbacks must return promptly even when they return
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Oversized
@@ -1358,11 +1374,6 @@ class AsyncProoflineClient(AsyncOperations):
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
                         if isawaitable(res):
-                            if iscoroutine(res) and getcoroutinestate(res) != CORO_CREATED:
-                                raise ValueError("Callbacks must return unstarted coroutines.")
-                            if isgenerator(res) and getgeneratorstate(res) != GEN_CREATED:
-                                raise ValueError("Callbacks must return unstarted coroutines.")
-
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
                                 if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
@@ -1380,6 +1391,11 @@ class AsyncProoflineClient(AsyncOperations):
                                 if result is not None:
                                     return result
                                 break
+
+                            if iscoroutine(res) and getcoroutinestate(res) != CORO_CREATED:
+                                raise ValueError("Callbacks must return unstarted coroutines.")
+                            if isgenerator(res) and getgeneratorstate(res) != GEN_CREATED:
+                                raise ValueError("Callbacks must return unstarted coroutines.")
 
                             if isinstance(res, (AsyncTask, AsyncFuture)):
                                 if res.done():
@@ -1400,9 +1416,7 @@ class AsyncProoflineClient(AsyncOperations):
                                         lambda _: completed_at.append(monotonic())
                                     )
                                     try:
-                                        done, _ = await async_wait(
-                                            {res}, timeout=remaining_budget
-                                        )
+                                        done, _ = await async_wait({res}, timeout=remaining_budget)
                                     except BaseException:
                                         _safe_cleanup_future(res)
                                         raise
@@ -1451,9 +1465,7 @@ class AsyncProoflineClient(AsyncOperations):
 
                                 task = async_create_task(_runner())
                                 try:
-                                    done, _ = await async_wait(
-                                        {task}, timeout=remaining_budget
-                                    )
+                                    done, _ = await async_wait({task}, timeout=remaining_budget)
                                 except BaseException:
                                     task.cancel()
                                     task.add_done_callback(
