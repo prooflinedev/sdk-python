@@ -562,7 +562,9 @@ class ProoflineClient(Operations):
         another head ends the wait on that read and is never COMPLETED.
 
         When on_poll is provided, it is called on each review poll with the
-        latest CustomerReviewDetail.
+        latest CustomerReviewDetail. Only reviews fetched and validated before
+        the callback is reached are delivered; deadline expiry can suppress
+        delivery.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -969,6 +971,8 @@ class AsyncProoflineClient(AsyncOperations):
 
         When on_poll is provided, it is invoked on each review poll with the
         latest CustomerReviewDetail (supports both sync and async callbacks).
+        Only reviews fetched and validated before the callback is reached are
+        delivered; deadline expiry can suppress delivery.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -999,20 +1003,21 @@ class AsyncProoflineClient(AsyncOperations):
                             if result is not None:
                                 return result
                             break
-                        timed_out_in_callback = False
+                        timed_out_box = [False]
 
                         async def _run() -> None:
-                            nonlocal timed_out_in_callback
                             try:
                                 await res
                             except TimeoutError:
-                                timed_out_in_callback = True
+                                # Mark that callback itself raised TimeoutError while running
+                                timed_out_box[0] = True
                                 raise
 
                         try:
                             await async_wait_for(_run(), timeout=remaining_budget)
                         except TimeoutError as exc:
-                            if timed_out_in_callback:
+                            # Re-raise only if callback itself explicitly raised TimeoutError
+                            if timed_out_box[0] and (_transport.remaining() or 0) > 0:
                                 raise exc from None
                             if result is not None:
                                 return result
