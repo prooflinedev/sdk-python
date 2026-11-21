@@ -992,12 +992,12 @@ class AsyncProoflineClient(AsyncOperations):
         latest CustomerReviewDetail (supports both sync and async callbacks).
         Only reviews fetched and validated before the callback is reached are
         delivered; deadline expiry can suppress delivery. Inline failures and
-        awaitable failures that finish before the timeout propagate (though
-        awaitable failures can be suppressed when the callback returns after
-        the deadline), but cancellation-time failures do not. on_poll
-        exceptions propagate even when a terminal outcome has already been
-        determined. Synchronous callbacks must return before a terminal result
-        can be delivered and the polling deadline cannot interrupt them.
+        awaitable failures observed before the deadline propagate (though
+        awaitables that complete or are observed after the deadline or during
+        cancellation do not). on_poll exceptions propagate even when a terminal
+        outcome has already been determined. Synchronous callbacks must return
+        before a terminal result can be delivered and the polling deadline
+        cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -1041,12 +1041,19 @@ class AsyncProoflineClient(AsyncOperations):
                             else:
                                 coro = res if isinstance(res, Coroutine) else _await_res(res)
                                 completed_at: list[float] = []
+                                if isinstance(res, (AsyncTask, AsyncFuture)):
+                                    res.add_done_callback(
+                                        lambda _: completed_at.append(monotonic())
+                                        if not completed_at
+                                        else None
+                                    )
 
                                 async def _runner() -> None:
                                     try:
                                         await coro
                                     finally:
-                                        completed_at.append(monotonic())
+                                        if not completed_at:
+                                            completed_at.append(monotonic())
 
                                 task = async_create_task(_runner())
                                 try:

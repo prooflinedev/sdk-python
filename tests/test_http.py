@@ -2600,6 +2600,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
 
     async def async_poll_callback(review_detail: Any) -> None:
         calls.append(f"async:{review_detail.status}")
+        review_detail.status = "MUTATED"
 
     responses = [review("RUNNING"), review()]
 
@@ -2617,6 +2618,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
             assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
             prefix = "async" if mode == "async" else "sync"
             assert calls == [f"{prefix}:RUNNING", f"{prefix}:COMPLETED"]
+            assert result.review.status == "COMPLETED"
         assert len(server.requests) == 2
         assert clock.delays == [5]
 
@@ -2705,20 +2707,26 @@ async def test_wait_for_review_invokes_on_poll_callback(
     # Assert callback modifying review does not mutate returned review in both sync and async
     mutated_count = 0
 
-    def mutating_callback(r: Any) -> None:
+    def sync_mutating_callback(r: Any) -> None:
+        nonlocal mutated_count
+        mutated_count += 1
+        r.status = "MUTATED"
+
+    async def async_mutating_callback(r: Any) -> None:
         nonlocal mutated_count
         mutated_count += 1
         r.status = "MUTATED"
 
     with Server(lambda request, index: Reply(body=responses[1])) as server:
         async with session(mode, server.url) as client:
+            mut_cb = async_mutating_callback if mode == "async" else sync_mutating_callback
             res = await call(
                 client,
                 "wait_for_review",
                 ORG,
                 REVIEW,
                 timeout=10,
-                on_poll=mutating_callback,
+                on_poll=mut_cb,
             )
             assert mutated_count == 1
             assert res.review.status != "MUTATED"
