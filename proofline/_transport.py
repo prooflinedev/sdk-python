@@ -6,6 +6,7 @@ import ipaddress
 import math
 import os
 import re
+import ssl
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from typing import Any, TypeAlias, cast
 from urllib.parse import urlsplit
 
 import anyio
+import httpcore2
 import httpx2
 from pydantic import SecretStr
 
@@ -433,10 +435,16 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
 
 
 class RetryTransport(httpx2.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(
+        self,
+        token: SecretStr,
+        timeout: float,
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = SyncHTTPTransport()
+        self._inner = SyncHTTPTransport(ssl_context=ssl_context)
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
@@ -484,10 +492,23 @@ class RetryTransport(httpx2.BaseTransport):
 
 
 class AsyncRetryTransport(httpx2.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(
+        self,
+        token: SecretStr,
+        timeout: float,
+        *,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = httpx2.AsyncHTTPTransport()
+        self._inner = httpx2.AsyncHTTPTransport(
+            verify=(
+                ssl_context
+                if ssl_context is not None
+                else httpcore2.default_ssl_context(_trust_env=False)
+            ),
+            trust_env=False,
+        )
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):

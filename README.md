@@ -20,6 +20,20 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Custom CA certificates
+
+Both clients use the operating system root store and ignore ambient `SSL_CERT_FILE` and `SSL_CERT_DIR` overrides (`trust_env=False`). Behind a TLS-inspecting proxy, pass `ca_cert` or set `PROOFLINE_CA_CERT` to a PEM certificate bundle. Extra roots are merged beside the system roots; certificate and hostname verification stay enabled.
+
+```python
+from pathlib import Path
+from proofline import ProoflineClient
+
+with ProoflineClient(ca_cert=Path("/etc/ssl/certs/corp-proxy-ca.pem")) as client:
+    ...
+```
+
+An explicit `ca_cert` takes precedence over `PROOFLINE_CA_CERT`, and an empty `PROOFLINE_CA_CERT` counts as unset. Unreadable files raise `OSError`, and empty, malformed, oversized, or non-PEM bundles raise `ValueError` at client construction before any request is sent.
+
 ## Errors and refusals
 
 A refused request raises `ProoflineError` with the server problem's `status`, `type`, `title` and `detail`. When a review request creates nothing, the error also carries `refusal`, whose `reason` names the setting to change, such as `NO_LINKED_ENVIRONMENT` or `ENVIRONMENT_NOT_READY`, and `repository_name`. `RunNowRefusal` names the type of `refusal`. A refusal that does not match the public contract keeps its status, `title` and `detail` with the type `urn:proofline:sdk:invalid-response` and no `refusal`. Any other status, such as the 402 a review request answers when credits cannot pay, is a plain problem with no `refusal`. The token is redacted from every text field, and `repr` and `str` show only the status.
