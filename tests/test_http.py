@@ -2597,9 +2597,13 @@ async def test_wait_for_review_invokes_on_poll_callback(
 
     def sync_poll_callback(review_detail: Any) -> None:
         calls.append(f"sync:{review_detail.status}")
+        if review_detail.status == "RUNNING":
+            assert review_detail.completed_at is UNSET
 
     async def async_poll_callback(review_detail: Any) -> None:
         calls.append(f"async:{review_detail.status}")
+        if review_detail.status == "RUNNING":
+            assert review_detail.completed_at is UNSET
         review_detail.status = "MUTATED"
 
     responses = [review("RUNNING"), review()]

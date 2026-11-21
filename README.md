@@ -54,7 +54,7 @@ if outcome.status != "COMPLETED":
     print(outcome.status, outcome.reason)
 ```
 
-`ProoflineClient` requires a synchronous `on_poll` callback. `on_poll` receives each `CustomerReviewDetail` fetched and validated before the callback is reached; deadline expiry can suppress delivery. `on_poll` exceptions propagate even when a terminal outcome has already been determined. Synchronous callbacks must return before a terminal result can be delivered and the polling deadline cannot interrupt them.
+`on_poll` is optional; when supplied to `ProoflineClient`, it must be a synchronous callback. `on_poll` receives each `CustomerReviewDetail` fetched and validated before the callback is reached; deadline expiry can suppress delivery. `on_poll` exceptions propagate even when a terminal outcome has already been determined. Synchronous callbacks must return before a terminal result can be delivered and the polling deadline cannot interrupt them.
 
 With `AsyncProoflineClient`, `wait_for_review` can be awaited and `on_poll` supports both synchronous callbacks and awaitables (such as coroutines and futures). Inline failures and awaitable failures observed before the deadline propagate (though awaitable failures can be suppressed when returned or observed after the deadline), but cancellation-time failures do not.
 

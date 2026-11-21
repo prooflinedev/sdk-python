@@ -18,7 +18,7 @@ from asyncio import (
 from asyncio import (
     wait as async_wait,
 )
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Generator, Iterator
 from copy import deepcopy
 from inspect import isawaitable
 from string import hexdigits
@@ -604,7 +604,7 @@ class ProoflineClient(Operations):
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
-                    snapshot = deepcopy(last)
+                    snapshot = deepcopy(last, {id(UNSET): UNSET})
                     if (_transport.remaining() or 0) > 0:
                         on_poll(snapshot)
                 if result is not None:
@@ -1019,13 +1019,13 @@ class AsyncProoflineClient(AsyncOperations):
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
-                    snapshot = deepcopy(last)
+                    snapshot = deepcopy(last, {id(UNSET): UNSET})
                     if (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
                         if isawaitable(res):
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
-                                if isinstance(res, Coroutine):
+                                if isinstance(res, (Coroutine, Generator)):
                                     res.close()
                                 elif isinstance(res, (AsyncTask, AsyncFuture)):
                                     res.cancel()
@@ -1036,18 +1036,41 @@ class AsyncProoflineClient(AsyncOperations):
                                     return result
                                 break
 
-                            if isinstance(res, (AsyncTask, AsyncFuture)) and res.done():
-                                res.result()
-                            else:
-                                coro = res if isinstance(res, Coroutine) else _await_res(res)
-                                completed_at: list[float] = []
-                                if isinstance(res, (AsyncTask, AsyncFuture)):
+                            if isinstance(res, (AsyncTask, AsyncFuture)):
+                                if res.done():
+                                    res.result()
+                                else:
+                                    completed_at: list[float] = []
                                     res.add_done_callback(
                                         lambda _: completed_at.append(monotonic())
-                                        if not completed_at
-                                        else None
                                     )
-
+                                    try:
+                                        done, _ = await async_wait(
+                                            {res}, timeout=remaining_budget
+                                        )
+                                    except BaseException:
+                                        res.cancel()
+                                        res.add_done_callback(
+                                            lambda t: t.exception() if not t.cancelled() else None
+                                        )
+                                        raise
+                                    deadline_val = _transport.DEADLINE.get()
+                                    cb_finished_in_budget = bool(completed_at) and (
+                                        deadline_val is None or completed_at[0] <= deadline_val
+                                    )
+                                    if cb_finished_in_budget or res in done:
+                                        res.result()
+                                    else:
+                                        res.cancel()
+                                        res.add_done_callback(
+                                            lambda t: t.exception() if not t.cancelled() else None
+                                        )
+                                        if result is not None:
+                                            return result
+                                        break
+                            else:
+                                coro = res
+                                completed_at = []
                                 wrapper_started = False
 
                                 async def _runner() -> None:
@@ -1056,12 +1079,11 @@ class AsyncProoflineClient(AsyncOperations):
                                     try:
                                         await coro
                                     finally:
-                                        if not completed_at:
-                                            completed_at.append(monotonic())
+                                        completed_at.append(monotonic())
 
                                 task = async_create_task(_runner())
                                 try:
-                                    done, pending = await async_wait(
+                                    done, _ = await async_wait(
                                         {task}, timeout=remaining_budget
                                     )
                                 except BaseException:
@@ -1069,34 +1091,27 @@ class AsyncProoflineClient(AsyncOperations):
                                     task.add_done_callback(
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
-                                    if isinstance(res, (AsyncTask, AsyncFuture)):
-                                        res.cancel()
-                                        res.add_done_callback(
-                                            lambda t: t.exception() if not t.cancelled() else None
-                                        )
-                                    elif isinstance(res, Coroutine) and not wrapper_started:
+                                    if (
+                                        isinstance(res, (Coroutine, Generator))
+                                        and not wrapper_started
+                                    ):
                                         res.close()
                                     raise
-                                # Record completion time in runner to decide whether to propagate
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
                                 if cb_finished_in_budget and task in done:
-                                    # Finished in budget: propagate any error or success
                                     task.result()
                                 else:
-                                    # Deadline expired before callback finished
                                     task.cancel()
                                     task.add_done_callback(
                                         lambda t: t.exception() if not t.cancelled() else None
                                     )
-                                    if isinstance(res, (AsyncTask, AsyncFuture)):
-                                        res.cancel()
-                                        res.add_done_callback(
-                                            lambda t: t.exception() if not t.cancelled() else None
-                                        )
-                                    elif isinstance(res, Coroutine) and not wrapper_started:
+                                    if (
+                                        isinstance(res, (Coroutine, Generator))
+                                        and not wrapper_started
+                                    ):
                                         res.close()
                                     if result is not None:
                                         return result
