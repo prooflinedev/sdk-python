@@ -2633,6 +2633,8 @@ async def test_wait_for_review_invokes_on_poll_callback(
         def inline_sync_cb(r: Any) -> None:
             sync_calls.append(r.status)
             r.status = "MUTATED"
+            r.actions.publish = True
+            r.additional_properties["mutated"] = "mutated_value"
 
         with Server(lambda request, index: Reply(body=responses[index])) as server:
             async with session("async", server.url) as client:
@@ -2647,6 +2649,8 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 assert result.status == "COMPLETED"
                 assert sync_calls == ["RUNNING", "COMPLETED"]
                 assert result.review.status == "COMPLETED"
+                assert result.review.actions.publish is False
+                assert "mutated" not in result.review.additional_properties
 
         # Assert callback TimeoutError before deadline propagates
         async def failing_callback(r: Any) -> None:
@@ -2830,12 +2834,91 @@ asyncio.run(main())
 
     snap = _snapshot_review(detail)
     assert snap is not None
-    assert snap.additional_properties["deep"]["child"] is not None
     assert snap is not detail
     assert snap.additional_properties is not detail.additional_properties
+
+    # Walk all 3,000 levels, assert the leaf value, and verify mutation leaves original unchanged
+    walk_snap = snap.additional_properties["deep"]
+    walk_orig = detail.additional_properties["deep"]
+    for _ in range(3000):
+        assert walk_snap is not walk_orig
+        walk_snap = walk_snap["child"]
+        walk_orig = walk_orig["child"]
+    assert walk_snap["val"] == "deepest"
+    assert walk_orig["val"] == "deepest"
+
+    walk_snap["val"] = "mutated_leaf"
+    assert walk_orig["val"] == "deepest"
+
     assert isinstance(snap.additional_properties["custom_tuple"], tuple)
     assert (
         snap.additional_properties["custom_tuple"][0]
         is not detail.additional_properties["custom_tuple"][0]
     )
     assert snap.additional_properties["custom_tuple"][0]["nested"] == "val"
+
+    # Tuple with deeply nested list must snapshot iteratively without RecursionError
+    deep_nested_list: Any = "leaf"
+    for _ in range(3000):
+        deep_nested_list = [deep_nested_list]
+    detail.additional_properties["tuple_with_deep_list"] = (deep_nested_list, 999)
+    snap_nested = _snapshot_review(detail)
+    assert snap_nested is not None
+    assert isinstance(snap_nested.additional_properties["tuple_with_deep_list"], tuple)
+    curr_l = snap_nested.additional_properties["tuple_with_deep_list"][0]
+    for _ in range(3000):
+        curr_l = curr_l[0]
+    assert curr_l == "leaf"
+
+    # Assert pending future on closed loop skips wait
+    if mode == "async":
+        other_loop = asyncio.new_event_loop()
+        closed_fut = other_loop.create_future()
+        other_loop.close()
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lambda r: closed_fut,
+                )
+                assert res.status == "COMPLETED"
+
+        # Assert already-suspended native coroutine is closed if deadline is expired
+        suspended_cleaned_up = False
+
+        async def coroutine_with_finally() -> None:
+            nonlocal suspended_cleaned_up
+            try:
+                loop = asyncio.get_running_loop()
+                fut: asyncio.Future[None] = loop.create_future()
+                await fut
+            finally:
+                suspended_cleaned_up = True
+
+        suspended_coro = coroutine_with_finally()
+        try:
+            suspended_coro.send(None)
+        except StopIteration:
+            pass
+
+        def poll_with_expired_suspended_coro(r: Any) -> Any:
+            _transport.DEADLINE.set(0.0)
+            return suspended_coro
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=poll_with_expired_suspended_coro,
+                )
+                assert res.status == "COMPLETED"
+                assert suspended_cleaned_up

@@ -21,7 +21,7 @@ from asyncio import (
     wait as async_wait,
 )
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from inspect import CORO_CREATED, getcoroutinestate, isawaitable, iscoroutine
+from inspect import CORO_CREATED, CORO_SUSPENDED, getcoroutinestate, isawaitable, iscoroutine
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -249,6 +249,8 @@ _ITEM_TASK = 1
 _DICT_EXPAND = 2
 _LIST_EXPAND = 3
 _OBJ_EXPAND = 4
+_TUPLE_EXPAND = 5
+_TUPLE_FINALIZE = 6
 _EXPAND_BATCH_SIZE = 64
 
 
@@ -306,20 +308,26 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     target[key] = new_list
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
             elif isinstance(val, tuple):
-                if all(_is_immutable(x) for x in val):
-                    resolved = val
+                if len(val) == 0:
+                    memo[val_id] = ()
+                    if is_attr:
+                        setattr(target, key, ())
+                    else:
+                        target[key] = ()
                 else:
-                    resolved = tuple(
-                        memo[id(x)]
-                        if id(x) in memo
-                        else (x if _is_immutable(x) else copy.deepcopy(x, memo))
-                        for x in val
+                    temp_list: list[Any] = []
+                    stack.append(
+                        (
+                            _TUPLE_FINALIZE,
+                            target,
+                            key,
+                            is_attr,
+                            val_id,
+                            val,
+                            temp_list,
+                        )
                     )
-                memo[val_id] = resolved
-                if is_attr:
-                    setattr(target, key, resolved)
-                else:
-                    target[key] = resolved
+                    stack.append((_TUPLE_EXPAND, temp_list, iter(val)))
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                 new_obj = copy.copy(val)
                 memo[val_id] = new_obj
@@ -393,6 +401,44 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     break
             else:
                 stack.append((_OBJ_EXPAND, new_obj, it))
+
+        elif task_type == _TUPLE_EXPAND:
+            temp_list, it = target, it_or_key
+            for _ in range(_EXPAND_BATCH_SIZE):
+                try:
+                    v = next(it)
+                except StopIteration:
+                    break
+                if _is_immutable(v):
+                    temp_list.append(v)
+                elif id(v) in memo:
+                    temp_list.append(memo[id(v)])
+                else:
+                    idx = len(temp_list)
+                    temp_list.append(None)
+                    stack.append((_TUPLE_EXPAND, temp_list, it))
+                    stack.append((_ITEM_TASK, temp_list, idx, False, v))
+                    break
+            else:
+                stack.append((_TUPLE_EXPAND, temp_list, it))
+
+        elif task_type == _TUPLE_FINALIZE:
+            key, is_attr, val_id, orig_val, temp_list = (
+                it_or_key,
+                extra[0],
+                extra[1],
+                extra[2],
+                extra[3],
+            )
+            if all(a is b for a, b in zip(orig_val, temp_list)):
+                res_tuple = orig_val
+            else:
+                res_tuple = tuple(temp_list)
+            memo[val_id] = res_tuple
+            if is_attr:
+                setattr(target, key, res_tuple)
+            else:
+                target[key] = res_tuple
 
     return root
 
@@ -1227,7 +1273,10 @@ class AsyncProoflineClient(AsyncOperations):
                         if isawaitable(res):
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
-                                if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
+                                if (
+                                    iscoroutine(res)
+                                    and getcoroutinestate(res) in (CORO_CREATED, CORO_SUSPENDED)
+                                ):
                                     try:
                                         res.close()
                                     except BaseException:
@@ -1242,6 +1291,15 @@ class AsyncProoflineClient(AsyncOperations):
                                 if res.done():
                                     res.result()
                                 else:
+                                    try:
+                                        res_loop = res.get_loop()
+                                    except Exception:
+                                        res_loop = None
+                                    if res_loop is not None and res_loop.is_closed():
+                                        _safe_cleanup_future(res)
+                                        if result is not None:
+                                            return result
+                                        break
                                     completed_at: list[float] = []
                                     res.add_done_callback(
                                         lambda _: completed_at.append(monotonic())
@@ -1276,7 +1334,8 @@ class AsyncProoflineClient(AsyncOperations):
                                     if deadline_val is not None and monotonic() > deadline_val:
                                         if (
                                             iscoroutine(coro)
-                                            and getcoroutinestate(coro) == CORO_CREATED
+                                            and getcoroutinestate(coro)
+                                            in (CORO_CREATED, CORO_SUSPENDED)
                                         ):
                                             try:
                                                 coro.close()
@@ -1301,7 +1360,8 @@ class AsyncProoflineClient(AsyncOperations):
                                     if (
                                         iscoroutine(res)
                                         and not wrapper_started
-                                        and getcoroutinestate(res) == CORO_CREATED
+                                        and getcoroutinestate(res)
+                                        in (CORO_CREATED, CORO_SUSPENDED)
                                     ):
                                         try:
                                             res.close()
@@ -1322,7 +1382,8 @@ class AsyncProoflineClient(AsyncOperations):
                                     if (
                                         iscoroutine(res)
                                         and not wrapper_started
-                                        and getcoroutinestate(res) == CORO_CREATED
+                                        and getcoroutinestate(res)
+                                        in (CORO_CREATED, CORO_SUSPENDED)
                                     ):
                                         try:
                                             res.close()
