@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 from asyncio import (
+    Future as AsyncFuture,
+)
+from asyncio import (
     Task as AsyncTask,
 )
 from asyncio import (
@@ -575,7 +578,8 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery.
+        delivery. Synchronous callbacks must return before a terminal result can
+        be delivered and the polling deadline cannot interrupt them.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -983,7 +987,9 @@ class AsyncProoflineClient(AsyncOperations):
         When on_poll is provided, it is invoked on each review poll with the
         latest CustomerReviewDetail (supports both sync and async callbacks).
         Only reviews fetched and validated before the callback is reached are
-        delivered; deadline expiry can suppress delivery.
+        delivered; deadline expiry can suppress delivery. Synchronous callbacks
+        must return before a terminal result can be delivered and the polling
+        deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -1011,7 +1017,7 @@ class AsyncProoflineClient(AsyncOperations):
                         if remaining_budget is not None and remaining_budget <= 0:
                             if isinstance(res, Coroutine):
                                 res.close()
-                            elif isinstance(res, AsyncTask):
+                            elif isinstance(res, (AsyncTask, AsyncFuture)):
                                 res.cancel()
                                 res.add_done_callback(
                                     lambda t: t.exception() if not t.cancelled() else None
@@ -1029,6 +1035,11 @@ class AsyncProoflineClient(AsyncOperations):
                             task.add_done_callback(
                                 lambda t: t.exception() if not t.cancelled() else None
                             )
+                            if isinstance(res, (AsyncTask, AsyncFuture)):
+                                res.cancel()
+                                res.add_done_callback(
+                                    lambda t: t.exception() if not t.cancelled() else None
+                                )
                             raise
                         if task in done:
                             # Re-raise any exception raised by callback
@@ -1040,6 +1051,11 @@ class AsyncProoflineClient(AsyncOperations):
                             task.add_done_callback(
                                 lambda t: t.exception() if not t.cancelled() else None
                             )
+                            if isinstance(res, (AsyncTask, AsyncFuture)):
+                                res.cancel()
+                                res.add_done_callback(
+                                    lambda t: t.exception() if not t.cancelled() else None
+                                )
                             if result is not None:
                                 return result
                             break
