@@ -601,8 +601,10 @@ class ProoflineClient(Operations):
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
-                if on_poll is not None:
-                    on_poll(deepcopy(last))
+                if on_poll is not None and (_transport.remaining() or 0) > 0:
+                    snapshot = deepcopy(last)
+                    if (_transport.remaining() or 0) > 0:
+                        on_poll(snapshot)
                 if result is not None:
                     return result
                 if (_transport.remaining() or 0) <= 0:
@@ -1010,55 +1012,59 @@ class AsyncProoflineClient(AsyncOperations):
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
-                if on_poll is not None:
-                    res = on_poll(deepcopy(last))
-                    if isawaitable(res):
-                        remaining_budget = _transport.remaining()
-                        if remaining_budget is not None and remaining_budget <= 0:
-                            if isinstance(res, Coroutine):
-                                res.close()
-                            elif isinstance(res, (AsyncTask, AsyncFuture)):
-                                res.cancel()
-                                res.add_done_callback(
-                                    lambda t: t.exception() if not t.cancelled() else None
-                                )
-                            if result is not None:
-                                return result
-                            break
+                if on_poll is not None and (_transport.remaining() or 0) > 0:
+                    snapshot = deepcopy(last)
+                    if (_transport.remaining() or 0) > 0:
+                        res = on_poll(snapshot)
+                        if isawaitable(res):
+                            remaining_budget = _transport.remaining()
+                            if remaining_budget is not None and remaining_budget <= 0:
+                                if isinstance(res, Coroutine):
+                                    res.close()
+                                elif isinstance(res, (AsyncTask, AsyncFuture)):
+                                    res.cancel()
+                                    res.add_done_callback(
+                                        lambda t: t.exception() if not t.cancelled() else None
+                                    )
+                                if result is not None:
+                                    return result
+                                break
 
-                        coro = res if isinstance(res, Coroutine) else _await_res(res)
-                        task = async_create_task(coro)
-                        try:
-                            done, pending = await async_wait({task}, timeout=remaining_budget)
-                        except BaseException:
-                            task.cancel()
-                            task.add_done_callback(
-                                lambda t: t.exception() if not t.cancelled() else None
-                            )
-                            if isinstance(res, (AsyncTask, AsyncFuture)):
-                                res.cancel()
-                                res.add_done_callback(
+                            coro = res if isinstance(res, Coroutine) else _await_res(res)
+                            task = async_create_task(coro)
+                            timed_out_waiting = False
+                            try:
+                                done, pending = await async_wait({task}, timeout=remaining_budget)
+                                if task not in done:
+                                    timed_out_waiting = True
+                            except BaseException:
+                                task.cancel()
+                                task.add_done_callback(
                                     lambda t: t.exception() if not t.cancelled() else None
                                 )
-                            raise
-                        if task in done:
-                            # Re-raise any exception raised by callback
-                            task.result()
-                        else:
-                            # Callback didn't finish within budget: cancel task without waiting
-                            task.cancel()
-                            # Observe task exception to silence unhandled task errors
-                            task.add_done_callback(
-                                lambda t: t.exception() if not t.cancelled() else None
-                            )
-                            if isinstance(res, (AsyncTask, AsyncFuture)):
-                                res.cancel()
-                                res.add_done_callback(
+                                if isinstance(res, (AsyncTask, AsyncFuture)):
+                                    res.cancel()
+                                    res.add_done_callback(
+                                        lambda t: t.exception() if not t.cancelled() else None
+                                    )
+                                raise
+                            if not timed_out_waiting and task in done:
+                                # Callback completion won over deadline timeout
+                                task.result()
+                            else:
+                                # Timeout won over callback completion
+                                task.cancel()
+                                task.add_done_callback(
                                     lambda t: t.exception() if not t.cancelled() else None
                                 )
-                            if result is not None:
-                                return result
-                            break
+                                if isinstance(res, (AsyncTask, AsyncFuture)):
+                                    res.cancel()
+                                    res.add_done_callback(
+                                        lambda t: t.exception() if not t.cancelled() else None
+                                    )
+                                if result is not None:
+                                    return result
+                                break
                 if result is not None:
                     return result
                 if (_transport.remaining() or 0) <= 0:

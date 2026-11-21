@@ -2650,6 +2650,20 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=failing_callback,
                     )
 
+        # Assert async callback that stays pending beyond the budget times out under watchdog
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+            async with session("async", server.url) as client:
+                res = await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=0.2,
+                        on_poll=lambda r: asyncio.sleep(5.0),
+                    ),
+                    timeout=2.0,
+                )
+                assert res.status == "TIMED_OUT"
+
     # Assert callback modifying review does not mutate returned review in both sync and async
     mutated_count = 0
 
