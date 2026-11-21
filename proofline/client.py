@@ -570,6 +570,7 @@ class ProoflineClient(Operations):
         _head_commit(head_commit_sha)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
+        result: ReviewOutcome | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
         interval = 5.0
         try:
@@ -591,6 +592,8 @@ class ProoflineClient(Operations):
                     break
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
+            if result is not None:
+                return result
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
@@ -972,6 +975,7 @@ class AsyncProoflineClient(AsyncOperations):
         _head_commit(head_commit_sha)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
+        result: ReviewOutcome | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
         interval = 5.0
         try:
@@ -992,21 +996,26 @@ class AsyncProoflineClient(AsyncOperations):
                         if remaining_budget is not None and remaining_budget <= 0:
                             if isinstance(res, Coroutine):
                                 res.close()
+                            if result is not None:
+                                return result
                             break
-                        timed_out_box = [False]
+                        timed_out_in_callback = False
 
-                        async def _run_callback() -> None:
+                        async def _run() -> None:
+                            nonlocal timed_out_in_callback
                             try:
                                 await res
                             except TimeoutError:
-                                timed_out_box[0] = True
+                                timed_out_in_callback = True
                                 raise
 
                         try:
-                            await async_wait_for(_run_callback(), timeout=remaining_budget)
+                            await async_wait_for(_run(), timeout=remaining_budget)
                         except TimeoutError as exc:
-                            if timed_out_box[0]:
+                            if timed_out_in_callback:
                                 raise exc from None
+                            if result is not None:
+                                return result
                             break
                 if result is not None:
                     return result
@@ -1014,6 +1023,8 @@ class AsyncProoflineClient(AsyncOperations):
                     break
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
+            if result is not None:
+                return result
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
