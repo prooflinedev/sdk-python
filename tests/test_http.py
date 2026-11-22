@@ -2586,3 +2586,31 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+@pytest.mark.parametrize("content_type", ["Application/JSON", "APPLICATION/JSON; charset=utf-8"])
+async def test_mcp_accepts_case_insensitive_content_type(mode: str, content_type: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        body = json.loads(request.body)
+        if body["method"] == "initialize":
+            return Reply(
+                body={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-11-25"}},
+                headers={"Content-Type": content_type},
+            )
+        if body["method"] == "notifications/initialized":
+            return Reply(status=202, body=b"")
+        return Reply(
+            body={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"content": [{"type": "text", "text": "ok"}]},
+            },
+            headers={"Content-Type": content_type},
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            mcp_client = client.mcp if mode == "sync" else client.mcp
+            res = await call(mcp_client, "list_organizations")
+            assert res["content"] == [{"type": "text", "text": "ok"}]
