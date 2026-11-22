@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import ctypes
 import datetime
 import math
@@ -696,27 +697,52 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 _assign_target(target, key, is_attr, resolved)
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, resolved, iter(_get_obj_attrs(val))))
+            elif isinstance(val, array.array):
+                if val.buffer_info()[1] * val.itemsize > _MAX_SAFE_BUFFER_SIZE:
+                    return None
+                try:
+                    resolved_arr = array.array(val.typecode, val)
+                except Exception as exc:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    ) from exc
+                memo[val_id] = resolved_arr
+                _assign_target(target, key, is_attr, resolved_arr)
+                if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    stack.append((_OBJ_EXPAND, resolved_arr, iter(_get_obj_attrs(val))))
             elif isinstance(val, memoryview):
                 if val.nbytes > _MAX_SAFE_BUFFER_SIZE:
                     return None
                 exporter = getattr(val, "obj", None)
                 resolved_mv: Any
-                if isinstance(exporter, bytearray):
+                if isinstance(exporter, (bytearray, array.array)):
                     exp_id = id(exporter)
                     if exp_id in memo:
                         cloned_exporter = memo[exp_id]
                     else:
-                        if bytearray.__len__(exporter) > _MAX_SAFE_BUFFER_SIZE:
+                        exp_bytes_len = (
+                            bytearray.__len__(exporter)
+                            if isinstance(exporter, bytearray)
+                            else exporter.buffer_info()[1] * exporter.itemsize
+                        )
+                        if exp_bytes_len > _MAX_SAFE_BUFFER_SIZE:
                             return None
                         try:
-                            cloned_exporter = bytearray.__new__(type(exporter))
-                            bytearray.__init__(cloned_exporter, exporter)
+                            if isinstance(exporter, bytearray):
+                                cloned_exporter = bytearray.__new__(type(exporter))
+                                bytearray.__init__(cloned_exporter, exporter)
+                            else:
+                                cloned_exporter = array.array(exporter.typecode, exporter)
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
                                 f"{type(exporter).__name__}"
                             ) from exc
                         memo[exp_id] = cloned_exporter
+                        if hasattr(exporter, "__dict__") or hasattr(exporter, "__slots__"):
+                            stack.append(
+                                (_OBJ_EXPAND, cloned_exporter, iter(_get_obj_attrs(exporter)))
+                            )
                     b_val = _Py_buffer()
                     b_exp = _Py_buffer()
                     if _py_get_buffer(val, ctypes.byref(b_val), 0x0118) != 0:
@@ -760,7 +786,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             resolved_mv = casted[start_elem:None:elem_stride]
                     elif val.ndim == 0:
                         resolved_mv = cast(Any, base_bytes[offset : offset + val.itemsize]).cast(
-                            val.format
+                            val.format, shape=()
                         )
                     elif val.c_contiguous:
                         resolved_mv = cast(Any, base_bytes[offset : offset + val.nbytes]).cast(
@@ -776,9 +802,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         resolved_mv = memoryview(bytes(val))
                     else:
                         resolved_mv = memoryview(bytearray(val))
-                    if val.format != "B" or (val.ndim > 1 and val.shape != resolved_mv.shape):
+                    if val.ndim == 0:
+                        resolved_mv = cast(Any, resolved_mv).cast(val.format, shape=())
+                    elif val.format != "B" or (val.ndim > 1 and val.shape != resolved_mv.shape):
                         try:
-                            resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
+                            resolved_mv = cast(Any, resolved_mv).cast(val.format, shape=val.shape)
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
@@ -1036,6 +1064,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         visited: set[int] = set()
         stack_nodes = [m_clone]
         container_ids: set[int] = set()
+        is_custom_hashed = type(m_clone) is not tuple
         while stack_nodes:
             cur = stack_nodes.pop()
             if _is_immutable(cur):
@@ -1059,8 +1088,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         stack_nodes.append(v)
             elif isinstance(cur, tuple):
                 for item in cur:
-                    if not _is_immutable(item) and not _is_identity_hashed(item):
-                        stack_nodes.append(item)
+                    if not _is_immutable(item):
+                        if is_custom_hashed or not _is_identity_hashed(item):
+                            stack_nodes.append(item)
             elif isinstance(cur, (list, set, deque)):
                 for item in cur:
                     if not _is_immutable(item):
@@ -1899,7 +1929,11 @@ class ProoflineClient(Operations):
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
                     snapshot = _snapshot_review(last)
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
-                        res = on_poll(snapshot)
+                        deadline_token = _transport.DEADLINE.set(None)
+                        try:
+                            res = on_poll(snapshot)
+                        finally:
+                            _transport.DEADLINE.reset(deadline_token)
                         try:
                             res_awaitable = isawaitable(res)
                         except Exception:
@@ -2361,7 +2395,11 @@ class AsyncProoflineClient(AsyncOperations):
                                     initial_cancelling = waiter_task.cancelling()
                             except BaseException:
                                 pass
-                        res = on_poll(snapshot)
+                        deadline_token = _transport.DEADLINE.set(None)
+                        try:
+                            res = on_poll(snapshot)
+                        finally:
+                            _transport.DEADLINE.reset(deadline_token)
                         if waiter_task is not None:
                             current_cancelling = 0
                             try:

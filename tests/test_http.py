@@ -1294,6 +1294,25 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
         assert len(server.requests) == 3
         assert clock.delays == [5, 10]
+    # Mismatch without on_poll ends on the read that names another head (2 requests)
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=100,
+                head_commit_sha=OTHER_HEAD,
+            )
+        assert result.status == "INCOMPLETE"
+        assert result.review.status == "RUNNING"
+        assert gap_facts(result) == [PINNED_ELSEWHERE]
+        assert result.reason == "The review is pinned to another head commit."
+        assert len(server.requests) == 2
+        assert clock.delays == [5, 10, 5]
+
+    # Mismatch with on_poll also ends on the read that names another head (2 requests)
     with Server(lambda request, index: Reply(body=responses[index])) as server:
         polled_reviews: list[tuple[Any, int]] = []
         cb = (
@@ -1317,7 +1336,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         assert result.reason == "The review is pinned to another head commit."
         # The second read names the head, so the review that would complete is never read.
         assert len(server.requests) == 2
-        assert clock.delays == [5, 10, 5]
+        assert clock.delays == [5, 10, 5, 5]
         assert [p[0].status for p in polled_reviews] == ["PENDING", "RUNNING"]
         assert [p[1] for p in polled_reviews] == [1, 2]
         assert polled_reviews[1][0].head_commit_sha == HEAD
@@ -2686,21 +2705,32 @@ async def test_wait_for_review_invokes_on_poll_callback(
                     )
 
         # Assert already-done failed future propagates inline
+        failed_inline_futs: list[asyncio.Future[None]] = []
+
         def failed_future_callback(r: Any) -> asyncio.Future[None]:
             loop = asyncio.get_running_loop()
             fut: asyncio.Future[None] = loop.create_future()
             fut.set_exception(ValueError("inline future error"))
+            failed_inline_futs.append(fut)
             return fut
 
-        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
-            async with session("async", server.url) as client:
-                with pytest.raises(ValueError, match="inline future error"):
-                    await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=10,
-                        on_poll=failed_future_callback,
-                    )
+        try:
+            with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="inline future error"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=10,
+                            on_poll=failed_future_callback,
+                        )
+        finally:
+            for ff in failed_inline_futs:
+                try:
+                    if not ff.cancelled():
+                        ff.exception()
+                except BaseException:
+                    pass
 
             # Assert remaining budget with controlled clock
             wait_timeouts: list[float | None] = []
@@ -2758,11 +2788,12 @@ async def test_wait_for_review_invokes_on_poll_callback(
                                 on_poll=timely_fail_cb,
                             )
             finally:
-                if timely_producer is not None and not timely_producer.done():
-                    timely_producer.cancel()
+                if timely_producer is not None:
+                    if not timely_producer.done():
+                        timely_producer.cancel()
                     try:
                         await timely_producer
-                    except (asyncio.CancelledError, BaseException):
+                    except BaseException:
                         pass
                 try:
                     if not asyncio.Future.done(timely_fut):
@@ -2969,11 +3000,12 @@ async def main() -> None:
             assert completed_fut.done()
             assert not completed_fut.cancelled()
         finally:
-            if complete_fut_task is not None and not complete_fut_task.done():
-                complete_fut_task.cancel()
+            if complete_fut_task is not None:
+                if not complete_fut_task.done():
+                    complete_fut_task.cancel()
                 try:
                     await complete_fut_task
-                except (asyncio.CancelledError, BaseException):
+                except BaseException:
                     pass
             try:
                 if not completed_fut.done():
@@ -3075,6 +3107,8 @@ async def main() -> None:
         coro_trigger: asyncio.Event | None = None
         waiter_coro_task: asyncio.Task[Any] | None = None
         failing_fut: asyncio.Future[None] | None = None
+        orig_create_task_6: Any = None
+        captured_case6_wrappers: list[asyncio.Task[Any]] = []
         try:
             # 6a: Future callback cancelled after startup
             failing_fut = loop.create_future()
@@ -3207,7 +3241,7 @@ async def main() -> None:
             coro_started = asyncio.Event()
             coro_trigger = asyncio.Event()
             about_to_raise = asyncio.Event()
-            captured_case6_wrappers: list[asyncio.Task[Any]] = []
+            captured_case6_wrappers.clear()
             orig_create_task_6 = client_module.async_create_task
 
             def tracked_create_task_6(coro: Any, *args: Any, **kwargs: Any) -> Any:
@@ -3242,16 +3276,22 @@ async def main() -> None:
 
             assert len(client_module._DETACHED_TASKS) == 1
             detached_task_id = next(iter(client_module._DETACHED_TASKS.keys()))
+            detached_task = client_module._DETACHED_TASKS[detached_task_id]
 
             coro_trigger.set()
             await asyncio.wait_for(about_to_raise.wait(), timeout=1.0)
             await asyncio.sleep(0.01)
 
             assert detached_task_id not in client_module._DETACHED_TASKS
+            assert detached_task.done()
+            assert not detached_task.cancelled()
+            assert isinstance(detached_task.exception(), RuntimeError)
+            del detached_task
             gc.collect()
             assert unhandled_exceptions == []
         finally:
-            client_module.async_create_task = orig_create_task_6
+            if orig_create_task_6 is not None:
+                client_module.async_create_task = orig_create_task_6
             if failing_fut is not None:
                 if not failing_fut.done():
                     failing_fut.cancel()
@@ -3840,7 +3880,7 @@ asyncio.run(main())
     assert _snapshot_review(detail_buf) is None
 
     # Multidimensional memoryview checks nbytes against cap
-    multi_dim_raw = bytearray(100_000)
+    multi_dim_raw = b"x" * 100_000
     multi_dim_view = memoryview(multi_dim_raw).cast("B", shape=[10, 10_000])
     assert len(multi_dim_view) == 10
     assert multi_dim_view.nbytes == 100_000
