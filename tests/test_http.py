@@ -1415,13 +1415,19 @@ async def test_traversal_path_coordinates_are_refused_before_any_request(
 @MODES
 async def test_dotted_path_coordinates_stay_one_encoded_segment(mode: str) -> None:
     detail = review_at("a" * 40)
-    with Server(lambda request, index: Reply(body=detail)) as server:
+
+    def reply(request: Request, index: int) -> Reply:
+        return Reply(body=page() if request.path.endswith("/7") else detail)
+
+    with Server(reply) as server:
         async with session(mode, server.url) as client:
-            await call(client, "get_deployment_review", ORG, "...")
+            await call(client, "list_pull_request_reviews", ORG, "owner/.github", 7)
             await call(client, "get_pull_request_review", ORG, "owner/.github", 7, 1)
+            await call(client, "get_deployment_review", ORG, "...")
         assert [request.path for request in server.requests] == [
-            f"/api/v1/organizations/{ORG}/reviews/deployments/...",
+            f"/api/v1/organizations/{ORG}/reviews/pr/owner%2F.github/7",
             f"/api/v1/organizations/{ORG}/reviews/pr/owner%2F.github/7/runs/1",
+            f"/api/v1/organizations/{ORG}/reviews/deployments/...",
         ]
 
 
