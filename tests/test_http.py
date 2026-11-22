@@ -2711,6 +2711,41 @@ async def test_wait_for_review_invokes_on_poll_callback(
             assert wait_timeouts == [65.0]
             monkeypatch.setattr(client_module, "async_wait", orig_async_wait)
 
+            # Timely pending future failure propagates
+            timely_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+            def timely_fail_cb(r: Any) -> asyncio.Future[None]:
+                timely_fut.set_exception(ValueError("timely failure"))
+                return timely_fut
+
+            with Server(lambda request, index: Reply(body=responses[0])) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="timely failure"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=100.0,
+                            on_poll=timely_fail_cb,
+                        )
+
+            # Late-observed pending future failure preserves the classified outcome
+            late_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+            def late_fail_cb(r: Any) -> asyncio.Future[None]:
+                clock.now += 150.0
+                late_fut.set_exception(ValueError("late failure"))
+                return late_fut
+
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    res_late = await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=late_fail_cb,
+                    )
+                    assert res_late.status == "COMPLETED"
+
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
         # tasks cannot stall teardown.
         watchdog_code = """
@@ -2782,6 +2817,7 @@ async def main() -> None:
         # Case 3: Blocking cleanup callback on non-terminal review
         cancellation_requested = asyncio.Event()
         cleanup_blocked = asyncio.Event()
+        cleanup_completed_3 = asyncio.Event()
 
         async def blocking_cleanup_coro(r: Any) -> None:
             try:
@@ -2789,24 +2825,31 @@ async def main() -> None:
             except asyncio.CancelledError:
                 cancellation_requested.set()
                 await cleanup_blocked.wait()
+                cleanup_completed_3.set()
                 raise
 
         client.get_review = fake_running  # type: ignore
 
+        start_t3 = time.monotonic()
         res = await client.wait_for_review(
             ORG,
             REVIEW,
             timeout=0.2,
             on_poll=blocking_cleanup_coro,
         )
+        elapsed3 = time.monotonic() - start_t3
+        assert 0.18 <= elapsed3 <= 0.60
         assert res.status == "TIMED_OUT"
+        await asyncio.sleep(0)
         await asyncio.sleep(0)
         assert cancellation_requested.is_set()
         cleanup_blocked.set()
+        await cleanup_completed_3.wait()
 
         # Case 4: Blocking cleanup callback on terminal review
         cancellation_requested_term = asyncio.Event()
         cleanup_blocked_term = asyncio.Event()
+        cleanup_completed_4 = asyncio.Event()
 
         async def blocking_cleanup_coro_term(r: Any) -> None:
             try:
@@ -2814,20 +2857,26 @@ async def main() -> None:
             except asyncio.CancelledError:
                 cancellation_requested_term.set()
                 await cleanup_blocked_term.wait()
+                cleanup_completed_4.set()
                 raise
 
         client.get_review = fake_completed  # type: ignore
 
+        start_t4 = time.monotonic()
         res = await client.wait_for_review(
             ORG,
             REVIEW,
             timeout=0.2,
             on_poll=blocking_cleanup_coro_term,
         )
+        elapsed4 = time.monotonic() - start_t4
+        assert 0.18 <= elapsed4 <= 0.60
         assert res.status == "COMPLETED"
+        await asyncio.sleep(0)
         await asyncio.sleep(0)
         assert cancellation_requested_term.is_set()
         cleanup_blocked_term.set()
+        await cleanup_completed_4.wait()
 
         # Case 5: Suspending callback that succeeds within budget
         resumed_within_budget = False
@@ -3081,7 +3130,19 @@ asyncio.run(main())
                     on_poll=lambda r: fut_sync_cancel,
                 )
                 assert res_sync_cancel.status == "TIMED_OUT"
+                await asyncio.sleep(0)
                 assert fut_sync_cancel.cancel_called is True
+
+        # Current task cannot be returned by on_poll
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(ValueError, match="running polling task"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=lambda r: asyncio.current_task(),
+                    )
 
     # Cyclic tuple whose list points back to it
     cyclic_list: list[Any] = []
@@ -3276,11 +3337,13 @@ asyncio.run(main())
 
         async with session(test_mode, "https://api.proofline.sh") as client:
             if test_mode == "async":
+
                 async def fake_get_ov(*args: Any, **kwargs: Any) -> Any:
                     return detail_oversized
 
                 monkeypatch.setattr(client, "get_review", fake_get_ov)
             else:
+
                 def fake_get_ov_sync(*args: Any, **kwargs: Any) -> Any:
                     return detail_oversized
 
@@ -3386,6 +3449,7 @@ asyncio.run(main())
     snap_alias = _snapshot_review(detail_alias)
     assert snap_alias is not None
     copied_dict = snap_alias.additional_properties["alias_dict"]
+    assert len(copied_dict) == 1
     for k, v in copied_dict.items():
         assert k is not key_tup
         assert k[0] is v
@@ -3397,3 +3461,52 @@ asyncio.run(main())
     detail_set_huge = CustomerReviewDetail.from_dict(responses[1])
     detail_set_huge.additional_properties["set_huge"] = set_with_huge_tuple
     assert _snapshot_review(detail_set_huge) is None
+
+    # Mutable object whose __copy__ returns self is rejected with TypeError
+    class SelfCopyList(list[Any]):
+        def __copy__(self) -> Any:
+            return self
+
+    self_copy_inst = SelfCopyList([1, 2])
+    detail_self_copy = CustomerReviewDetail.from_dict(responses[1])
+    detail_self_copy.additional_properties["self_copy"] = self_copy_inst
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_self_copy)
+
+    # Memoryview with invalid destination format for cast raises TypeError
+    import ctypes
+
+    c_arr = (ctypes.c_int32 * 4)()
+    mv_ctypes = memoryview(c_arr)
+    detail_ctypes_mv = CustomerReviewDetail.from_dict(responses[1])
+    detail_ctypes_mv.additional_properties["ctypes_mv"] = mv_ctypes
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_ctypes_mv)
+
+    # Empty set subclass copies attributes
+    class CustomSet(set[Any]):
+        pass
+
+    empty_custom_set = CustomSet()
+    empty_custom_set.custom_attr = ["set_attr"]  # type: ignore[attr-defined]
+    detail_empty_set = CustomerReviewDetail.from_dict(responses[1])
+    detail_empty_set.additional_properties["empty_set"] = empty_custom_set
+
+    snap_empty_set = _snapshot_review(detail_empty_set)
+    assert snap_empty_set is not None
+    copied_empty_set = snap_empty_set.additional_properties["empty_set"]
+    assert type(copied_empty_set) is CustomSet
+    assert len(copied_empty_set) == 0
+    assert copied_empty_set.custom_attr is not empty_custom_set.custom_attr
+    assert copied_empty_set.custom_attr == ["set_attr"]
+
+    # Set subclass requiring extra constructor argument propagates TypeError
+    class RequiredArgSet(set[Any]):
+        def __init__(self, required_arg: Any) -> None:
+            super().__init__()
+
+    req_set = set.__new__(RequiredArgSet)
+    detail_req_set = CustomerReviewDetail.from_dict(responses[1])
+    detail_req_set.additional_properties["req_set"] = req_set
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_req_set)

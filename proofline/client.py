@@ -15,6 +15,9 @@ from asyncio import (
     create_task as async_create_task,
 )
 from asyncio import (
+    current_task as async_current_task,
+)
+from asyncio import (
     get_running_loop as async_get_running_loop,
 )
 from asyncio import (
@@ -373,6 +376,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     stack.append((_TUPLE_EXPAND, temp_list, iter(val)))
             elif isinstance(val, dict):
                 new_dict = copy.copy(val)
+                if new_dict is val:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 new_dict.clear()
                 memo[val_id] = new_dict
                 _assign_target(target, key, is_attr, new_dict)
@@ -381,6 +388,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     stack.append((_OBJ_EXPAND, new_dict, iter(_get_obj_attrs(val))))
             elif isinstance(val, list):
                 new_list = copy.copy(val)
+                if new_list is val:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 new_list.clear()
                 memo[val_id] = new_list
                 _assign_target(target, key, is_attr, new_list)
@@ -391,9 +402,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if len(val) == 0:
                     try:
                         res_empty = type(val)()
-                    except Exception:
-                        return None
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        ) from exc
                     memo[val_id] = res_empty
+                    if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                        stack.append((_OBJ_EXPAND, res_empty, iter(_get_obj_attrs(val))))
                     _assign_target(target, key, is_attr, res_empty)
                 else:
                     temp_set_list: list[Any] = []
@@ -411,19 +427,29 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if val.format != "B" or val.ndim > 1:
                         try:
                             resolved = resolved.cast(val.format, shape=val.shape)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            ) from exc
                 else:
                     resolved = memoryview(bytearray(val))
                     if val.format != "B" or val.ndim > 1:
                         try:
                             resolved = resolved.cast(val.format, shape=val.shape)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            ) from exc
                 memo[val_id] = resolved
                 _assign_target(target, key, is_attr, resolved)
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                 new_obj = copy.copy(val)
+                if new_obj is val:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 memo[val_id] = new_obj
                 _assign_target(target, key, is_attr, new_obj)
                 stack.append((_OBJ_EXPAND, new_obj, iter(_get_obj_attrs(val))))
@@ -565,8 +591,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             else:
                 try:
                     res_set = type(orig_val)(temp_set_list)
-                except Exception:
-                    return None
+                except Exception as exc:
+                    raise TypeError(
+                        "Unsupported mutable value in review extension data: "
+                        f"{type(orig_val).__name__}"
+                    ) from exc
                 memo[val_id] = res_set
             if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                 stack.append((_OBJ_EXPAND, res_set, iter(_get_obj_attrs(orig_val))))
@@ -575,7 +604,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     return root
 
 
-def _safe_cleanup_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
+def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
     try:
         try:
             loop = fut.get_loop()
@@ -596,27 +625,26 @@ def _safe_cleanup_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
         except BaseException:
             pass
         try:
-            fut.cancel()
+            loop.call_soon(fut.cancel)
         except BaseException:
             pass
     except BaseException:
         pass
 
 
-def _safe_cleanup_task(
+def _detach_overdue_task(
     task: AsyncTask[Any],
     res: Any,
     wrapper_started: bool,
 ) -> None:
     try:
-        try:
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-        except BaseException:
-            pass
-        try:
-            task.cancel()
-        except BaseException:
-            pass
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    except BaseException:
+        pass
+    try:
+        loop = task.get_loop()
+        if loop.is_running() and not loop.is_closed():
+            loop.call_soon(task.cancel)
     except BaseException:
         pass
     if not wrapper_started:
@@ -1453,6 +1481,11 @@ class AsyncProoflineClient(AsyncOperations):
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
                         if isawaitable(res):
+                            if res is async_current_task():
+                                raise ValueError(
+                                    "Callbacks cannot return the running polling task."
+                                )
+
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
                                 if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
@@ -1466,7 +1499,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     except BaseException:
                                         pass
                                 elif isinstance(res, (AsyncTask, AsyncFuture)):
-                                    _safe_cleanup_future(res)
+                                    _detach_overdue_future(res)
                                 if result is not None:
                                     return result
                                 break
@@ -1496,14 +1529,14 @@ class AsyncProoflineClient(AsyncOperations):
                                     )
                                     remaining_budget = _transport.remaining()
                                     if remaining_budget is not None and remaining_budget <= 0:
-                                        _safe_cleanup_future(res)
+                                        _detach_overdue_future(res)
                                         if result is not None:
                                             return result
                                         break
                                     try:
                                         done, _ = await async_wait({res}, timeout=remaining_budget)
                                     except BaseException:
-                                        _safe_cleanup_future(res)
+                                        _detach_overdue_future(res)
                                         raise
                                     deadline_val = _transport.DEADLINE.get()
                                     cb_finished_in_budget = bool(completed_at) and (
@@ -1512,7 +1545,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     if cb_finished_in_budget and res in done:
                                         res.result()
                                     else:
-                                        _safe_cleanup_future(res)
+                                        _detach_overdue_future(res)
                                         if result is not None:
                                             return result
                                         break
@@ -1571,16 +1604,23 @@ class AsyncProoflineClient(AsyncOperations):
                                         except BaseException:
                                             pass
                                     raise
+                                deadline_val = _transport.DEADLINE.get()
+                                cb_finished_in_budget = bool(completed_at) and (
+                                    deadline_val is None or completed_at[0] <= deadline_val
+                                )
+                                if task.done() and cb_finished_in_budget:
+                                    task.result()
+
                                 remaining_budget = _transport.remaining()
                                 if remaining_budget is not None and remaining_budget <= 0:
-                                    _safe_cleanup_task(task, res, wrapper_started)
+                                    _detach_overdue_task(task, res, wrapper_started)
                                     if result is not None:
                                         return result
                                     break
                                 try:
                                     done, _ = await async_wait({task}, timeout=remaining_budget)
                                 except BaseException:
-                                    _safe_cleanup_task(task, res, wrapper_started)
+                                    _detach_overdue_task(task, res, wrapper_started)
                                     raise
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
@@ -1589,7 +1629,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 if cb_finished_in_budget and task in done:
                                     task.result()
                                 else:
-                                    _safe_cleanup_task(task, res, wrapper_started)
+                                    _detach_overdue_task(task, res, wrapper_started)
                                     if result is not None:
                                         return result
                                     break
