@@ -103,3 +103,20 @@ def test_concurrent_decoding_preserves_global_csv_limit() -> None:
     with ThreadPoolExecutor(max_workers=4) as pool:
         assert set(pool.map(decode, range(12))) == {str(before)}
     assert csv.field_size_limit() == before
+
+
+def test_empty_csv_requires_dataset_version_column() -> None:
+    with pytest.raises(ProoflineError) as caught:
+        decode_export(response("claim\n"), "csv", "reviews")
+
+    assert caught.value.type == "urn:proofline:sdk:invalid-response"
+
+
+def test_empty_csv_with_valid_header_is_accepted() -> None:
+    page = decode_export(
+        response("dataset_version,claim\n"),
+        "csv",
+        "reviews",
+    )
+
+    assert page.rows == []
