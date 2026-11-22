@@ -843,6 +843,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 deferred_tuple_finalizations.append(
                     (target, key, is_attr, val_id, orig_val, temp_list)
                 )
+                if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                    for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
+                        if not _is_immutable(attr_val) and id(attr_val) not in memo:
+                            stack.append((_ITEM_TASK, None, None, False, attr_val))
                 continue
             if val_id in memo:
                 res_tuple = memo[val_id]
@@ -882,7 +886,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             deferred_custom_dict_insertions.append((target_dict, orig_k, orig_v))
 
     def _flush_pending_structures() -> None:
-        nonlocal deferred_later_dict_insertions, deferred_tuple_finalizations
+        nonlocal \
+            deferred_later_dict_insertions, \
+            deferred_custom_dict_insertions, \
+            deferred_tuple_finalizations
         changed = True
         while changed:
             changed = False
@@ -933,7 +940,61 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         still_dicts.append((target_dict, orig_k, orig_v))
                 deferred_later_dict_insertions = still_dicts
 
+            if deferred_custom_dict_insertions:
+                still_custom = []
+                for target_dict, orig_k, orig_v in deferred_custom_dict_insertions:
+                    if id(orig_k) in memo:
+                        k = memo[id(orig_k)]
+                        if _is_immutable(orig_v):
+                            target_dict[k] = orig_v
+                            changed = True
+                        elif id(orig_v) in memo:
+                            target_dict[k] = memo[id(orig_v)]
+                            changed = True
+                        else:
+                            still_custom.append((target_dict, orig_k, orig_v))
+                    else:
+                        still_custom.append((target_dict, orig_k, orig_v))
+                deferred_custom_dict_insertions = still_custom
+
     _flush_pending_structures()
+
+    def _is_member_state_populated(m_clone: Any) -> bool:
+        if _is_immutable(m_clone):
+            return True
+        visited = set()
+        stack_nodes = [m_clone]
+        container_ids: set[int] = set()
+        while stack_nodes:
+            cur = stack_nodes.pop()
+            cid = id(cur)
+            if cid in visited:
+                continue
+            visited.add(cid)
+            container_ids.add(cid)
+            if hasattr(cur, "__dict__") and isinstance(cur.__dict__, dict):
+                stack_nodes.append(cur.__dict__)
+            if isinstance(cur, dict):
+                for k, v in cur.items():
+                    if not _is_immutable(k):
+                        stack_nodes.append(k)
+                    if not _is_immutable(v):
+                        stack_nodes.append(v)
+            elif isinstance(cur, (list, tuple, set, deque)):
+                for item in cur:
+                    if not _is_immutable(item):
+                        stack_nodes.append(item)
+
+        for target, _, _, _, _, _ in pending_frozensets:
+            if id(target) in container_ids:
+                return False
+        for target_dict, _, _ in deferred_later_dict_insertions:
+            if id(target_dict) in container_ids:
+                return False
+        for target_dict, _, _ in deferred_custom_dict_insertions:
+            if id(target_dict) in container_ids:
+                return False
+        return True
 
     pending_frozensets = deferred_frozenset_insertions
     while pending_frozensets:
@@ -942,8 +1003,17 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         progress = False
         remaining_frozensets = []
         for target, key, is_attr, val_id, orig_val, orig_members in pending_frozensets:
+            if val_id in memo:
+                _assign_target(target, key, is_attr, memo[val_id])
+                progress = True
+                continue
             if all(_is_immutable(m) or id(m) in memo for m in orig_members):
                 resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
+                if not all(_is_member_state_populated(rm) for rm in resolved_members):
+                    remaining_frozensets.append(
+                        (target, key, is_attr, val_id, orig_val, orig_members)
+                    )
+                    continue
                 if type(orig_val) is frozenset:
                     res_set = frozenset(resolved_members)
                 else:
@@ -1045,13 +1115,35 @@ def _detach_overdue_future(fut: Any) -> None:
             except BaseException:
                 pass
 
-        try:
-            if hasattr(fut, "add_done_callback"):
+        registered = False
+        if hasattr(fut, "add_done_callback"):
+            try:
                 fut.add_done_callback(_on_detached_fut_done)
-            else:
+                registered = True
+            except BaseException:
+                pass
+        if not registered:
+            try:
                 AsyncFuture.add_done_callback(fut, _on_detached_fut_done)
-        except BaseException:
-            _DETACHED_FUTURES.pop(fut_id, None)
+                registered = True
+            except BaseException:
+                pass
+        if not registered:
+            try:
+                loop = async_get_running_loop()
+
+                async def _observe_fut() -> None:
+                    try:
+                        await fut
+                    except BaseException:
+                        pass
+                    finally:
+                        _DETACHED_FUTURES.pop(fut_id, None)
+
+                obs_fut = loop.create_task(_observe_fut())
+                obs_fut.add_done_callback(lambda _: None)
+            except BaseException:
+                _DETACHED_FUTURES.pop(fut_id, None)
     except BaseException:
         pass
 
@@ -1103,13 +1195,42 @@ def _detach_overdue_task(
         except BaseException:
             pass
 
-    try:
-        if hasattr(task, "add_done_callback"):
+    registered = False
+    if hasattr(task, "add_done_callback"):
+        try:
             task.add_done_callback(_on_detached_task_done)
-        else:
-            AsyncFuture.add_done_callback(task, _on_detached_task_done)
-    except BaseException:
-        _DETACHED_TASKS.pop(task_id, None)
+            registered = True
+        except BaseException:
+            pass
+    if not registered:
+        try:
+            if isinstance(task, AsyncTask):
+                AsyncTask.add_done_callback(task, _on_detached_task_done)
+                registered = True
+            elif isinstance(task, AsyncFuture):
+                AsyncFuture.add_done_callback(task, _on_detached_task_done)
+                registered = True
+            else:
+                AsyncFuture.add_done_callback(task, _on_detached_task_done)
+                registered = True
+        except BaseException:
+            pass
+    if not registered:
+        try:
+            loop = async_get_running_loop()
+
+            async def _observe_task() -> None:
+                try:
+                    await task
+                except BaseException:
+                    pass
+                finally:
+                    _DETACHED_TASKS.pop(task_id, None)
+
+            obs = loop.create_task(_observe_task())
+            obs.add_done_callback(lambda _: None)
+        except BaseException:
+            _DETACHED_TASKS.pop(task_id, None)
 
     if not wrapper_started:
         try:
@@ -1521,8 +1642,6 @@ class ProoflineClient(Operations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
-                if (_transport.remaining() or 0) <= 0:
-                    break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
                     snapshot = _snapshot_review(last)
@@ -1553,7 +1672,7 @@ class ProoflineClient(Operations):
                             raise TypeError("Callbacks must return None.")
                 if result is not None:
                     return result
-                if (_transport.remaining() or 0) <= 0:
+                if on_poll is not None and (_transport.remaining() or 0) <= 0:
                     break
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
@@ -1972,8 +2091,6 @@ class AsyncProoflineClient(AsyncOperations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
-                if (_transport.remaining() or 0) <= 0:
-                    break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
                     snapshot = _snapshot_review(last)
@@ -2056,14 +2173,20 @@ class AsyncProoflineClient(AsyncOperations):
                                         if not completion_fut.done():
                                             completion_fut.set_result(None)
 
-                                    try:
-                                        if hasattr(res, "add_done_callback"):
+                                    fut_registered = False
+                                    if hasattr(res, "add_done_callback"):
+                                        try:
                                             res.add_done_callback(_on_future_done)
-                                        else:
+                                            fut_registered = True
+                                        except BaseException:
+                                            pass
+                                    if not fut_registered:
+                                        try:
                                             AsyncFuture.add_done_callback(res, _on_future_done)
-                                    except BaseException:
-                                        _detach_overdue_future(res)
-                                        raise
+                                            fut_registered = True
+                                        except BaseException:
+                                            _detach_overdue_future(res)
+                                            raise
                                     remaining_budget = _transport.remaining()
                                     if remaining_budget is not None and remaining_budget <= 0:
                                         _detach_overdue_future(res)
@@ -2147,7 +2270,11 @@ class AsyncProoflineClient(AsyncOperations):
                                         except BaseException:
                                             pass
                                     raise
-                                task_completion_fut = async_get_running_loop().create_future()
+                                try:
+                                    task_completion_fut = async_get_running_loop().create_future()
+                                except BaseException:
+                                    _detach_overdue_task(task, res, wrapper_started)
+                                    raise
 
                                 def _on_task_done(t: Any) -> None:
                                     if not completed_at:
@@ -2162,14 +2289,27 @@ class AsyncProoflineClient(AsyncOperations):
                                     if not task_completion_fut.done():
                                         task_completion_fut.set_result(None)
 
-                                try:
-                                    if hasattr(task, "add_done_callback"):
+                                cb_registered = False
+                                if hasattr(task, "add_done_callback"):
+                                    try:
                                         task.add_done_callback(_on_task_done)
-                                    else:
-                                        AsyncTask.add_done_callback(task, _on_task_done)
-                                except BaseException:
-                                    _detach_overdue_task(task, res, wrapper_started)
-                                    raise
+                                        cb_registered = True
+                                    except BaseException:
+                                        pass
+                                if not cb_registered:
+                                    try:
+                                        if isinstance(task, AsyncTask):
+                                            AsyncTask.add_done_callback(task, _on_task_done)
+                                            cb_registered = True
+                                        elif isinstance(task, AsyncFuture):
+                                            AsyncFuture.add_done_callback(task, _on_task_done)
+                                            cb_registered = True
+                                        else:
+                                            AsyncFuture.add_done_callback(task, _on_task_done)
+                                            cb_registered = True
+                                    except BaseException:
+                                        _detach_overdue_task(task, res, wrapper_started)
+                                        raise
 
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
@@ -2266,7 +2406,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     break
                 if result is not None:
                     return result
-                if (_transport.remaining() or 0) <= 0:
+                if on_poll is not None and (_transport.remaining() or 0) <= 0:
                     break
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)

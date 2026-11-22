@@ -2866,13 +2866,22 @@ async def main() -> None:
     ) as client:
         # Case 1: Pending same-loop Future that times out is detached without cancelling
         # Assert it is still pending before advancing the controlled deadline
-        pending_fut: asyncio.Future[None] | None = None
+        class SignallingFuture(asyncio.Future[None]):
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.wait_entered = asyncio.Event()
+
+            def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+                super().add_done_callback(fn, context=context)
+                self.wait_entered.set()
+
+        pending_fut: SignallingFuture | None = None
         cb_1_started = asyncio.Event()
 
-        def pending_future_callback(r: Any) -> asyncio.Future[None]:
+        def pending_future_callback(r: Any) -> SignallingFuture:
             nonlocal pending_fut
             loop = asyncio.get_running_loop()
-            pending_fut = loop.create_future()
+            pending_fut = SignallingFuture(loop=loop)
             cb_1_started.set()
             return pending_fut
 
@@ -2887,12 +2896,13 @@ async def main() -> None:
             )
         )
         await cb_1_started.wait()
-        await asyncio.sleep(0)
+        assert pending_fut is not None
+        await pending_fut.wait_entered.wait()
         assert not waiter_task_1.done()
+        assert id(pending_fut) not in client_module._DETACHED_FUTURES
         clock.advance(1.0)
         res_1 = await waiter_task_1
         assert res_1.status == "TIMED_OUT"
-        assert pending_fut is not None
         assert not pending_fut.cancelled()
         assert not pending_fut.done()
         assert id(pending_fut) in client_module._DETACHED_FUTURES
@@ -3048,7 +3058,65 @@ async def main() -> None:
             gc.collect()
             assert unhandled_exceptions == []
 
-            # 6b: Coroutine callback cancelled after startup
+            # 6b: Pre-start wrapper cancellation: hold wrapper before entry,
+            # cancel waiter with budget remaining
+            import inspect
+
+            hold_wrapper = asyncio.Event()
+            wrapper_tasks: list[asyncio.Task[Any]] = []
+            orig_create_task = client_module.async_create_task
+
+            def holding_create_task(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
+                async def held_wrapper() -> Any:
+                    try:
+                        await hold_wrapper.wait()
+                        return await coro_arg
+                    except asyncio.CancelledError:
+                        if hasattr(coro_arg, "close"):
+                            coro_arg.close()
+                        raise
+
+                t = orig_create_task(held_wrapper(), **kwargs)
+                wrapper_tasks.append(t)
+                return t
+
+            client_module.async_create_task = holding_create_task
+
+            user_coro_created: list[Any] = []
+
+            async def dummy_pre_start_coro(r: Any) -> None:
+                pass
+
+            def pre_start_cb(r: Any) -> Any:
+                c = dummy_pre_start_coro(r)
+                user_coro_created.append(c)
+                return c
+
+            try:
+                pre_waiter_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10.0,
+                        on_poll=pre_start_cb,
+                    )
+                )
+                await asyncio.sleep(0)
+                assert len(wrapper_tasks) == 1
+                assert not wrapper_tasks[0].done()
+                pre_waiter_task.cancel()
+                try:
+                    await pre_waiter_task
+                except asyncio.CancelledError:
+                    pass
+                assert wrapper_tasks[0].cancelled()
+                assert len(user_coro_created) == 1
+                assert inspect.getcoroutinestate(user_coro_created[0]) == inspect.CORO_CLOSED
+            finally:
+                client_module.async_create_task = orig_create_task
+                hold_wrapper.set()
+
+            # Coroutine callback cancelled after startup
             coro_started = asyncio.Event()
             coro_trigger = asyncio.Event()
             about_to_raise = asyncio.Event()
@@ -3182,6 +3250,7 @@ asyncio.run(main())
     detail = CustomerReviewDetail.from_dict(responses[1])
     detail.additional_properties["deep"] = deep_container
     detail.additional_properties["custom_tuple"] = ({"nested": "val"}, None, 42)
+    detail.additional_properties["none_frozenset_tuple"] = (None, frozenset({1}))
 
     from proofline.client import _snapshot_review
 
@@ -3212,6 +3281,13 @@ asyncio.run(main())
     assert custom_t[2] == 42
     custom_t[0]["nested"] = "mutated_nested"
     assert orig_t[0]["nested"] == "val"
+
+    assert "none_frozenset_tuple" in snap.additional_properties
+    nft = snap.additional_properties["none_frozenset_tuple"]
+    assert isinstance(nft, tuple)
+    assert len(nft) == 2
+    assert nft[0] is None
+    assert nft[1] == frozenset({1})
 
     # Tuple with deeply nested list must snapshot iteratively without RecursionError
     deep_nested_list: Any = "leaf"
@@ -3296,27 +3372,29 @@ asyncio.run(main())
 
         started_c = dummy_started()
         task_started = asyncio.create_task(started_c)
-        await asyncio.sleep(0)
-
-        def started_coro_cb(r: Any) -> Any:
-            clock.now += 100.0
-            return started_c
-
-        with Server(lambda request, index: Reply(body=responses[0])) as server:
-            async with session("async", server.url) as client:
-                with pytest.raises(ValueError, match="unstarted coroutines"):
-                    await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=5.0,
-                        on_poll=started_coro_cb,
-                    )
-                assert inspect.getcoroutinestate(started_c) == inspect.CORO_SUSPENDED
-        task_started.cancel()
         try:
-            await task_started
-        except asyncio.CancelledError:
-            pass
+            await asyncio.sleep(0)
+
+            def started_coro_cb(r: Any) -> Any:
+                clock.now += 100.0
+                return started_c
+
+            with Server(lambda request, index: Reply(body=responses[0])) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="unstarted coroutines"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=5.0,
+                            on_poll=started_coro_cb,
+                        )
+                    assert inspect.getcoroutinestate(started_c) == inspect.CORO_SUSPENDED
+        finally:
+            task_started.cancel()
+            try:
+                await task_started
+            except asyncio.CancelledError:
+                pass
 
         # Non-None, non-awaitable callback return raises TypeError
         def sync_int_cb(r: Any) -> Any:
@@ -3455,46 +3533,48 @@ asyncio.run(main())
         old_h = loop.get_exception_handler()
         loop.set_exception_handler(lambda _loop, ctx: cancel_reports.append(ctx))
         try:
-            fut_sync_cancel = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
-            clock_now = [1000.0]
-            orig_client_mono = client_module.monotonic
-            orig_trans_mono = _transport.monotonic
-            client_module.monotonic = lambda: clock_now[0]
-            _transport.monotonic = lambda: clock_now[0]
-
-            def sync_cancel_on_poll(r: Any) -> Any:
-                clock_now[0] += 0.2
-                return fut_sync_cancel
-
-            running_detail = CustomerReviewDetail.from_dict(review("RUNNING"))
-
-            async def fake_sync_cancel_running(org: Any, rev: Any) -> Any:
-                return running_detail
-
             try:
-                async with AsyncProoflineClient(
-                    token="test_token", base_url="https://api.proofline.sh"
-                ) as client:
-                    client.get_review = fake_sync_cancel_running  # type: ignore
-                    res_sync_cancel = await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=0.1,
-                        on_poll=sync_cancel_on_poll,
-                    )
-                    assert res_sync_cancel.status == "TIMED_OUT"
-                    await asyncio.sleep(0)
-                    assert fut_sync_cancel.cancel_called is False
-                    assert id(fut_sync_cancel) in _DETACHED_FUTURES
-                    assert cancel_reports == []
+                fut_sync_cancel = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
+                clock_now = [1000.0]
+                orig_client_mono = client_module.monotonic
+                orig_trans_mono = _transport.monotonic
+                client_module.monotonic = lambda: clock_now[0]
+                _transport.monotonic = lambda: clock_now[0]
+
+                def sync_cancel_on_poll(r: Any) -> Any:
+                    clock_now[0] += 0.2
+                    return fut_sync_cancel
+
+                running_detail = CustomerReviewDetail.from_dict(review("RUNNING"))
+
+                async def fake_sync_cancel_running(org: Any, rev: Any) -> Any:
+                    return running_detail
+
+                try:
+                    async with AsyncProoflineClient(
+                        token="test_token", base_url="https://api.proofline.sh"
+                    ) as client:
+                        client.get_review = fake_sync_cancel_running  # type: ignore
+                        res_sync_cancel = await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=0.1,
+                            on_poll=sync_cancel_on_poll,
+                        )
+                        assert res_sync_cancel.status == "TIMED_OUT"
+                        await asyncio.sleep(0)
+                        assert fut_sync_cancel.cancel_called is False
+                        assert id(fut_sync_cancel) in _DETACHED_FUTURES
+                        assert cancel_reports == []
+                finally:
+                    client_module.monotonic = orig_client_mono
+                    _transport.monotonic = orig_trans_mono
             finally:
-                client_module.monotonic = orig_client_mono
-                _transport.monotonic = orig_trans_mono
+                if not fut_sync_cancel.done():
+                    fut_sync_cancel.set_result(None)
+                await asyncio.sleep(0)
+                assert id(fut_sync_cancel) not in _DETACHED_FUTURES
         finally:
-            if not fut_sync_cancel.done():
-                fut_sync_cancel.set_result(None)
-            await asyncio.sleep(0)
-            assert id(fut_sync_cancel) not in _DETACHED_FUTURES
             loop.set_exception_handler(old_h)
 
         # Current task cannot be returned by on_poll
