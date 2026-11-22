@@ -28,7 +28,18 @@ def main() -> None:
     if declared != generated:
         raise SystemExit("Generated JSON operations differ from the public contract.")
     sys.path.insert(0, str(ROOT))
-    from proofline import AsyncProoflineClient, ProoflineClient
+    from proofline import AsyncProoflineClient, ProoflineClient, ReviewFilters
+
+    # The review list helpers take their filters as one TypedDict, so a filter
+    # the document adds stays untyped in Python until it is named here.
+    filters = {
+        parameter["name"]
+        for item in document["paths"].values()
+        for parameter in item.get("get", {}).get("parameters", [])
+        if item.get("get", {}).get("operationId") == "list_reviews" and parameter["in"] == "query"
+    }
+    if set(ReviewFilters.__annotations__) != filters:
+        raise SystemExit("ReviewFilters differs from the list_reviews query parameters.")
 
     for client in (ProoflineClient, AsyncProoflineClient):
         helpers = {"close", "aclose", "iter_export_pages", "iter_reviews", "wait_for_review"}
