@@ -736,29 +736,36 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             _py_release_buffer(ctypes.byref(b_exp))
                     finally:
                         _py_release_buffer(ctypes.byref(b_val))
-                    base_mv = memoryview(cloned_exporter)
+                    base_bytes = memoryview(cloned_exporter)
                     val_strides = val.strides
                     val_shape = val.shape
                     if val.ndim == 1 and val_shape is not None and val_strides is not None:
                         shape = val_shape[0]
                         itemsize = val.itemsize
                         stride = val_strides[0]
-                        step = stride // itemsize
-                        off = offset // itemsize
+                        elem_stride = stride // itemsize
                         if shape == 0:
-                            resolved_mv = base_mv[0:0]
-                        elif step > 0:
-                            calc_stop = off + shape * step
-                            resolved_mv = base_mv[off:calc_stop:step]
+                            resolved_mv = cast(Any, base_bytes[0:0]).cast(val.format)
+                        elif stride >= 0:
+                            byte_len = (shape - 1) * stride + itemsize
+                            byte_slice = base_bytes[offset : offset + byte_len]
+                            casted = cast(Any, byte_slice).cast(val.format)
+                            resolved_mv = casted[::elem_stride]
                         else:
-                            calc_stop = off + shape * step
-                            if calc_stop < 0:
-                                calc_stop = None
-                            resolved_mv = base_mv[off:calc_stop:step]
+                            lowest_byte = offset + (shape - 1) * stride
+                            byte_len = (shape - 1) * abs(stride) + itemsize
+                            byte_slice = base_bytes[lowest_byte : lowest_byte + byte_len]
+                            casted = cast(Any, byte_slice).cast(val.format)
+                            start_elem = (shape - 1) * (-elem_stride)
+                            resolved_mv = casted[start_elem:None:elem_stride]
                     elif val.ndim == 0:
-                        resolved_mv = base_mv[offset:offset]
+                        resolved_mv = cast(Any, base_bytes[offset : offset + val.itemsize]).cast(
+                            val.format
+                        )
                     elif val.c_contiguous:
-                        resolved_mv = base_mv[offset : offset + val.nbytes]
+                        resolved_mv = cast(Any, base_bytes[offset : offset + val.nbytes]).cast(
+                            val.format, shape=val.shape
+                        )
                     else:
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
@@ -769,14 +776,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         resolved_mv = memoryview(bytes(val))
                     else:
                         resolved_mv = memoryview(bytearray(val))
-                if val.format != "B" or (val.ndim > 1 and val.shape != resolved_mv.shape):
-                    try:
-                        resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
-                    except Exception as exc:
-                        raise TypeError(
-                            "Unsupported mutable value in review extension data: "
-                            f"{type(val).__name__}"
-                        ) from exc
+                    if val.format != "B" or (val.ndim > 1 and val.shape != resolved_mv.shape):
+                        try:
+                            resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            ) from exc
                 if val.readonly:
                     resolved_mv = resolved_mv.toreadonly()
                 memo[val_id] = resolved_mv
@@ -1031,7 +1038,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         container_ids: set[int] = set()
         while stack_nodes:
             cur = stack_nodes.pop()
-            if _is_immutable(cur) or _is_identity_hashed(cur):
+            if _is_immutable(cur):
                 continue
             cid = id(cur)
             if cid in visited:
@@ -1042,17 +1049,21 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 stack_nodes.append(cur.__dict__)
             if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
                 for _, _, slot_val in _get_obj_attrs(cur):
-                    if not _is_immutable(slot_val) and not _is_identity_hashed(slot_val):
+                    if not _is_immutable(slot_val):
                         stack_nodes.append(slot_val)
             if isinstance(cur, dict):
                 for k, v in cur.items():
-                    if not _is_immutable(k) and not _is_identity_hashed(k):
+                    if not _is_immutable(k):
                         stack_nodes.append(k)
-                    if not _is_immutable(v) and not _is_identity_hashed(v):
+                    if not _is_immutable(v):
                         stack_nodes.append(v)
-            elif isinstance(cur, (list, tuple, set, deque)):
+            elif isinstance(cur, tuple):
                 for item in cur:
                     if not _is_immutable(item) and not _is_identity_hashed(item):
+                        stack_nodes.append(item)
+            elif isinstance(cur, (list, set, deque)):
+                for item in cur:
+                    if not _is_immutable(item):
                         stack_nodes.append(item)
 
         for target, _, _, _, _, _ in deferred_tuple_finalizations:
@@ -1854,10 +1865,10 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery. Oversized tuples, buffers, memoryviews with more than 65,536 bytes, or
-        deques with more than 65,536 items in review extension data skip on_poll snapshot
-        delivery even with time remaining, and snapshot copy errors on unsupported mutable
-        values propagate before on_poll runs.
+        delivery. Oversized tuples, buffers, memoryviews with more than 65,536 bytes (or
+        backed by a buffer larger than 65,536 bytes), or deques with more than 65,536 items
+        in review extension data skip on_poll snapshot delivery even with time remaining,
+        and snapshot copy errors on unsupported mutable values propagate before on_poll runs.
         on_poll exceptions and return-validation errors propagate even when a
         terminal outcome has already been determined and can prevent the waiter
         from returning a classified outcome. Synchronous callbacks must return
@@ -2302,12 +2313,14 @@ class AsyncProoflineClient(AsyncOperations):
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Oversized
-        tuples, buffers, memoryviews with more than 65,536 bytes, or deques with more than
-        65,536 items in review extension data skip on_poll snapshot delivery even with time
-        remaining, and snapshot copy errors on unsupported mutable values propagate before
-        on_poll runs. Callback return-validation errors and inline exceptions propagate
-        unconditionally, even when a terminal outcome has already been determined, preventing the
-        waiter from returning a classified outcome.
+        tuples, buffers, memoryviews with more than 65,536 bytes (or backed by a buffer
+        larger than 65,536 bytes), or deques with more than 65,536 items in review extension
+        data skip on_poll snapshot delivery even with time remaining, and snapshot copy errors
+        on unsupported mutable values propagate before on_poll runs. Callback
+        return-validation errors and inline exceptions propagate unconditionally, even when a
+        terminal outcome has already been determined (cancellation requested during callback
+        invocation takes precedence over return validation), preventing the waiter from
+        returning a classified outcome.
         Separately, awaitable failures observed before the deadline propagate, but the
         deadline suppresses awaitable failures observed after expiry (and a pending future's
         failure is suppressed if its done callback runs after the deadline), allowing any
@@ -2496,6 +2509,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 coro = res
                                 completed_at = []
                                 wrapper_started = False
+                                captured_deadline = _transport.DEADLINE.get()
 
                                 async def _runner() -> None:
                                     nonlocal wrapper_started
@@ -2518,9 +2532,9 @@ class AsyncProoflineClient(AsyncOperations):
                                     except BaseException:
                                         pass
 
-                                    deadline_val = _transport.DEADLINE.get()
                                     deadline_expired = (
-                                        deadline_val is not None and monotonic() > deadline_val
+                                        captured_deadline is not None
+                                        and monotonic() > captured_deadline
                                     )
                                     if waiter_cancelling or deadline_expired:
                                         if (
@@ -2541,6 +2555,7 @@ class AsyncProoflineClient(AsyncOperations):
                                                 pass
                                         return
                                     wrapper_started = True
+                                    _transport.DEADLINE.set(None)
                                     try:
                                         assert coro is not None
                                         await coro

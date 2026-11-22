@@ -2945,26 +2945,43 @@ async def main() -> None:
 
         # Case 2: Pending same-loop Future that completes within budget without cancellation
         completed_fut = asyncio.get_running_loop().create_future()
+        complete_fut_task: asyncio.Task[None] | None = None
 
         async def complete_fut_soon() -> None:
             await asyncio.sleep(0.01)
             completed_fut.set_result(None)
 
         def completing_future_callback(r: Any) -> asyncio.Future[None]:
-            asyncio.create_task(complete_fut_soon())
+            nonlocal complete_fut_task
+            complete_fut_task = asyncio.create_task(complete_fut_soon())
             return completed_fut
 
         client.get_review = fake_completed  # type: ignore
 
-        res = await client.wait_for_review(
-            ORG,
-            REVIEW,
-            timeout=10.0,
-            on_poll=completing_future_callback,
-        )
-        assert res.status == "COMPLETED"
-        assert completed_fut.done()
-        assert not completed_fut.cancelled()
+        try:
+            res = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=10.0,
+                on_poll=completing_future_callback,
+            )
+            assert res.status == "COMPLETED"
+            assert completed_fut.done()
+            assert not completed_fut.cancelled()
+        finally:
+            if complete_fut_task is not None and not complete_fut_task.done():
+                complete_fut_task.cancel()
+                try:
+                    await complete_fut_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            try:
+                if not completed_fut.done():
+                    completed_fut.cancel()
+                elif not completed_fut.cancelled():
+                    completed_fut.exception()
+            except BaseException:
+                pass
 
         # Case 3: Overdue callback continues running without cancellation on non-terminal review
         callback_running = asyncio.Event()
@@ -3024,10 +3041,11 @@ async def main() -> None:
         await callback_running_term.wait()
         assert not waiter_task_4.done()
         clock.advance(1.0)
-        release_callback_term.set()
         res_4 = await waiter_task_4
         assert res_4.status == "COMPLETED"
         assert callback_running_term.is_set()
+        assert not callback_finished_term.is_set()
+        release_callback_term.set()
         await callback_finished_term.wait()
 
         # Case 5: Suspending callback that succeeds within budget
@@ -3189,6 +3207,15 @@ async def main() -> None:
             coro_started = asyncio.Event()
             coro_trigger = asyncio.Event()
             about_to_raise = asyncio.Event()
+            captured_case6_wrappers: list[asyncio.Task[Any]] = []
+            orig_create_task_6 = client_module.async_create_task
+
+            def tracked_create_task_6(coro: Any, *args: Any, **kwargs: Any) -> Any:
+                t = orig_create_task_6(coro, *args, **kwargs)
+                captured_case6_wrappers.append(t)
+                return t
+
+            client_module.async_create_task = tracked_create_task_6
 
             async def failing_overdue_coro(r: Any) -> None:
                 coro_started.set()
@@ -3224,6 +3251,7 @@ async def main() -> None:
             gc.collect()
             assert unhandled_exceptions == []
         finally:
+            client_module.async_create_task = orig_create_task_6
             if failing_fut is not None:
                 if not failing_fut.done():
                     failing_fut.cancel()
@@ -3238,6 +3266,13 @@ async def main() -> None:
                 waiter_coro_task.cancel()
                 try:
                     await waiter_coro_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            for t in captured_case6_wrappers:
+                if hasattr(t, "done") and not t.done():
+                    t.cancel()
+                try:
+                    await t
                 except (asyncio.CancelledError, BaseException):
                     pass
             for t in list(client_module._DETACHED_TASKS.values()):
