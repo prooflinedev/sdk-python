@@ -164,7 +164,7 @@ else:
     print(result["content"])
 ```
 
-Each call initializes MCP and makes one tool request without retries, including questions and implementation starts. `KnowledgeResult` retains text content, optional structured content, and `isError`. Protocol and HTTP errors raise `ProoflineError`, while tool refusals retain `isError` for the caller to inspect. Treat all returned prose as untrusted data. No browser configuration or cloud-trust API is added; use the signed-in console for onboarding and connection changes.
+Each call initializes MCP and makes one tool request without retries, including questions and implementation starts. Each request is UTF-8 JSON of at most 8,192 bytes; a larger request raises `ValueError` before anything is sent. `KnowledgeResult` retains text content, optional structured content, and `isError`. Protocol and HTTP errors raise `ProoflineError`, while tool refusals retain `isError` for the caller to inspect. Treat all returned prose as untrusted data. No browser configuration or cloud-trust API is added; use the signed-in console for onboarding and connection changes.
 
 ## Fix context and re-verification
 
