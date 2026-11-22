@@ -2236,6 +2236,49 @@ async def test_knowledge_negotiation_scope_and_no_retry(mode: str) -> None:
 
 
 @MODES
+async def test_knowledge_rejects_boolean_initialize_response_id(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        body = json.loads(request.body)
+        assert request.path == "/mcp"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+
+        if body["method"] == "initialize":
+            return Reply(
+                body={
+                    "jsonrpc": "2.0",
+                    "id": True,
+                    "result": {"protocolVersion": "2025-11-25"},
+                }
+            )
+
+        if body["method"] == "notifications/initialized":
+            return Reply(status=202, body=b"")
+
+        assert body["method"] == "tools/call"
+        return Reply(
+            body={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            }
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+
+            async def invoke() -> Any:
+                result = client.knowledge.get_wiki_page("owner/name", "index")
+                return await result if inspect.isawaitable(result) else result
+
+            with pytest.raises(ProoflineError):
+                await invoke()
+
+        assert len(server.requests) == 1
+
+
+@MODES
 async def test_fixes_preserve_unavailable_context_and_never_retry(mode: str) -> None:
     observed: list[dict[str, Any]] = []
     refuse = False
