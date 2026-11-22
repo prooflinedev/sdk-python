@@ -6,6 +6,9 @@ import datetime
 import math
 import weakref
 from asyncio import (
+    CancelledError as AsyncCancelledError,
+)
+from asyncio import (
     Future as AsyncFuture,
 )
 from asyncio import (
@@ -324,6 +327,35 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     if t is datetime.datetime:
         tz = val.tzinfo
         return tz is None or type(tz) is datetime.timezone
+    return False
+
+
+def _has_mutable_class_attrs(cls: type) -> bool:
+    for base in cls.__mro__:
+        if base in _SAFE_BUILTIN_CLASSES or base is object:
+            continue
+        for name, attr in base.__dict__.items():
+            if name.startswith("__") and name.endswith("__"):
+                continue
+            if isinstance(attr, MemberDescriptorType) or type(attr).__name__ in (
+                "member_descriptor",
+                "getset_descriptor",
+            ):
+                continue
+            if isinstance(
+                attr,
+                (
+                    FunctionType,
+                    MethodType,
+                    classmethod,
+                    staticmethod,
+                    property,
+                    BuiltinFunctionType,
+                ),
+            ):
+                continue
+            if not _is_immutable(attr):
+                return True
     return False
 
 
@@ -653,7 +685,35 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 f"{type(val).__name__}"
                             ) from exc
                 else:
-                    resolved_mv = memoryview(bytearray(val))
+                    exporter = getattr(val, "obj", None)
+                    if isinstance(exporter, bytearray):
+                        exp_id = id(exporter)
+                        if exp_id in memo:
+                            cloned_exporter = memo[exp_id]
+                        else:
+                            if bytearray.__len__(exporter) > _MAX_SAFE_BUFFER_SIZE:
+                                return None
+                            try:
+                                cloned_exporter = bytearray.__new__(type(exporter))
+                                bytearray.__init__(cloned_exporter, exporter)
+                            except Exception as exc:
+                                raise TypeError(
+                                    "Unsupported mutable value in review extension data: "
+                                    f"{type(exporter).__name__}"
+                                ) from exc
+                            memo[exp_id] = cloned_exporter
+                        try:
+                            import ctypes
+
+                            p_exp = ctypes.c_char.from_buffer(exporter)
+                            p_val = ctypes.c_char.from_buffer(val)
+                            offset = ctypes.addressof(p_val) - ctypes.addressof(p_exp)
+                            base_mv = memoryview(cloned_exporter)
+                            resolved_mv = base_mv[offset : offset + val.nbytes]
+                        except Exception:
+                            resolved_mv = memoryview(cloned_exporter)
+                    else:
+                        resolved_mv = memoryview(bytearray(val))
                     if val.format != "B" or val.ndim > 1:
                         try:
                             resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
@@ -726,6 +786,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         stack.append((_OBJ_EXPAND, new_dt, iter(_get_obj_attrs(val))))
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                if _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 new_obj: Any
                 try:
                     if isinstance(val, str):
@@ -900,10 +964,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
     pending_frozensets: list[Any] = deferred_frozenset_insertions
 
-    def _is_member_state_populated(m_clone: Any, owner_set_id: int | None = None) -> bool:
+    def _is_member_state_populated(m_clone: Any) -> bool:
         if _is_immutable(m_clone):
             return True
-        if _is_identity_hashed(m_clone) and owner_set_id is None:
+        if _is_identity_hashed(m_clone):
             return True
         visited: set[int] = set()
         stack_nodes = [m_clone]
@@ -932,17 +996,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if not _is_immutable(item):
                         stack_nodes.append(item)
 
+        for target, _, _, _, _, _ in deferred_tuple_finalizations:
+            if id(target) in container_ids:
+                return False
         for target, _, _, _, _, _ in pending_frozensets:
             if id(target) in container_ids:
                 return False
         for s, _, _ in deferred_set_insertions:
             if id(s) in container_ids:
-                if (
-                    owner_set_id is not None
-                    and id(s) == owner_set_id
-                    and _is_identity_hashed(m_clone)
-                ):
-                    continue
                 return False
         for td_id, entries in dict_ordered_entries.items():
             if td_id in container_ids and dict_next_index[td_id] < len(entries):
@@ -1001,17 +1062,22 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             if deferred_set_insertions:
                 still_sets = []
                 for s, orig_val, orig_members in deferred_set_insertions:
+                    if _deadline_expired():
+                        return
                     if all(_is_immutable(m) or id(m) in memo for m in orig_members):
-                        resolved_members = [
-                            m if _is_immutable(m) else memo[id(m)] for m in orig_members
-                        ]
-                        if not all(
-                            _is_member_state_populated(rm, owner_set_id=id(s))
-                            for rm in resolved_members
-                        ):
+                        resolved_members = []
+                        for m_idx, m in enumerate(orig_members):
+                            if (m_idx & 63) == 0 and _deadline_expired():
+                                return
+                            resolved_members.append(m if _is_immutable(m) else memo[id(m)])
+                        if not all(_is_member_state_populated(rm) for rm in resolved_members):
                             still_sets.append((s, orig_val, orig_members))
                             continue
-                        set.update(s, resolved_members)
+                        for ins_idx in range(0, len(resolved_members), 64):
+                            if ins_idx > 0 and _deadline_expired():
+                                return
+                            chunk = resolved_members[ins_idx : ins_idx + 64]
+                            set.update(s, chunk)
                         if set(s) != set(resolved_members):
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
@@ -1036,7 +1102,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if k_ready and v_ready:
                         k = orig_k if _is_immutable(orig_k) else memo[id(orig_k)]
                         v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
-                        if not _is_member_state_populated(k, owner_set_id=None):
+                        if not _is_member_state_populated(k):
                             break
                         target_dict[k] = v
                         idx += 1
@@ -2150,12 +2216,13 @@ class AsyncProoflineClient(AsyncOperations):
         tuples, buffers, memoryviews with more than 65,536 bytes, or deques with more than
         65,536 items in review extension data skip on_poll snapshot delivery even with time
         remaining, and snapshot copy errors on unsupported mutable values propagate before
-        on_poll runs. Callback return-validation errors and exceptions propagate even when a
-        determined, preventing the waiter from returning a classified outcome.
-        Inline failures and awaitable failures observed before the deadline propagate,
-        but the deadline can suppress awaitable failures (and a pending future's
-        failure can be suppressed if its done callback runs after the deadline),
-        including when an outcome is already classified. When the deadline expires,
+        on_poll runs. Callback return-validation errors and inline exceptions propagate
+        unconditionally, even when a terminal outcome has already been determined, preventing the
+        waiter from returning a classified outcome.
+        Separately, awaitable failures observed before the deadline propagate, but the
+        deadline suppresses awaitable failures observed after expiry (and a pending future's
+        failure is suppressed if its done callback runs after the deadline), allowing any
+        classified outcome to be returned. When the deadline expires,
         unstarted coroutines returned by on_poll are closed without being scheduled,
         while already-running callback tasks and futures are detached without
         cancellation and may continue running. Synchronous
@@ -2184,7 +2251,34 @@ class AsyncProoflineClient(AsyncOperations):
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
                     snapshot = _snapshot_review(last)
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
+                        waiter_task = async_current_task()
+                        initial_cancelling = 0
+                        if waiter_task is not None:
+                            try:
+                                if hasattr(waiter_task, "cancelling"):
+                                    initial_cancelling = waiter_task.cancelling()
+                            except BaseException:
+                                pass
                         res = on_poll(snapshot)
+                        if waiter_task is not None:
+                            current_cancelling = 0
+                            try:
+                                if hasattr(waiter_task, "cancelling"):
+                                    current_cancelling = waiter_task.cancelling()
+                            except BaseException:
+                                pass
+                            if current_cancelling > initial_cancelling:
+                                if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
+                                    try:
+                                        res.close()
+                                    except BaseException:
+                                        pass
+                                elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
+                                    try:
+                                        res.close()
+                                    except BaseException:
+                                        pass
+                                raise AsyncCancelledError()
                         try:
                             res_awaitable = isawaitable(res)
                         except Exception:
@@ -2308,14 +2402,6 @@ class AsyncProoflineClient(AsyncOperations):
                                             return result
                                         break
                             else:
-                                waiter_task = async_current_task()
-                                initial_cancelling = 0
-                                if waiter_task is not None:
-                                    try:
-                                        if hasattr(waiter_task, "cancelling"):
-                                            initial_cancelling = waiter_task.cancelling()
-                                    except BaseException:
-                                        pass
                                 coro = res
                                 completed_at = []
                                 wrapper_started = False

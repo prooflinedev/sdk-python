@@ -1295,11 +1295,11 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         assert len(server.requests) == 3
         assert clock.delays == [5, 10]
     with Server(lambda request, index: Reply(body=responses[index])) as server:
-        polled_reviews: list[Any] = []
+        polled_reviews: list[tuple[Any, int]] = []
         cb = (
-            (lambda r: polled_reviews.append(r))
+            (lambda r: polled_reviews.append((r, len(server.requests))))
             if mode == "sync"
-            else (lambda r: polled_reviews.append(r))
+            else (lambda r: polled_reviews.append((r, len(server.requests))))
         )
         async with session(mode, server.url) as client:
             result = await call(
@@ -1318,8 +1318,9 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         # The second read names the head, so the review that would complete is never read.
         assert len(server.requests) == 2
         assert clock.delays == [5, 10, 5]
-        assert [p.status for p in polled_reviews] == ["PENDING", "RUNNING"]
-        assert polled_reviews[1].head_commit_sha == HEAD
+        assert [p[0].status for p in polled_reviews] == ["PENDING", "RUNNING"]
+        assert [p[1] for p in polled_reviews] == [1, 2]
+        assert polled_reviews[1][0].head_commit_sha == HEAD
 
 
 @MODES
@@ -2804,13 +2805,27 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         await asyncio.sleep(0)
                         assert late_fut.exception_retrieved is True
                         assert id(late_fut) not in client_module._DETACHED_FUTURES
-                        del late_fut
+                        late_fut = None
                         import gc
 
                         gc.collect()
                         assert late_fut_ref() is None
                         assert unhandled_reports == []
             finally:
+                if producer_task is not None and not producer_task.done():
+                    producer_task.cancel()
+                    try:
+                        await producer_task
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                if late_fut is not None:
+                    if not late_fut.done():
+                        late_fut.cancel()
+                    elif not late_fut.cancelled():
+                        try:
+                            late_fut.exception()
+                        except BaseException:
+                            pass
                 loop.set_exception_handler(old_h)
 
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
@@ -3063,7 +3078,8 @@ async def main() -> None:
             assert unhandled_exceptions == []
 
             # 6b: Pre-start wrapper cancellation: hold wrapper before entry,
-            # cancel waiter with budget remaining
+            # cancel waiter with budget remaining, run queued runner and
+            # assert callback body never starts
             import inspect
 
             hold_wrapper = asyncio.Event()
@@ -3087,9 +3103,11 @@ async def main() -> None:
             client_module.async_create_task = holding_create_task
 
             user_coro_created: list[Any] = []
+            cb_body_started = False
 
             async def dummy_pre_start_coro(r: Any) -> None:
-                pass
+                nonlocal cb_body_started
+                cb_body_started = True
 
             def pre_start_cb(r: Any) -> Any:
                 c = dummy_pre_start_coro(r)
@@ -3109,14 +3127,23 @@ async def main() -> None:
                 await asyncio.sleep(0)
                 assert len(wrapper_tasks) == 1
                 assert not wrapper_tasks[0].done()
+
+                # Cancel waiter with budget remaining
                 pre_waiter_task.cancel()
+
+                # Run the queued runner after cancellation and before waiter cleanup
+                hold_wrapper.set()
+                await asyncio.sleep(0)
+
+                assert not cb_body_started
+                assert len(user_coro_created) == 1
+                assert inspect.getcoroutinestate(user_coro_created[0]) == inspect.CORO_CLOSED
+                assert wrapper_tasks[0].done()
+
                 try:
                     await pre_waiter_task
                 except asyncio.CancelledError:
                     pass
-                assert wrapper_tasks[0].cancelled()
-                assert len(user_coro_created) == 1
-                assert inspect.getcoroutinestate(user_coro_created[0]) == inspect.CORO_CLOSED
             finally:
                 client_module.async_create_task = orig_create_task
                 if pre_waiter_task is not None and not pre_waiter_task.done():
@@ -3580,8 +3607,15 @@ asyncio.run(main())
                                 await t
                             except (asyncio.CancelledError, BaseException):
                                 pass
-                        if unhash_box and not unhash_box[0].done():
-                            unhash_box[0].set_result(None)
+                        if unhash_box:
+                            f = unhash_box[0]
+                            if not f.done():
+                                f.set_result(None)
+                            elif not f.cancelled():
+                                try:
+                                    f.exception()
+                                except BaseException:
+                                    pass
                         await asyncio.sleep(0)
         finally:
             loop.set_exception_handler(old_h_unhash)
