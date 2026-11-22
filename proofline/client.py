@@ -254,6 +254,8 @@ _IMMUTABLE_TYPES: set[type] = {
 def _is_immutable(val: Any) -> bool:
     if val is None or val is UNSET or isinstance(val, type):
         return True
+    if hasattr(val, "__self__") and not _is_immutable(val.__self__):
+        return False
     t = type(val)
     if t in _IMMUTABLE_TYPES:
         return True
@@ -275,7 +277,12 @@ def _assign_target(target: Any, key: Any, is_attr: bool, val: Any) -> None:
         else:
             setattr(target, slot_or_name, val)
     else:
-        target[key] = val
+        if isinstance(target, deque):
+            deque.__setitem__(target, key, val)
+        elif isinstance(target, list):
+            list.__setitem__(target, key, val)
+        else:
+            target[key] = val
 
 
 def _get_obj_attrs(obj: Any) -> list[tuple[Any, bool, Any]]:
@@ -537,7 +544,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         ) from exc
                 memo[val_id] = new_deque
                 _assign_target(target, key, is_attr, new_deque)
-                stack.append((_LIST_EXPAND, new_deque, iter(val)))
+                stack.append((_LIST_EXPAND, new_deque, deque.__iter__(val)))
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_deque, iter(_get_obj_attrs(val))))
             elif isinstance(val, bytearray):
@@ -702,18 +709,21 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
         elif task_type == _LIST_EXPAND:
             target_list, it = target, it_or_key
+            is_dq = isinstance(target_list, deque)
+            app_fn = deque.append if is_dq else list.append
+            len_fn = deque.__len__ if is_dq else list.__len__
             for _ in range(_EXPAND_BATCH_SIZE):
                 try:
                     v = next(it)
                 except StopIteration:
                     break
                 if _is_immutable(v):
-                    target_list.append(v)
+                    app_fn(target_list, v)
                 elif id(v) in memo:
-                    target_list.append(memo[id(v)])
+                    app_fn(target_list, memo[id(v)])
                 else:
-                    idx = len(target_list)
-                    target_list.append(None)
+                    idx = len_fn(target_list)
+                    app_fn(target_list, None)
                     stack.append((_LIST_EXPAND, target_list, it))
                     stack.append((_ITEM_TASK, target_list, idx, False, v))
                     break
@@ -819,6 +829,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     if _deadline_expired():
         return None
 
+    deferred_custom_dict_insertions: list[tuple[Any, Any, Any]] = []
+    for target_dict, orig_k, orig_v in deferred_dict_insertions:
+        if _deadline_expired():
+            return None
+        if _is_immutable(orig_k):
+            v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
+            target_dict[orig_k] = v
+        else:
+            deferred_custom_dict_insertions.append((target_dict, orig_k, orig_v))
+
     for s, orig_val, orig_members in deferred_set_insertions:
         if _deadline_expired():
             return None
@@ -829,18 +849,18 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 f"Unsupported mutable value in review extension data: {type(orig_val).__name__}"
             )
 
-    for target_dict, orig_k, orig_v in deferred_dict_insertions:
+    for target_dict, orig_k, orig_v in deferred_custom_dict_insertions:
         if _deadline_expired():
             return None
-        k = orig_k if _is_immutable(orig_k) else memo[id(orig_k)]
+        k = memo[id(orig_k)]
         v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
         target_dict[k] = v
 
     return root
 
 
-_DETACHED_TASKS: set[Any] = set()
-_DETACHED_FUTURES: set[Any] = set()
+_DETACHED_TASKS: dict[int, Any] = {}
+_DETACHED_FUTURES: dict[int, Any] = {}
 
 
 def _safe_cancel_target(target: Any) -> None:
@@ -869,10 +889,11 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
             return
         if loop is not running_loop or loop.is_closed():
             return
-        _DETACHED_FUTURES.add(fut)
+        fut_id = id(fut)
+        _DETACHED_FUTURES[fut_id] = fut
 
         def _on_detached_fut_done(t: Any) -> None:
-            _DETACHED_FUTURES.discard(t)
+            _DETACHED_FUTURES.pop(fut_id, None)
             try:
                 if not AsyncFuture.cancelled(t):
                     AsyncFuture.exception(t)
@@ -882,7 +903,7 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
         try:
             AsyncFuture.add_done_callback(fut, _on_detached_fut_done)
         except BaseException:
-            _DETACHED_FUTURES.discard(fut)
+            _DETACHED_FUTURES.pop(fut_id, None)
     except BaseException:
         pass
 
@@ -892,10 +913,11 @@ def _detach_overdue_task(
     res: Any,
     wrapper_started: bool,
 ) -> None:
-    _DETACHED_TASKS.add(task)
+    task_id = id(task)
+    _DETACHED_TASKS[task_id] = task
 
     def _on_detached_task_done(t: Any) -> None:
-        _DETACHED_TASKS.discard(t)
+        _DETACHED_TASKS.pop(task_id, None)
         try:
             if not AsyncFuture.cancelled(t):
                 AsyncTask.exception(t)
@@ -905,7 +927,7 @@ def _detach_overdue_task(
     try:
         AsyncFuture.add_done_callback(task, _on_detached_task_done)
     except BaseException:
-        _DETACHED_TASKS.discard(task)
+        _DETACHED_TASKS.pop(task_id, None)
     if not wrapper_started:
         if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
             try:
@@ -1336,7 +1358,7 @@ class ProoflineClient(Operations):
                                 "for async callbacks."
                             )
                         if res is not None:
-                            raise TypeError(f"Callbacks must return None, got {type(res).__name__}")
+                            raise TypeError("Callbacks must return None.")
                 if result is not None:
                     return result
                 if (_transport.remaining() or 0) <= 0:
@@ -1766,10 +1788,7 @@ class AsyncProoflineClient(AsyncOperations):
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
                         if res is not None and not isawaitable(res):
-                            raise TypeError(
-                                "Callbacks must return None or an awaitable, "
-                                f"got {type(res).__name__}"
-                            )
+                            raise TypeError("Callbacks must return None or an awaitable.")
                         if isawaitable(res):
                             if res is async_current_task():
                                 raise ValueError(
@@ -1916,7 +1935,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
-                                if task.done() and cb_finished_in_budget:
+                                if AsyncFuture.done(task) and cb_finished_in_budget:
                                     AsyncTask.result(task)
 
                                 remaining_budget = _transport.remaining()
