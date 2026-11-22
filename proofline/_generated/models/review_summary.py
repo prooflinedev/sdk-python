@@ -48,10 +48,12 @@ class ReviewSummary:
              Null for every other review.
         completed_at (datetime.datetime | None | Unset): When the review reached a terminal status. Absent while it is
             still pending or running.
-        counted_incomplete_causes (list[IncompleteCauseType0 | Literal['OUT_OF_CREDITS'] | Literal['UNKNOWN']] | Unset):
-            `incomplete_causes` as the Inbox and the reviews `cause:` search
-             count them: `OUT_OF_CREDITS` in place of the `NOT_CONFIGURED` an
-             assessment records when credits refused it. Present exactly when
+        counted_incomplete_causes (list[IncompleteCauseType0 | Literal['OUT_OF_CREDITS'] |
+            Literal['SPEND_LIMIT_REACHED'] | Literal['UNKNOWN']] | Unset): `incomplete_causes` as the Inbox and the reviews
+            `cause:` search
+             count them: `OUT_OF_CREDITS` or `SPEND_LIMIT_REACHED` in place of the
+             `NOT_CONFIGURED` an assessment records when credits or a monthly spend
+             limit refused it. Present exactly when
              `incomplete_causes` is.
         current_head_commit_sha (None | str | Unset): The pull request's head commit as the latest provider projection
             reports it, which can differ from `head_commit_sha`. Set only on a single-review read, and absent for a
@@ -126,7 +128,13 @@ class ReviewSummary:
     audit_mode: None | str | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
     counted_incomplete_causes: (
-        list[IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]] | Unset
+        list[
+            IncompleteCauseType0
+            | Literal["OUT_OF_CREDITS"]
+            | Literal["SPEND_LIMIT_REACHED"]
+            | Literal["UNKNOWN"]
+        ]
+        | Unset
     ) = UNSET
     current_head_commit_sha: None | str | Unset = UNSET
     head_commit_sha: None | str | Unset = UNSET
@@ -192,12 +200,23 @@ class ReviewSummary:
             completed_at = self.completed_at
 
         counted_incomplete_causes: (
-            list[Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"] | str] | Unset
+            list[
+                Literal["OUT_OF_CREDITS"]
+                | Literal["SPEND_LIMIT_REACHED"]
+                | Literal["UNKNOWN"]
+                | str
+            ]
+            | Unset
         ) = UNSET
         if not isinstance(self.counted_incomplete_causes, Unset):
             counted_incomplete_causes = []
             for counted_incomplete_causes_item_data in self.counted_incomplete_causes:
-                counted_incomplete_causes_item: Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"] | str
+                counted_incomplete_causes_item: (
+                    Literal["OUT_OF_CREDITS"]
+                    | Literal["SPEND_LIMIT_REACHED"]
+                    | Literal["UNKNOWN"]
+                    | str
+                )
                 if isinstance(counted_incomplete_causes_item_data, IncompleteCauseType0):
                     counted_incomplete_causes_item = counted_incomplete_causes_item_data.value
                 else:
@@ -476,7 +495,13 @@ class ReviewSummary:
 
         _counted_incomplete_causes = d.pop("counted_incomplete_causes", UNSET)
         counted_incomplete_causes: (
-            list[IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]] | Unset
+            list[
+                IncompleteCauseType0
+                | Literal["OUT_OF_CREDITS"]
+                | Literal["SPEND_LIMIT_REACHED"]
+                | Literal["UNKNOWN"]
+            ]
+            | Unset
         ) = UNSET
         if _counted_incomplete_causes is not UNSET:
             counted_incomplete_causes = []
@@ -484,7 +509,12 @@ class ReviewSummary:
 
                 def _parse_counted_incomplete_causes_item(
                     data: object,
-                ) -> IncompleteCauseType0 | Literal["OUT_OF_CREDITS"] | Literal["UNKNOWN"]:
+                ) -> (
+                    IncompleteCauseType0
+                    | Literal["OUT_OF_CREDITS"]
+                    | Literal["SPEND_LIMIT_REACHED"]
+                    | Literal["UNKNOWN"]
+                ):
                     try:
                         if not isinstance(data, str):
                             raise TypeError()
@@ -504,16 +534,29 @@ class ReviewSummary:
                         return componentsschemas_incomplete_cause_type_1
                     except (TypeError, ValueError, AttributeError, KeyError):
                         pass
-                    if not (type(data) is str and data == "OUT_OF_CREDITS"):
-                        raise TypeError()
-                    componentsschemas_credit_refusal_cause_type_0 = cast(
-                        Literal["OUT_OF_CREDITS"], data
-                    )
-                    if componentsschemas_credit_refusal_cause_type_0 != "OUT_OF_CREDITS":
-                        raise ValueError(
-                            f"/components/schemas/CreditRefusalCause_type_0 must match const 'OUT_OF_CREDITS', got '{componentsschemas_credit_refusal_cause_type_0}'"
+                    try:
+                        if not (type(data) is str and data == "OUT_OF_CREDITS"):
+                            raise TypeError()
+                        componentsschemas_credit_refusal_cause_type_0 = cast(
+                            Literal["OUT_OF_CREDITS"], data
                         )
-                    return componentsschemas_credit_refusal_cause_type_0
+                        if componentsschemas_credit_refusal_cause_type_0 != "OUT_OF_CREDITS":
+                            raise ValueError(
+                                f"/components/schemas/CreditRefusalCause_type_0 must match const 'OUT_OF_CREDITS', got '{componentsschemas_credit_refusal_cause_type_0}'"
+                            )
+                        return componentsschemas_credit_refusal_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not (type(data) is str and data == "SPEND_LIMIT_REACHED"):
+                        raise TypeError()
+                    componentsschemas_credit_refusal_cause_type_1 = cast(
+                        Literal["SPEND_LIMIT_REACHED"], data
+                    )
+                    if componentsschemas_credit_refusal_cause_type_1 != "SPEND_LIMIT_REACHED":
+                        raise ValueError(
+                            f"/components/schemas/CreditRefusalCause_type_1 must match const 'SPEND_LIMIT_REACHED', got '{componentsschemas_credit_refusal_cause_type_1}'"
+                        )
+                    return componentsschemas_credit_refusal_cause_type_1
 
                 counted_incomplete_causes_item = _parse_counted_incomplete_causes_item(
                     counted_incomplete_causes_item_data
