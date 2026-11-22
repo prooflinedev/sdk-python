@@ -3023,13 +3023,15 @@ async def main() -> None:
         loop.set_exception_handler(lambda _loop, ctx: unhandled_exceptions.append(ctx))
         coro_trigger: asyncio.Event | None = None
         waiter_coro_task: asyncio.Task[Any] | None = None
+        failing_fut: asyncio.Future[None] | None = None
         try:
             # 6a: Future callback cancelled after startup
-            failing_fut: asyncio.Future[None] = loop.create_future()
+            failing_fut = loop.create_future()
             future_started = asyncio.Event()
 
             def failing_future_cb(r: Any) -> asyncio.Future[None]:
                 future_started.set()
+                assert failing_fut is not None
                 return failing_fut
 
             client.get_review = fake_running  # type: ignore
@@ -3054,7 +3056,7 @@ async def main() -> None:
             failing_fut.set_exception(RuntimeError("error in cancelled future callback"))
             await asyncio.sleep(0)
             assert id(failing_fut) not in client_module._DETACHED_FUTURES
-            del failing_fut
+            failing_fut = None
             import gc
 
             gc.collect()
@@ -3094,6 +3096,7 @@ async def main() -> None:
                 user_coro_created.append(c)
                 return c
 
+            pre_waiter_task: asyncio.Task[Any] | None = None
             try:
                 pre_waiter_task = asyncio.create_task(
                     client.wait_for_review(
@@ -3116,7 +3119,28 @@ async def main() -> None:
                 assert inspect.getcoroutinestate(user_coro_created[0]) == inspect.CORO_CLOSED
             finally:
                 client_module.async_create_task = orig_create_task
-                hold_wrapper.set()
+                if pre_waiter_task is not None and not pre_waiter_task.done():
+                    pre_waiter_task.cancel()
+                    try:
+                        await pre_waiter_task
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                for wt in wrapper_tasks:
+                    if not wt.done():
+                        wt.cancel()
+                    try:
+                        await wt
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                for c in user_coro_created:
+                    try:
+                        if (
+                            inspect.iscoroutine(c)
+                            and inspect.getcoroutinestate(c) == inspect.CORO_CREATED
+                        ):
+                            c.close()
+                    except BaseException:
+                        pass
 
             # Coroutine callback cancelled after startup
             coro_started = asyncio.Event()
@@ -3157,6 +3181,14 @@ async def main() -> None:
             gc.collect()
             assert unhandled_exceptions == []
         finally:
+            if failing_fut is not None:
+                if not failing_fut.done():
+                    failing_fut.cancel()
+                elif not failing_fut.cancelled():
+                    try:
+                        failing_fut.exception()
+                    except BaseException:
+                        pass
             if coro_trigger is not None:
                 coro_trigger.set()
             if waiter_coro_task is not None and not waiter_coro_task.done():

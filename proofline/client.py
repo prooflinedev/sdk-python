@@ -300,6 +300,13 @@ _SAFE_BUILTIN_CLASSES: set[type] = {
 }
 
 
+def _is_identity_hashed(obj: Any) -> bool:
+    try:
+        return type(obj).__hash__ is object.__hash__
+    except Exception:
+        return False
+
+
 def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     if val is None or val is UNSET:
         return True
@@ -310,12 +317,10 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     t = type(val)
     if t in _IMMUTABLE_TYPES:
         return True
-    if isinstance(val, (FunctionType, BuiltinFunctionType, MethodType)):
-        if getattr(val, "__dict__", None):
-            return False
-        if getattr(val, "__closure__", None):
-            return False
-        return not _has_mutable_captures(val, seen)
+    if isinstance(val, BuiltinFunctionType):
+        return not bool(getattr(val, "__dict__", None))
+    if isinstance(val, (FunctionType, MethodType)):
+        return False
     if t is datetime.datetime:
         tz = val.tzinfo
         return tz is None or type(tz) is datetime.timezone
@@ -411,7 +416,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
         if task_type == _ITEM_TASK:
             key, is_attr, val = it_or_key, extra[0], extra[1]
-            if isinstance(val, (weakref.ref, weakref.ProxyType, weakref.CallableProxyType)):
+            if isinstance(
+                val,
+                (
+                    FunctionType,
+                    MethodType,
+                    weakref.ref,
+                    weakref.ProxyType,
+                    weakref.CallableProxyType,
+                ),
+            ):
                 raise TypeError(
                     f"Unsupported mutable value in review extension data: {type(val).__name__}"
                 )
@@ -874,7 +888,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     dict_targets: dict[int, Any] = {}
     dict_next_index: dict[int, int] = {}
 
-    for target_dict, orig_k, orig_v in deferred_dict_insertions:
+    for count, (target_dict, orig_k, orig_v) in enumerate(deferred_dict_insertions):
+        if (count & 63) == 0 and _deadline_expired():
+            return None
         td_id = id(target_dict)
         if td_id not in dict_ordered_entries:
             dict_ordered_entries[td_id] = []
@@ -884,8 +900,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
     pending_frozensets: list[Any] = deferred_frozenset_insertions
 
-    def _is_member_state_populated(m_clone: Any) -> bool:
+    def _is_member_state_populated(m_clone: Any, owner_set_id: int | None = None) -> bool:
         if _is_immutable(m_clone):
+            return True
+        if _is_identity_hashed(m_clone) and owner_set_id is None:
             return True
         visited: set[int] = set()
         stack_nodes = [m_clone]
@@ -919,6 +937,12 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 return False
         for s, _, _ in deferred_set_insertions:
             if id(s) in container_ids:
+                if (
+                    owner_set_id is not None
+                    and id(s) == owner_set_id
+                    and _is_identity_hashed(m_clone)
+                ):
+                    continue
                 return False
         for td_id, entries in dict_ordered_entries.items():
             if td_id in container_ids and dict_next_index[td_id] < len(entries):
@@ -929,6 +953,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         nonlocal deferred_tuple_finalizations, deferred_set_insertions
         changed = True
         while changed:
+            if _deadline_expired():
+                return
             changed = False
             if deferred_tuple_finalizations:
                 still_tuples = []
@@ -979,7 +1005,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         resolved_members = [
                             m if _is_immutable(m) else memo[id(m)] for m in orig_members
                         ]
-                        if not all(_is_member_state_populated(rm) for rm in resolved_members):
+                        if not all(
+                            _is_member_state_populated(rm, owner_set_id=id(s))
+                            for rm in resolved_members
+                        ):
                             still_sets.append((s, orig_val, orig_members))
                             continue
                         set.update(s, resolved_members)
@@ -993,16 +1022,22 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         still_sets.append((s, orig_val, orig_members))
                 deferred_set_insertions = still_sets
 
+            op_count = 0
             for td_id, entries in dict_ordered_entries.items():
                 target_dict = dict_targets[td_id]
                 idx = dict_next_index[td_id]
                 while idx < len(entries):
+                    op_count += 1
+                    if (op_count & 63) == 0 and _deadline_expired():
+                        return
                     orig_k, orig_v = entries[idx]
                     k_ready = _is_immutable(orig_k) or id(orig_k) in memo
                     v_ready = _is_immutable(orig_v) or id(orig_v) in memo
                     if k_ready and v_ready:
                         k = orig_k if _is_immutable(orig_k) else memo[id(orig_k)]
                         v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
+                        if not _is_member_state_populated(k, owner_set_id=None):
+                            break
                         target_dict[k] = v
                         idx += 1
                         changed = True
@@ -1011,6 +1046,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 dict_next_index[td_id] = idx
 
     _flush_pending_structures()
+    if _deadline_expired():
+        return None
 
     pending_frozensets = deferred_frozenset_insertions
     while pending_frozensets:
@@ -1069,10 +1106,19 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             raise TypeError("Unsupported cyclic reference in frozenset")
 
     _flush_pending_structures()
+    if _deadline_expired():
+        return None
+    if deferred_set_insertions:
+        raise TypeError("Unsupported cyclic reference in set")
+    for td_id, entries in dict_ordered_entries.items():
+        if dict_next_index[td_id] < len(entries):
+            raise TypeError("Unsupported cyclic reference in dict")
+    if deferred_tuple_finalizations:
+        raise TypeError("Unsupported cyclic reference in tuple")
     return root
 
 
-_DETACHED_TASKS: dict[int, Any] = {}
+_DETACHED_TASKS: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
 _DETACHED_FUTURES: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
 
 
@@ -1190,11 +1236,38 @@ def _detach_overdue_task(
                     pass
         return
 
+    try:
+        loop = task.get_loop() if hasattr(task, "get_loop") else async_get_running_loop()
+    except Exception:
+        try:
+            loop = async_get_running_loop()
+        except Exception:
+            loop = None
+
+    if loop is not None and not loop.is_closed():
+        loop_tasks = getattr(loop, "_proofline_detached_tasks", None)
+        if loop_tasks is None:
+            loop_tasks = set()
+            try:
+                setattr(loop, "_proofline_detached_tasks", loop_tasks)
+            except Exception:
+                pass
+        if loop_tasks is not None:
+            loop_tasks.add(task)
+
     task_id = id(task)
-    _DETACHED_TASKS[task_id] = task
+    try:
+        _DETACHED_TASKS[task_id] = task
+    except (TypeError, BaseException):
+        pass
 
     def _on_detached_task_done(t: Any) -> None:
         _DETACHED_TASKS.pop(task_id, None)
+        if loop is not None:
+            loop_tasks = getattr(loop, "_proofline_detached_tasks", None)
+            if loop_tasks is not None:
+                loop_tasks.discard(t)
+                loop_tasks.discard(task)
         try:
             is_canc = t.cancelled() if hasattr(t, "cancelled") else False
             if not is_canc:
@@ -1234,6 +1307,10 @@ def _detach_overdue_task(
                     pass
                 finally:
                     _DETACHED_TASKS.pop(task_id, None)
+                    if loop is not None:
+                        loop_tasks = getattr(loop, "_proofline_detached_tasks", None)
+                        if loop_tasks is not None:
+                            loop_tasks.discard(task)
 
             obs = loop.create_task(_observe_task())
             obs.add_done_callback(lambda _: None)
@@ -2232,6 +2309,13 @@ class AsyncProoflineClient(AsyncOperations):
                                         break
                             else:
                                 waiter_task = async_current_task()
+                                initial_cancelling = 0
+                                if waiter_task is not None:
+                                    try:
+                                        if hasattr(waiter_task, "cancelling"):
+                                            initial_cancelling = waiter_task.cancelling()
+                                    except BaseException:
+                                        pass
                                 coro = res
                                 completed_at = []
                                 wrapper_started = False
@@ -2242,7 +2326,9 @@ class AsyncProoflineClient(AsyncOperations):
                                     if waiter_task is not None:
                                         try:
                                             if hasattr(waiter_task, "cancelling"):
-                                                waiter_cancelling = waiter_task.cancelling() > 0
+                                                waiter_cancelling = (
+                                                    waiter_task.cancelling() > initial_cancelling
+                                                )
                                             elif hasattr(waiter_task, "cancelled"):
                                                 waiter_cancelling = waiter_task.cancelled()
                                         except BaseException:
