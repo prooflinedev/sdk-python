@@ -68,7 +68,7 @@ def decode_export(
             horizon,
             response.headers.get("x-proofline-export-next-cursor"),
         )
-    except (ValueError, KeyError, IndexError, UnicodeError):
+    except (ValueError, KeyError, IndexError, UnicodeError, RecursionError):
         raise ProoflineError(
             response.status_code,
             "urn:proofline:sdk:invalid-response",

@@ -103,3 +103,22 @@ def test_concurrent_decoding_preserves_global_csv_limit() -> None:
     with ThreadPoolExecutor(max_workers=4) as pool:
         assert set(pool.map(decode, range(12))) == {str(before)}
     assert csv.field_size_limit() == before
+
+
+def test_deeply_nested_ndjson_retains_typed_error() -> None:
+    text = "[" * 10_000 + "0" + "]" * 10_000
+    response = httpx2.Response(
+        200,
+        content=text.encode(),
+        headers={
+            "Content-Type": "application/x-ndjson",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": "2026-11-16T00:00:00Z",
+        },
+    )
+
+    with pytest.raises(ProoflineError) as caught:
+        decode_export(response, "ndjson", "reviews")
+
+    assert caught.value.type == "urn:proofline:sdk:invalid-response"
+    assert caught.value.status == 200
