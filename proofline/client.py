@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import datetime
 import math
+import weakref
 from asyncio import (
     Future as AsyncFuture,
 )
@@ -329,6 +330,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
         if task_type == _ITEM_TASK:
             key, is_attr, val = it_or_key, extra[0], extra[1]
+            if isinstance(val, (weakref.ref, weakref.ProxyType, weakref.CallableProxyType)):
+                raise TypeError(
+                    f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                )
             if _is_immutable(val):
                 _assign_target(target, key, is_attr, val)
                 continue
@@ -401,7 +406,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
             elif isinstance(val, (set, frozenset)):
-                if len(val) == 0:
+                set_len = set.__len__(val) if isinstance(val, set) else frozenset.__len__(val)
+                set_it = set.__iter__(val) if isinstance(val, set) else frozenset.__iter__(val)
+                if set_len == 0:
                     try:
                         res_empty = type(val)()
                     except Exception as exc:
@@ -416,9 +423,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 else:
                     temp_set_list: list[Any] = []
                     stack.append((_SET_FINALIZE, target, key, is_attr, val_id, val, temp_set_list))
-                    stack.append((_LIST_EXPAND, temp_set_list, iter(val)))
+                    stack.append((_LIST_EXPAND, temp_set_list, set_it))
             elif isinstance(val, bytearray):
-                if len(val) > _MAX_SAFE_BUFFER_SIZE:
+                if bytearray.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
                 try:
                     resolved = bytearray.__new__(type(val))
@@ -458,40 +465,46 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 memo[val_id] = resolved_mv
                 _assign_target(target, key, is_attr, resolved_mv)
             elif isinstance(val, datetime.datetime):
+                tz = val.tzinfo
+                copied_tz = tz
+                if tz is not None and type(tz) is not datetime.timezone:
+                    if id(tz) in memo:
+                        copied_tz = memo[id(tz)]
+                    else:
+                        try:
+                            copied_tz = copy.copy(tz)
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(tz).__name__}"
+                            ) from exc
+                        if copied_tz is tz:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(tz).__name__}"
+                            )
+                        memo[id(tz)] = copied_tz
+                        if hasattr(tz, "__dict__") or hasattr(tz, "__slots__"):
+                            stack.append((_OBJ_EXPAND, copied_tz, iter(_get_obj_attrs(tz))))
+
                 if type(val) is datetime.datetime:
-                    if val.tzinfo is None or type(val.tzinfo) is datetime.timezone:
+                    if copied_tz is tz and (tz is None or type(tz) is datetime.timezone):
                         _assign_target(target, key, is_attr, val)
                     else:
-                        tz = val.tzinfo
-                        if id(tz) in memo:
-                            copied_tz = memo[id(tz)]
-                        else:
-                            try:
-                                copied_tz = copy.copy(tz)
-                            except Exception as exc:
-                                raise TypeError(
-                                    "Unsupported mutable value in review extension data: "
-                                    f"{type(tz).__name__}"
-                                ) from exc
-                            if copied_tz is tz:
-                                raise TypeError(
-                                    "Unsupported mutable value in review extension data: "
-                                    f"{type(tz).__name__}"
-                                )
-                            memo[id(tz)] = copied_tz
-                            if hasattr(tz, "__dict__") or hasattr(tz, "__slots__"):
-                                stack.append((_OBJ_EXPAND, copied_tz, iter(_get_obj_attrs(tz))))
                         new_dt = val.replace(tzinfo=copied_tz)
                         memo[val_id] = new_dt
                         _assign_target(target, key, is_attr, new_dt)
                 else:
                     try:
-                        new_dt = copy.copy(val)
-                    except Exception as exc:
-                        raise TypeError(
-                            "Unsupported mutable value in review extension data: "
-                            f"{type(val).__name__}"
-                        ) from exc
+                        new_dt = val.replace(tzinfo=copied_tz)
+                    except Exception:
+                        try:
+                            new_dt = copy.copy(val)
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            ) from exc
                     if new_dt is val:
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
@@ -671,7 +684,7 @@ def _safe_cancel_target(target: Any) -> None:
 def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
     try:
         try:
-            loop = fut.get_loop()
+            loop = AsyncFuture.get_loop(fut)
         except Exception:
             return
         try:
@@ -688,8 +701,9 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
                     pass
             return
         try:
-            fut.add_done_callback(
-                lambda t: AsyncFuture.exception(t) if not AsyncFuture.cancelled(t) else None
+            AsyncFuture.add_done_callback(
+                fut,
+                lambda t: AsyncFuture.exception(t) if not AsyncFuture.cancelled(t) else None,
             )
         except BaseException:
             pass
@@ -707,11 +721,14 @@ def _detach_overdue_task(
     wrapper_started: bool,
 ) -> None:
     try:
-        task.add_done_callback(lambda t: AsyncTask.exception(t) if not t.cancelled() else None)
+        AsyncFuture.add_done_callback(
+            task,
+            lambda t: AsyncTask.exception(t) if not AsyncFuture.cancelled(t) else None,
+        )
     except BaseException:
         pass
     try:
-        loop = task.get_loop()
+        loop = AsyncFuture.get_loop(task)
         if loop.is_running() and not loop.is_closed():
             loop.call_soon(_safe_cancel_target, task)
     except BaseException:
@@ -1125,7 +1142,18 @@ class ProoflineClient(Operations):
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
                     snapshot = _snapshot_review(last)
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
-                        on_poll(snapshot)
+                        res = on_poll(snapshot)
+                        if isawaitable(res):
+                            if iscoroutine(res):
+                                try:
+                                    if getcoroutinestate(res) == CORO_CREATED:
+                                        res.close()
+                                except Exception:
+                                    pass
+                            raise TypeError(
+                                "on_poll returned an awaitable; use AsyncProoflineClient "
+                                "for async callbacks."
+                            )
                 if result is not None:
                     return result
                 if (_transport.remaining() or 0) <= 0:
@@ -1566,6 +1594,19 @@ class AsyncProoflineClient(AsyncOperations):
                             if isgenerator(res) and getgeneratorstate(res) != GEN_CREATED:
                                 raise ValueError("Callbacks must return unstarted coroutines.")
 
+                            if isinstance(res, (AsyncTask, AsyncFuture)):
+                                if not AsyncFuture.done(res):
+                                    try:
+                                        res_loop = AsyncFuture.get_loop(res)
+                                    except Exception:
+                                        res_loop = None
+                                    running_loop = async_get_running_loop()
+                                    if res_loop is not running_loop or res_loop.is_closed():
+                                        raise ValueError(
+                                            "Pending callback futures must belong "
+                                            "to the running event loop."
+                                        )
+
                             remaining_budget = _transport.remaining()
                             if remaining_budget is not None and remaining_budget <= 0:
                                 if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
@@ -1588,19 +1629,10 @@ class AsyncProoflineClient(AsyncOperations):
                                 if AsyncFuture.done(res):
                                     res.result()
                                 else:
-                                    try:
-                                        res_loop = res.get_loop()
-                                    except Exception:
-                                        res_loop = None
-                                    running_loop = async_get_running_loop()
-                                    if res_loop is not running_loop or res_loop.is_closed():
-                                        raise ValueError(
-                                            "Pending callback futures must belong "
-                                            "to the running event loop."
-                                        )
                                     completed_at: list[float] = []
-                                    res.add_done_callback(
-                                        lambda _: completed_at.append(monotonic())
+                                    AsyncFuture.add_done_callback(
+                                        res,
+                                        lambda _: completed_at.append(monotonic()),
                                     )
                                     remaining_budget = _transport.remaining()
                                     if remaining_budget is not None and remaining_budget <= 0:

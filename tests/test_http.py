@@ -2636,6 +2636,8 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 r.status = "MUTATED"
                 r.actions.publish = True
                 r.additional_properties["mutated"] = "mutated_value"
+                if r.assessments:
+                    r.assessments[0].checks.receipt_recorded = False
 
             async with session("async", server.url) as client:
                 result = await call(
@@ -2651,6 +2653,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 assert result.review.status == "COMPLETED"
                 assert result.review.actions.publish is False
                 assert "mutated" not in result.review.additional_properties
+                assert result.review.assessments[0].checks.receipt_recorded is True
 
         # Assert callback TimeoutError before deadline propagates
         async def failing_callback(r: Any) -> None:
@@ -2905,6 +2908,42 @@ async def main() -> None:
         assert res.status == "COMPLETED"
         assert resumed_within_budget
 
+        # Case 6: Pending future exception during cancellation does not replace TIMED_OUT
+        detached_task: asyncio.Task[None] | None = None
+
+        async def failing_cancel_coro(r: Any) -> None:
+            nonlocal detached_task
+            detached_task = asyncio.current_task()
+            fut = asyncio.get_running_loop().create_future()
+            try:
+                await fut
+            except asyncio.CancelledError:
+                raise RuntimeError("error during cancellation")
+
+        unhandled_exceptions: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: unhandled_exceptions.append(ctx))
+        try:
+            client.get_review = fake_running  # type: ignore
+            res_clean = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=0.2,
+                on_poll=failing_cancel_coro,
+            )
+            assert res_clean.status == "TIMED_OUT"
+            assert detached_task is not None
+            done, _ = await asyncio.wait({detached_task}, timeout=2.0)
+            assert detached_task in done
+            del detached_task
+            import gc
+
+            gc.collect()
+            assert unhandled_exceptions == []
+        finally:
+            loop.set_exception_handler(old_handler)
+
 asyncio.run(main())
 """
         checkout_root = Path(__file__).resolve().parent.parent
@@ -2924,6 +2963,8 @@ asyncio.run(main())
         r.status = "MUTATED"
         r.actions.publish = True
         r.additional_properties["mutated"] = "mutated_value"
+        if r.assessments:
+            r.assessments[0].checks.receipt_recorded = False
 
     async def async_mutating_callback(r: Any) -> None:
         nonlocal mutated_count
@@ -2931,6 +2972,8 @@ asyncio.run(main())
         r.status = "MUTATED"
         r.actions.publish = True
         r.additional_properties["mutated"] = "mutated_value"
+        if r.assessments:
+            r.assessments[0].checks.receipt_recorded = False
 
     with Server(lambda request, index: Reply(body=responses[1])) as server:
         async with session(mode, server.url) as client:
@@ -2947,6 +2990,7 @@ asyncio.run(main())
             assert res.review.status != "MUTATED"
             assert res.review.actions.publish is False
             assert "mutated" not in res.review.additional_properties
+            assert res.review.assessments[0].checks.receipt_recorded is True
 
     # Test snapshot directly with an in-memory deep extension and custom tuple to bypass HTTP JSON
     deep_container: dict[str, Any] = {}
@@ -3031,13 +3075,13 @@ asyncio.run(main())
 
             with Server(lambda request, index: Reply(body=responses[1])) as server:
                 async with session("async", server.url) as client:
-                    res_foreign = await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=10,
-                        on_poll=foreign_cb_expired,
-                    )
-                    assert res_foreign.status == "COMPLETED"
+                    with pytest.raises(ValueError, match="running event loop"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=10,
+                            on_poll=foreign_cb_expired,
+                        )
             assert not foreign_fut.done()
             assert not foreign_fut.cancelled()
             assert not getattr(foreign_fut, "_callbacks", None)
@@ -3120,40 +3164,6 @@ asyncio.run(main())
                 )
                 assert res_int.status == "COMPLETED"
 
-        # Pending future exception during cancellation does not replace TIMED_OUT outcome
-        detached_task: asyncio.Task[None] | None = None
-
-        async def failing_cancel_coro(r: Any) -> None:
-            nonlocal detached_task
-            detached_task = asyncio.current_task()
-            fut = asyncio.get_running_loop().create_future()
-            try:
-                await fut
-            except asyncio.CancelledError:
-                raise RuntimeError("error during cancellation")
-
-        unhandled_exceptions: list[dict[str, Any]] = []
-        loop = asyncio.get_running_loop()
-        old_handler = loop.get_exception_handler()
-        loop.set_exception_handler(lambda _loop, ctx: unhandled_exceptions.append(ctx))
-        try:
-            with Server(lambda request, index: Reply(body=responses[0])) as server:
-                async with session("async", server.url) as client:
-                    res_clean = await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=0.1,
-                        on_poll=failing_cancel_coro,
-                    )
-                    assert res_clean.status == "TIMED_OUT"
-                    assert detached_task is not None
-                    await asyncio.wait({detached_task})
-                    assert detached_task.done()
-                    assert isinstance(detached_task.exception(), RuntimeError)
-                    assert unhandled_exceptions == []
-        finally:
-            loop.set_exception_handler(old_handler)
-
         # Case with a waiter whose cancel() raises synchronously:
         # assert called and outcome is TIMED_OUT, and no unhandled exception reported
         class SyncCancelRaisingFuture(asyncio.Future[None]):
@@ -3166,6 +3176,7 @@ asyncio.run(main())
                 raise RuntimeError("synchronous cancel error")
 
         cancel_reports: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
         old_h = loop.get_exception_handler()
         loop.set_exception_handler(lambda _loop, ctx: cancel_reports.append(ctx))
         try:
@@ -3684,6 +3695,8 @@ asyncio.run(main())
     # Bytearray subclass rejecting single-buffer constructor is allocated via base methods
     class SubByteArray(bytearray):
         def __init__(self, required_arg: int) -> None:
+            if not isinstance(required_arg, int) or isinstance(required_arg, bool):
+                raise TypeError("required_arg must be an int")
             super().__init__()
             self.required_arg = required_arg
 
@@ -3730,3 +3743,71 @@ asyncio.run(main())
     detail_self_copy_tz.additional_properties["self_copy_tz"] = dt_self_copy_tz
     with pytest.raises(TypeError, match="Unsupported mutable value"):
         _snapshot_review(detail_self_copy_tz)
+
+    # SubDatetime with custom mutable tzinfo rebuilds subclass with copied tzinfo
+    sub_dt_custom_tz = SubDatetime(2026, 11, 22, 12, 0, 0, tzinfo=custom_tz_inst)
+    sub_dt_custom_tz.sub_attr = ["dt_tz_attr"]
+    detail_sub_tz = CustomerReviewDetail.from_dict(responses[1])
+    detail_sub_tz.additional_properties["sub_dt_tz"] = sub_dt_custom_tz
+    snap_sub_tz = _snapshot_review(detail_sub_tz)
+    assert snap_sub_tz is not None
+    copied_sub_tz = snap_sub_tz.additional_properties["sub_dt_tz"]
+    assert type(copied_sub_tz) is SubDatetime
+    assert copied_sub_tz == sub_dt_custom_tz
+    assert copied_sub_tz.tzinfo is not custom_tz_inst
+    assert copied_sub_tz.tzinfo.tz_attr is not custom_tz_inst.tz_attr
+    assert copied_sub_tz.sub_attr is not sub_dt_custom_tz.sub_attr
+
+    # Deceptive set subclass returning len 0 with members copies all members
+    class DeceptiveSet(set[Any]):
+        def __len__(self) -> int:
+            return 0
+
+    deceptive_s = DeceptiveSet(["member1", "member2"])
+    detail_deceptive_s = CustomerReviewDetail.from_dict(responses[1])
+    detail_deceptive_s.additional_properties["deceptive_s"] = deceptive_s
+    snap_deceptive_s = _snapshot_review(detail_deceptive_s)
+    assert snap_deceptive_s is not None
+    copied_deceptive_s = snap_deceptive_s.additional_properties["deceptive_s"]
+    assert type(copied_deceptive_s) is DeceptiveSet
+    assert "member1" in copied_deceptive_s and "member2" in copied_deceptive_s
+
+    # Deceptive bytearray subclass underreporting len with > 65536 bytes is skipped
+    class DeceptiveByteArray(bytearray):
+        def __len__(self) -> int:
+            return 1
+
+    huge_ba = bytearray.__new__(DeceptiveByteArray)
+    bytearray.__init__(huge_ba, b"x" * 65537)
+    detail_huge_ba = CustomerReviewDetail.from_dict(responses[1])
+    detail_huge_ba.additional_properties["huge_ba"] = huge_ba
+    assert _snapshot_review(detail_huge_ba) is None
+
+    # Weak references in snapshot extension data are rejected with TypeError
+    import weakref
+
+    class TargetObj:
+        pass
+
+    dummy_target = TargetObj()
+    weak_ref_obj = weakref.ref(dummy_target)
+    detail_weakref = CustomerReviewDetail.from_dict(responses[1])
+    detail_weakref.additional_properties["weakref"] = weak_ref_obj
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_weakref)
+
+    # Synchronous wait_for_review passed an async callback raises TypeError
+    async def async_cb_on_sync_client(r: Any) -> None:
+        pass
+
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as sync_cli:
+            with pytest.raises(TypeError, match="AsyncProoflineClient"):
+                await call(
+                    sync_cli,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=async_cb_on_sync_client,
+                )
