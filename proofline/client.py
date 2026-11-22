@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import datetime
 import math
 import weakref
@@ -37,6 +36,9 @@ from inspect import (
     isawaitable,
     iscoroutine,
     isgenerator,
+)
+from inspect import (
+    signature as inspect_signature,
 )
 from string import hexdigits
 from time import monotonic, sleep
@@ -318,7 +320,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         return None
 
     memo: dict[int, Any] = {id(UNSET): UNSET}
-    root = copy.copy(detail)
+    root = object.__new__(type(detail))
     memo[id(detail)] = root
 
     stack: list[Any] = [(_OBJ_EXPAND, root, iter(_get_obj_attrs(detail)))]
@@ -383,24 +385,39 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     )
                     stack.append((_TUPLE_EXPAND, temp_list, tuple.__iter__(val)))
             elif isinstance(val, dict):
-                new_dict = copy.copy(val)
-                if new_dict is val:
+                if "__copy__" in type(val).__dict__:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     )
-                new_dict.clear()
+                try:
+                    from collections import defaultdict
+
+                    if isinstance(val, defaultdict):
+                        new_dict = type(val)(val.default_factory)
+                    else:
+                        new_dict = dict.__new__(type(val))
+                    dict.clear(new_dict)
+                except Exception as exc:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    ) from exc
                 memo[val_id] = new_dict
                 _assign_target(target, key, is_attr, new_dict)
                 stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_dict, iter(_get_obj_attrs(val))))
             elif isinstance(val, list):
-                new_list = copy.copy(val)
-                if new_list is val:
+                if "__copy__" in type(val).__dict__:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     )
-                new_list.clear()
+                try:
+                    new_list = list.__new__(type(val))
+                    list.clear(new_list)
+                except Exception as exc:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    ) from exc
                 memo[val_id] = new_list
                 _assign_target(target, key, is_attr, new_list)
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
@@ -409,29 +426,40 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             elif isinstance(val, (set, frozenset)):
                 set_len = set.__len__(val) if isinstance(val, set) else frozenset.__len__(val)
                 set_it = set.__iter__(val) if isinstance(val, set) else frozenset.__iter__(val)
+                if type(val) is not set and type(val) is not frozenset:
+                    try:
+                        if set_len == 0:
+                            inspect_signature(type(val).__init__).bind(type(val))
+                        else:
+                            inspect_signature(type(val).__init__).bind(type(val), ())
+                    except TypeError:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
                 if set_len == 0:
                     if type(val) is set:
                         res_empty = set()
                     elif type(val) is frozenset:
                         res_empty = frozenset()
                     else:
-                        try:
-                            inst = type(val)()
-                            if len(inst) != 0:
+                        if isinstance(val, set):
+                            try:
+                                res_empty = set.__new__(type(val))
+                                set.clear(res_empty)
+                            except Exception as exc:
                                 raise TypeError(
                                     "Unsupported mutable value in review extension data: "
                                     f"{type(val).__name__}"
-                                )
-                        except Exception as exc:
-                            raise TypeError(
-                                "Unsupported mutable value in review extension data: "
-                                f"{type(val).__name__}"
-                            ) from exc
-                        if isinstance(val, set):
-                            res_empty = set.__new__(type(val))
-                            set.clear(res_empty)
+                                ) from exc
                         else:
-                            res_empty = frozenset.__new__(type(val), ())
+                            try:
+                                res_empty = frozenset.__new__(type(val), ())
+                            except Exception as exc:
+                                raise TypeError(
+                                    "Unsupported mutable value in review extension data: "
+                                    f"{type(val).__name__}"
+                                ) from exc
                         if set(res_empty) if isinstance(val, set) else frozenset(res_empty):
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
@@ -442,26 +470,23 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         stack.append((_OBJ_EXPAND, res_empty, iter(_get_obj_attrs(val))))
                     _assign_target(target, key, is_attr, res_empty)
                 else:
-                    if type(val) is not set and type(val) is not frozenset:
-                        try:
-                            inst = type(val)()
-                            if len(inst) != 0:
-                                raise TypeError(
-                                    "Unsupported mutable value in review extension data: "
-                                    f"{type(val).__name__}"
-                                )
-                        except Exception as exc:
-                            raise TypeError(
-                                "Unsupported mutable value in review extension data: "
-                                f"{type(val).__name__}"
-                            ) from exc
                     temp_set_list: list[Any] = []
                     stack.append((_SET_FINALIZE, target, key, is_attr, val_id, val, temp_set_list))
                     stack.append((_LIST_EXPAND, temp_set_list, set_it))
             elif isinstance(val, deque):
                 if len(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
-                new_deque: deque[Any] = deque(maxlen=val.maxlen)
+                if type(val) is deque:
+                    new_deque: deque[Any] = deque(maxlen=val.maxlen)
+                else:
+                    try:
+                        new_deque = deque.__new__(type(val))
+                        deque.__init__(new_deque, maxlen=val.maxlen)
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        ) from exc
                 memo[val_id] = new_deque
                 _assign_target(target, key, is_attr, new_deque)
                 stack.append((_LIST_EXPAND, new_deque, iter(val)))
@@ -514,18 +539,18 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if id(tz) in memo:
                         copied_tz = memo[id(tz)]
                     else:
+                        if "__copy__" in type(tz).__dict__:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(tz).__name__}"
+                            )
                         try:
-                            copied_tz = copy.copy(tz)
+                            copied_tz = datetime.tzinfo.__new__(type(tz))
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
                                 f"{type(tz).__name__}"
                             ) from exc
-                        if copied_tz is tz:
-                            raise TypeError(
-                                "Unsupported mutable value in review extension data: "
-                                f"{type(tz).__name__}"
-                            )
                         memo[id(tz)] = copied_tz
                         if hasattr(tz, "__dict__") or hasattr(tz, "__slots__"):
                             stack.append((_OBJ_EXPAND, copied_tz, iter(_get_obj_attrs(tz))))
@@ -542,7 +567,18 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         new_dt = val.replace(tzinfo=copied_tz)
                     except Exception:
                         try:
-                            new_dt = copy.copy(val)
+                            new_dt = type(val).__new__(
+                                type(val),
+                                val.year,
+                                val.month,
+                                val.day,
+                                val.hour,
+                                val.minute,
+                                val.second,
+                                val.microsecond,
+                                tzinfo=copied_tz,
+                                fold=val.fold,
+                            )
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
@@ -558,23 +594,29 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         stack.append((_OBJ_EXPAND, new_dt, iter(_get_obj_attrs(val))))
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
-                new_obj = copy.copy(val)
-                if new_obj is val:
-                    raise TypeError(
-                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
-                    )
-                memo[val_id] = new_obj
-                _assign_target(target, key, is_attr, new_obj)
-                stack.append((_OBJ_EXPAND, new_obj, iter(_get_obj_attrs(val))))
-            else:
+                new_obj: Any
                 try:
-                    resolved = copy.deepcopy(val, memo)
+                    if isinstance(val, str):
+                        new_obj = str.__new__(type(val), val)
+                    elif isinstance(val, bytes):
+                        new_obj = bytes.__new__(type(val), val)
+                    elif isinstance(val, int):
+                        new_obj = int.__new__(type(val), val)
+                    elif isinstance(val, float):
+                        new_obj = float.__new__(type(val), val)
+                    else:
+                        new_obj = object.__new__(type(val))
                 except Exception as exc:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     ) from exc
-                memo[val_id] = resolved
-                _assign_target(target, key, is_attr, resolved)
+                memo[val_id] = new_obj
+                _assign_target(target, key, is_attr, new_obj)
+                stack.append((_OBJ_EXPAND, new_obj, iter(_get_obj_attrs(val))))
+            else:
+                raise TypeError(
+                    f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                )
 
         elif task_type == _DICT_EXPAND:
             target_dict, it = target, it_or_key
@@ -1172,9 +1214,10 @@ class ProoflineClient(Operations):
         errors on unsupported mutable values propagate before on_poll runs.
         on_poll exceptions and return-validation errors propagate even when a
         terminal outcome has already been determined and can prevent the waiter
-        from returning a classified outcome. Synchronous callbacks must not
-        return awaitables and must return before a terminal result can be
-        delivered; the polling deadline cannot interrupt them.
+        from returning a classified outcome. Synchronous callbacks must return
+        None (returning an awaitable or any return value other than None raises
+        TypeError) and must return before a terminal result can be delivered;
+        the polling deadline cannot interrupt them.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -1698,11 +1741,15 @@ class AsyncProoflineClient(AsyncOperations):
                                 if AsyncFuture.done(res):
                                     AsyncFuture.result(res)
                                 else:
+                                    completion_fut = async_get_running_loop().create_future()
                                     completed_at: list[float] = []
-                                    AsyncFuture.add_done_callback(
-                                        res,
-                                        lambda _: completed_at.append(monotonic()),
-                                    )
+
+                                    def _on_future_done(_: Any) -> None:
+                                        completed_at.append(monotonic())
+                                        if not completion_fut.done():
+                                            completion_fut.set_result(None)
+
+                                    AsyncFuture.add_done_callback(res, _on_future_done)
                                     remaining_budget = _transport.remaining()
                                     if remaining_budget is not None and remaining_budget <= 0:
                                         _detach_overdue_future(res)
@@ -1710,7 +1757,9 @@ class AsyncProoflineClient(AsyncOperations):
                                             return result
                                         break
                                     try:
-                                        done, _ = await async_wait({res}, timeout=remaining_budget)
+                                        done, _ = await async_wait(
+                                            {completion_fut}, timeout=remaining_budget
+                                        )
                                     except BaseException:
                                         _detach_overdue_future(res)
                                         raise
@@ -1718,7 +1767,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     cb_finished_in_budget = bool(completed_at) and (
                                         deadline_val is None or completed_at[0] <= deadline_val
                                     )
-                                    if cb_finished_in_budget and res in done:
+                                    if cb_finished_in_budget and completion_fut in done:
                                         AsyncFuture.result(res)
                                     else:
                                         _detach_overdue_future(res)
@@ -1785,7 +1834,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
                                 if task.done() and cb_finished_in_budget:
-                                    task.result()
+                                    AsyncTask.result(task)
 
                                 remaining_budget = _transport.remaining()
                                 if remaining_budget is not None and remaining_budget <= 0:

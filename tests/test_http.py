@@ -1295,9 +1295,21 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         assert len(server.requests) == 3
         assert clock.delays == [5, 10]
     with Server(lambda request, index: Reply(body=responses[index])) as server:
+        polled_reviews: list[Any] = []
+        cb = (
+            (lambda r: polled_reviews.append(r))
+            if mode == "sync"
+            else (lambda r: polled_reviews.append(r))
+        )
         async with session(mode, server.url) as client:
             result = await call(
-                client, "wait_for_review", ORG, REVIEW, timeout=100, head_commit_sha=OTHER_HEAD
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=100,
+                head_commit_sha=OTHER_HEAD,
+                on_poll=cb,
             )
         assert result.status == "INCOMPLETE"
         assert result.review.status == "RUNNING"
@@ -1306,6 +1318,9 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         # The second read names the head, so the review that would complete is never read.
         assert len(server.requests) == 2
         assert clock.delays == [5, 10, 5]
+        assert len(polled_reviews) == 2
+        assert polled_reviews[1].status == "RUNNING"
+        assert polled_reviews[1].head_commit_sha == HEAD
 
 
 @MODES
@@ -3182,7 +3197,12 @@ asyncio.run(main())
                     )
 
         # Unrestricted awaitables returning values (e.g. int) accepted and result discarded
+        int_cb_completed = False
+
         async def int_returning_callback(r: Any) -> int:
+            nonlocal int_cb_completed
+            await asyncio.sleep(0)
+            int_cb_completed = True
             return 42
 
         with Server(lambda request, index: Reply(body=responses[1])) as server:
@@ -3194,9 +3214,29 @@ asyncio.run(main())
                     on_poll=int_returning_callback,
                 )
                 assert res_int.status == "COMPLETED"
+                assert int_cb_completed is True
+
+        # Unhashable same-loop Future subclass and overridden done() returning False
+        class UnhashableFuture(asyncio.Future[None]):
+            __hash__ = None  # type: ignore[assignment]
+
+            def done(self) -> bool:
+                return False
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                unhashable_fut: Any = UnhashableFuture(loop=asyncio.get_running_loop())
+                unhashable_fut.set_result(None)
+                res_unhash = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lambda r: unhashable_fut,
+                )
+                assert res_unhash.status == "COMPLETED"
 
         # Case with a waiter whose cancel() raises synchronously:
-        # assert called and outcome is TIMED_OUT, and no unhandled exception reported
+        # the waiter returns TIMED_OUT without calling cancel() or reporting an unhandled exception
         class SyncCancelRaisingFuture(asyncio.Future[None]):
             def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
                 super().__init__(loop=loop)
@@ -3803,17 +3843,22 @@ asyncio.run(main())
     assert type(copied_deceptive_s) is DeceptiveSet
     assert "member1" in copied_deceptive_s and "member2" in copied_deceptive_s
 
-    # Set subclass whose constructor inserts extra member is rejected with TypeError
+    # Set subclass whose constructor inserts extra member does not reintroduce it
     class InjectedSet(set[Any]):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self.add("injected_shared_member")
 
     injected_s = InjectedSet(["orig_member"])
+    injected_s.remove("injected_shared_member")
     detail_injected_s = CustomerReviewDetail.from_dict(responses[1])
     detail_injected_s.additional_properties["injected_s"] = injected_s
-    with pytest.raises(TypeError, match="Unsupported mutable value"):
-        _snapshot_review(detail_injected_s)
+    snap_injected_s = _snapshot_review(detail_injected_s)
+    assert snap_injected_s is not None
+    copied_injected_s = snap_injected_s.additional_properties["injected_s"]
+    assert type(copied_injected_s) is InjectedSet
+    assert "injected_shared_member" not in copied_injected_s
+    assert "orig_member" in copied_injected_s
 
     # Standard built-in set and frozenset properly snapshotted
     normal_s = {"member1", "member2"}
@@ -3840,6 +3885,24 @@ asyncio.run(main())
     assert copied_dq == dq
     assert copied_dq is not dq
     assert copied_dq[1] is not dq[1]
+
+    # Deque subclass preserves subclass type, maxlen, and restores attributes
+    class CustomDeque(deque[Any]):
+        pass
+
+    c_dq: CustomDeque = CustomDeque(["d1", "d2"], maxlen=5)
+    c_dq.custom_dq_attr = ["dq_attr"]  # type: ignore[attr-defined]
+    detail_c_dq = CustomerReviewDetail.from_dict(responses[1])
+    detail_c_dq.additional_properties["c_dq"] = c_dq
+    snap_c_dq = _snapshot_review(detail_c_dq)
+    assert snap_c_dq is not None
+    copied_c_dq = snap_c_dq.additional_properties["c_dq"]
+    assert type(copied_c_dq) is CustomDeque
+    assert copied_c_dq.maxlen == 5
+    assert copied_c_dq == c_dq
+    assert copied_c_dq is not c_dq
+    assert copied_c_dq.custom_dq_attr is not c_dq.custom_dq_attr
+    assert copied_c_dq.custom_dq_attr == ["dq_attr"]
 
     # Deceptive bytearray subclass underreporting len with > 65536 bytes is skipped
     class DeceptiveByteArray(bytearray):
@@ -3923,21 +3986,32 @@ asyncio.run(main())
                 )
     assert inspect.getgeneratorstate(gen_cb_inst) == inspect.GEN_CLOSED
 
-    # Detach overdue future retrieves exception from completed failed foreign future
+    # wait_for_review cleans up already-failed foreign-loop future returned when budget is exhausted
     foreign_loop_failed = asyncio.new_event_loop()
     foreign_reports: list[dict[str, Any]] = []
     foreign_loop_failed.set_exception_handler(lambda _loop, ctx: foreign_reports.append(ctx))
     try:
-        failed_foreign_fut: Any = foreign_loop_failed.create_future()
-        failed_foreign_fut.set_exception(RuntimeError("foreign future failed"))
-        from proofline.client import _detach_overdue_future
+        foreign_box: list[Any] = [foreign_loop_failed.create_future()]
+        foreign_box[0].set_exception(RuntimeError("foreign future failed"))
 
-        _detach_overdue_future(failed_foreign_fut)
-        del failed_foreign_fut
-        import gc
+        def foreign_fail_cb(r: Any) -> Any:
+            clock.now += 150.0
+            return foreign_box[0]
 
-        gc.collect()
-        assert foreign_reports == []
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_foreign = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=foreign_fail_cb,
+                )
+                assert res_foreign.status == "COMPLETED"
+                foreign_box.clear()
+                import gc
+
+                gc.collect()
+                assert foreign_reports == []
     finally:
         foreign_loop_failed.close()
 
