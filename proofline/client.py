@@ -332,16 +332,51 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     return False
 
 
+_SAFE_SPECIAL_ATTRS: set[str] = {
+    "__abstractmethods__",
+    "__annotations__",
+    "__attrs_attrs__",
+    "__attrs_own_setattr__",
+    "__attrs_props__",
+    "__class__",
+    "__classcell__",
+    "__dataclass_fields__",
+    "__dataclass_params__",
+    "__dict__",
+    "__doc__",
+    "__firstlineno__",
+    "__hash__",
+    "__match_args__",
+    "__module__",
+    "__mro_entries__",
+    "__name__",
+    "__orig_bases__",
+    "__parameters__",
+    "__pydantic_decorators__",
+    "__pydantic_fields__",
+    "__pydantic_generic_metadata__",
+    "__qualname__",
+    "__slots__",
+    "__static_attributes__",
+    "__subclasshook__",
+    "__weakref__",
+}
+
+
 def _has_mutable_class_attrs(cls: type) -> bool:
     for base in cls.__mro__:
         if base in _SAFE_BUILTIN_CLASSES or base is object:
             continue
         for name, attr in base.__dict__.items():
-            if name.startswith("__") and name.endswith("__"):
+            if name in _SAFE_SPECIAL_ATTRS:
                 continue
             if isinstance(attr, MemberDescriptorType) or type(attr).__name__ in (
                 "member_descriptor",
                 "getset_descriptor",
+                "wrapper_descriptor",
+                "method_descriptor",
+                "slotwrapper",
+                "classmethod_descriptor",
             ):
                 continue
             if isinstance(
@@ -701,7 +736,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if val.buffer_info()[1] * val.itemsize > _MAX_SAFE_BUFFER_SIZE:
                     return None
                 try:
-                    resolved_arr = array.array(val.typecode, val)
+                    resolved_arr = cast(Any, array.array).__new__(type(val), val.typecode, val)
                 except Exception as exc:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
@@ -732,7 +767,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 cloned_exporter = bytearray.__new__(type(exporter))
                                 bytearray.__init__(cloned_exporter, exporter)
                             else:
-                                cloned_exporter = array.array(exporter.typecode, exporter)
+                                cloned_exporter = cast(Any, array.array).__new__(
+                                    type(exporter), exporter.typecode, exporter
+                                )
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
@@ -762,7 +799,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             _py_release_buffer(ctypes.byref(b_exp))
                     finally:
                         _py_release_buffer(ctypes.byref(b_val))
-                    base_bytes = memoryview(cloned_exporter)
+                    base_bytes = cast(Any, memoryview(cloned_exporter)).cast("B")
                     val_strides = val.strides
                     val_shape = val.shape
                     if val.ndim == 1 and val_shape is not None and val_strides is not None:
@@ -1062,11 +1099,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         if _is_identity_hashed(m_clone):
             return True
         visited: set[int] = set()
-        stack_nodes = [m_clone]
+        root_in_custom = not _is_identity_hashed(m_clone) and type(m_clone) is not tuple
+        stack_nodes: list[tuple[Any, bool]] = [(m_clone, root_in_custom)]
         container_ids: set[int] = set()
-        is_custom_hashed = type(m_clone) is not tuple
         while stack_nodes:
-            cur = stack_nodes.pop()
+            cur, in_custom = stack_nodes.pop()
             if _is_immutable(cur):
                 continue
             cid = id(cur)
@@ -1074,27 +1111,38 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 continue
             visited.add(cid)
             container_ids.add(cid)
-            if hasattr(cur, "__dict__") and isinstance(cur.__dict__, dict):
-                stack_nodes.append(cur.__dict__)
-            if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
-                for _, _, slot_val in _get_obj_attrs(cur):
-                    if not _is_immutable(slot_val):
-                        stack_nodes.append(slot_val)
-            if isinstance(cur, dict):
-                for k, v in cur.items():
-                    if not _is_immutable(k):
-                        stack_nodes.append(k)
-                    if not _is_immutable(v):
-                        stack_nodes.append(v)
-            elif isinstance(cur, tuple):
-                for item in cur:
-                    if not _is_immutable(item):
-                        if is_custom_hashed or not _is_identity_hashed(item):
-                            stack_nodes.append(item)
-            elif isinstance(cur, (list, set, deque)):
-                for item in cur:
-                    if not _is_immutable(item):
-                        stack_nodes.append(item)
+            if not in_custom and not _is_identity_hashed(cur) and type(cur) is not tuple:
+                in_custom = True
+            if in_custom:
+                if hasattr(cur, "__dict__") and isinstance(cur.__dict__, dict):
+                    stack_nodes.append((cur.__dict__, True))
+                if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
+                    for _, _, slot_val in _get_obj_attrs(cur):
+                        if not _is_immutable(slot_val):
+                            stack_nodes.append((slot_val, True))
+                if isinstance(cur, dict):
+                    for k, v in cur.items():
+                        if not _is_immutable(k):
+                            stack_nodes.append((k, True))
+                        if not _is_immutable(v):
+                            stack_nodes.append((v, True))
+                elif isinstance(cur, tuple):
+                    for item in cur:
+                        if not _is_immutable(item):
+                            stack_nodes.append((item, True))
+                elif isinstance(cur, (list, set, deque)):
+                    for item in cur:
+                        if not _is_immutable(item):
+                            stack_nodes.append((item, True))
+            else:
+                if isinstance(cur, tuple):
+                    for item in cur:
+                        if _is_immutable(item):
+                            continue
+                        if _is_identity_hashed(item):
+                            continue
+                        item_is_custom = type(item) is not tuple
+                        stack_nodes.append((item, item_is_custom))
 
         for target, _, _, _, _, _ in deferred_tuple_finalizations:
             if id(target) in container_ids:
@@ -1403,6 +1451,21 @@ def _detach_overdue_task(
     res: Any = None,
     wrapper_started: bool = True,
 ) -> None:
+    try:
+        running_loop = async_get_running_loop()
+    except Exception:
+        running_loop = None
+
+    try:
+        loop = task.get_loop() if hasattr(task, "get_loop") else running_loop
+    except Exception:
+        loop = running_loop
+
+    if running_loop is not None and loop is not running_loop:
+        return
+    if loop is None or loop.is_closed():
+        return
+
     try:
         is_done = task.done() if hasattr(task, "done") else False
     except BaseException:
@@ -2355,10 +2418,12 @@ class AsyncProoflineClient(AsyncOperations):
         terminal outcome has already been determined (cancellation requested during callback
         invocation takes precedence over return validation), preventing the waiter from
         returning a classified outcome.
-        Separately, awaitable failures observed before the deadline propagate, but the
-        deadline suppresses awaitable failures observed after expiry (and a pending future's
-        failure is suppressed if its done callback runs after the deadline), allowing any
-        classified outcome to be returned. When the deadline expires or when the wait is
+        Separately, awaitable failures occurring before the deadline propagate, but the
+        deadline suppresses failures of awaitables that finish after expiry: coroutine
+        failures are timed at wrapper completion rather than when the waiter retrieves
+        them, and pending future failures are cut off at their done-callback execution.
+        This allows any classified outcome to be returned when a callback finishes after
+        the deadline. When the deadline expires or when the wait is
         cancelled, unstarted coroutines returned by on_poll are closed without entering
         their body (a wrapper task may already have been scheduled), while already-running
         callback tasks and futures are detached without cancellation and may continue
