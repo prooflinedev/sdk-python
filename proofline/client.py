@@ -571,6 +571,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     )
                     stack.append((_TUPLE_EXPAND, temp_list, tuple.__iter__(val)))
             elif isinstance(val, dict):
+                if type(val) not in (dict, defaultdict) and _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 if "__copy__" in type(val).__dict__:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
@@ -601,6 +605,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     stack.append((_OBJ_EXPAND, new_dict, iter(_get_obj_attrs(val))))
                 stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
             elif isinstance(val, list):
+                if type(val) is not list and _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 if "__copy__" in type(val).__dict__:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
@@ -618,6 +626,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
             elif isinstance(val, set):
+                if type(val) is not set and _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 if "__copy__" in type(val).__dict__:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
@@ -705,6 +717,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if type(val) is deque:
                     new_deque: deque[Any] = deque(maxlen=val.maxlen)
                 else:
+                    if type(val) is not deque and _has_mutable_class_attrs(type(val)):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
                     try:
                         new_deque = deque.__new__(type(val))
                         deque.__init__(new_deque, maxlen=val.maxlen)
@@ -719,6 +736,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_deque, iter(_get_obj_attrs(val))))
             elif isinstance(val, bytearray):
+                if type(val) is not bytearray and _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 if bytearray.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
                 try:
@@ -733,6 +754,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, resolved, iter(_get_obj_attrs(val))))
             elif isinstance(val, array.array):
+                if type(val) is not array.array and _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 if val.buffer_info()[1] * val.itemsize > _MAX_SAFE_BUFFER_SIZE:
                     return None
                 try:
@@ -751,6 +776,13 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 exporter = getattr(val, "obj", None)
                 resolved_mv: Any
                 if isinstance(exporter, (bytearray, array.array)):
+                    if type(exporter) not in (bytearray, array.array) and _has_mutable_class_attrs(
+                        type(exporter)
+                    ):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(exporter).__name__}"
+                        )
                     exp_id = id(exporter)
                     if exp_id in memo:
                         cloned_exporter = memo[exp_id]
@@ -1099,7 +1131,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         if _is_identity_hashed(m_clone):
             return True
         visited: set[int] = set()
-        root_in_custom = not _is_identity_hashed(m_clone) and type(m_clone) is not tuple
+        root_in_custom = not _is_identity_hashed(m_clone) and type(m_clone) not in (
+            tuple,
+            frozenset,
+        )
         stack_nodes: list[tuple[Any, bool]] = [(m_clone, root_in_custom)]
         container_ids: set[int] = set()
         while stack_nodes:
@@ -1111,7 +1146,15 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 continue
             visited.add(cid)
             container_ids.add(cid)
-            if not in_custom and not _is_identity_hashed(cur) and type(cur) is not tuple:
+            if (
+                not in_custom
+                and not _is_identity_hashed(cur)
+                and type(cur)
+                not in (
+                    tuple,
+                    frozenset,
+                )
+            ):
                 in_custom = True
             if in_custom:
                 if hasattr(cur, "__dict__") and isinstance(cur.__dict__, dict):
@@ -1130,18 +1173,18 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     for item in cur:
                         if not _is_immutable(item):
                             stack_nodes.append((item, True))
-                elif isinstance(cur, (list, set, deque)):
+                elif isinstance(cur, (list, set, frozenset, deque)):
                     for item in cur:
                         if not _is_immutable(item):
                             stack_nodes.append((item, True))
             else:
-                if isinstance(cur, tuple):
+                if isinstance(cur, (tuple, frozenset)):
                     for item in cur:
                         if _is_immutable(item):
                             continue
                         if _is_identity_hashed(item):
                             continue
-                        item_is_custom = type(item) is not tuple
+                        item_is_custom = type(item) not in (tuple, frozenset)
                         stack_nodes.append((item, item_is_custom))
 
         for target, _, _, _, _, _ in deferred_tuple_finalizations:
@@ -1503,18 +1546,18 @@ def _detach_overdue_task(
         except Exception:
             loop = None
 
+    task_id = id(task)
     if loop is not None and not loop.is_closed():
         loop_tasks = getattr(loop, "_proofline_detached_tasks", None)
         if loop_tasks is None:
-            loop_tasks = set()
+            loop_tasks = {}
             try:
                 setattr(loop, "_proofline_detached_tasks", loop_tasks)
             except Exception:
                 pass
         if loop_tasks is not None:
-            loop_tasks.add(task)
+            loop_tasks[task_id] = task
 
-    task_id = id(task)
     try:
         _DETACHED_TASKS[task_id] = task
     except (TypeError, BaseException):
@@ -1525,8 +1568,8 @@ def _detach_overdue_task(
         if loop is not None:
             loop_tasks = getattr(loop, "_proofline_detached_tasks", None)
             if loop_tasks is not None:
-                loop_tasks.discard(t)
-                loop_tasks.discard(task)
+                loop_tasks.pop(task_id, None)
+                loop_tasks.pop(id(t), None)
         try:
             is_canc = t.cancelled() if hasattr(t, "cancelled") else False
             if not is_canc:
@@ -1569,7 +1612,7 @@ def _detach_overdue_task(
                     if loop is not None:
                         loop_tasks = getattr(loop, "_proofline_detached_tasks", None)
                         if loop_tasks is not None:
-                            loop_tasks.discard(task)
+                            loop_tasks.pop(task_id, None)
 
             obs = loop.create_task(_observe_task())
             obs.add_done_callback(lambda _: None)
@@ -2014,11 +2057,24 @@ class ProoflineClient(Operations):
                                         res.close()
                                 except Exception:
                                     pass
+                            else:
+                                res_close = getattr(res, "close", None)
+                                if callable(res_close):
+                                    try:
+                                        res_close()
+                                    except BaseException:
+                                        pass
                             raise TypeError(
                                 "on_poll returned an awaitable; use AsyncProoflineClient "
                                 "for async callbacks."
                             )
                         if res is not None:
+                            res_close = getattr(res, "close", None)
+                            if callable(res_close):
+                                try:
+                                    res_close()
+                                except BaseException:
+                                    pass
                             raise TypeError("Callbacks must return None.")
                 if result is not None:
                     return result
@@ -2419,11 +2475,13 @@ class AsyncProoflineClient(AsyncOperations):
         invocation takes precedence over return validation), preventing the waiter from
         returning a classified outcome.
         Separately, awaitable failures occurring before the deadline propagate, but the
-        deadline suppresses failures of awaitables that finish after expiry: coroutine
+        deadline suppresses failures of awaitables that finish or return after expiry:
+        already-done futures must be returned before the deadline to propagate (failures of
+        already-done futures returned after expiry are detached and suppressed), coroutine
         failures are timed at wrapper completion rather than when the waiter retrieves
         them, and pending future failures are cut off at their done-callback execution.
-        This allows any classified outcome to be returned when a callback finishes after
-        the deadline. When the deadline expires or when the wait is
+        This allows any classified outcome to be returned when a callback finishes or returns
+        after the deadline. When the deadline expires or when the wait is
         cancelled, unstarted coroutines returned by on_poll are closed without entering
         their body (a wrapper task may already have been scheduled), while already-running
         callback tasks and futures are detached without cancellation and may continue
@@ -2483,14 +2541,33 @@ class AsyncProoflineClient(AsyncOperations):
                                         res.close()
                                     except BaseException:
                                         pass
-                                elif async_isfuture(res) and res is not waiter_task:
-                                    _detach_overdue_future(res)
+                                else:
+                                    res_close = getattr(res, "close", None)
+                                    if callable(res_close):
+                                        try:
+                                            res_close()
+                                        except BaseException:
+                                            pass
+                                    elif async_isfuture(res) and res is not waiter_task:
+                                        _detach_overdue_future(res)
                                 raise AsyncCancelledError()
                         try:
                             res_awaitable = isawaitable(res)
                         except Exception:
+                            res_close = getattr(res, "close", None)
+                            if callable(res_close):
+                                try:
+                                    res_close()
+                                except BaseException:
+                                    pass
                             raise TypeError("Callbacks must return None or an awaitable.") from None
                         if res is not None and not res_awaitable:
+                            res_close = getattr(res, "close", None)
+                            if callable(res_close):
+                                try:
+                                    res_close()
+                                except BaseException:
+                                    pass
                             raise TypeError("Callbacks must return None or an awaitable.")
                         if res_awaitable:
                             if res is async_current_task():
@@ -2666,6 +2743,7 @@ class AsyncProoflineClient(AsyncOperations):
                                         completed_at.append(monotonic())
 
                                 runner_coro = _runner()
+                                deadline_token_task = _transport.DEADLINE.set(None)
                                 try:
                                     task = async_create_task(runner_coro)
                                 except BaseException:
@@ -2688,6 +2766,8 @@ class AsyncProoflineClient(AsyncOperations):
                                         except BaseException:
                                             pass
                                     raise
+                                finally:
+                                    _transport.DEADLINE.reset(deadline_token_task)
                                 try:
                                     task_completion_fut = async_get_running_loop().create_future()
                                 except BaseException:

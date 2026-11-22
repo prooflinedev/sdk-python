@@ -2746,7 +2746,7 @@ from proofline import AsyncProoflineClient
 import proofline.client as client_module
 import proofline._transport as transport_module
 from proofline._generated.models.customer_review_detail import CustomerReviewDetail
-from tests.test_http import review, ORG, REVIEW
+from tests.test_http import review, ORG, REVIEW, Server, Reply
 
 class ControlledClock:
     def __init__(self) -> None:
@@ -2909,44 +2909,67 @@ async def main() -> None:
             sleep_forbidden = False
 
         # Case 3b: Return a Task from a synchronous callback, release it after the polling deadline
-        # and waiter exit, and assert its client request succeeds.
+        # and waiter exit, and assert its client request succeeds against the local test server.
+        task_worker_started = asyncio.Event()
         task_release_3b = asyncio.Event()
         task_success_3b = asyncio.Event()
         cb_task_3b: asyncio.Task[None] | None = None
 
-        async def task_worker_3b() -> None:
-            await task_release_3b.wait()
-            # Client request after polling deadline and waiter exit:
-            rev_res = await client.get_review(ORG, REVIEW)
-            assert rev_res.status == "RUNNING"
-            task_success_3b.set()
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as test_server:
+            async with AsyncProoflineClient(
+                token="test_token", base_url=test_server.url
+            ) as real_client:
+                async def task_worker_3b() -> None:
+                    task_worker_started.set()
+                    await task_release_3b.wait()
+                    # Real SDK request against the local test server checking deadline:
+                    rev_res = await real_client.get_review(ORG, REVIEW)
+                    assert rev_res.status == "RUNNING"
+                    task_success_3b.set()
 
-        def sync_cb_returning_task(r: Any) -> Any:
-            nonlocal cb_task_3b
-            cb_task_3b = asyncio.create_task(task_worker_3b())
-            return cb_task_3b
+                def sync_cb_returning_task(r: Any) -> Any:
+                    nonlocal cb_task_3b
+                    cb_task_3b = asyncio.create_task(task_worker_3b())
+                    return cb_task_3b
 
-        client.get_review = fake_running  # type: ignore
-        waiter_task_3b = asyncio.create_task(
-            client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=sync_cb_returning_task,
-            )
-        )
-        await asyncio.sleep(0.01)
-        assert cb_task_3b is not None
-        assert not cb_task_3b.done()
-        clock.advance(1.0)
-        res_3b = await waiter_task_3b
-        assert res_3b.status == "TIMED_OUT"
-        assert not cb_task_3b.done()
-        task_release_3b.set()
-        await asyncio.wait_for(task_success_3b.wait(), timeout=1.0)
-        await cb_task_3b
+                waiter_task_3b = asyncio.create_task(
+                    real_client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=0.2,
+                        on_poll=sync_cb_returning_task,
+                    )
+                )
+                await task_worker_started.wait()
+                assert cb_task_3b is not None
+                assert not cb_task_3b.done()
+                clock.advance(1.0)
+                res_3b = await waiter_task_3b
+                assert res_3b.status == "TIMED_OUT"
+                assert not cb_task_3b.done()
+                task_release_3b.set()
+                await asyncio.wait_for(task_success_3b.wait(), timeout=1.0)
+                await cb_task_3b
 
         # Case 4: Overdue callback continues running without cancellation on terminal review
+        orig_create_task_4 = client_module.async_create_task
+        captured_case4_wrappers: list[Any] = []
+
+        def tracked_create_task_4(coro: Any, *args: Any, **kwargs: Any) -> Any:
+            t = orig_create_task_4(coro, *args, **kwargs)
+            t.exception_calls = 0
+            orig_exc = t.exception
+
+            def tracked_exc() -> Any:
+                t.exception_calls += 1
+                return orig_exc()
+
+            t.exception = tracked_exc
+            captured_case4_wrappers.append(t)
+            return t
+
+        client_module.async_create_task = tracked_create_task_4
+
         callback_running_term = asyncio.Event()
         callback_finished_term = asyncio.Event()
         release_callback_term = asyncio.Event()
@@ -2959,23 +2982,32 @@ async def main() -> None:
 
         client.get_review = fake_completed  # type: ignore
 
-        waiter_task_4 = asyncio.create_task(
-            client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=continuing_coro_term,
+        try:
+            waiter_task_4 = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=continuing_coro_term,
+                )
             )
-        )
-        await callback_running_term.wait()
-        assert not waiter_task_4.done()
-        clock.advance(1.0)
-        res_4 = await waiter_task_4
-        assert res_4.status == "COMPLETED"
-        assert callback_running_term.is_set()
-        assert not callback_finished_term.is_set()
-        release_callback_term.set()
-        await callback_finished_term.wait()
+            await callback_running_term.wait()
+            assert not waiter_task_4.done()
+            clock.advance(1.0)
+            res_4 = await waiter_task_4
+            assert res_4.status == "COMPLETED"
+            assert callback_running_term.is_set()
+            assert not callback_finished_term.is_set()
+            release_callback_term.set()
+            await callback_finished_term.wait()
+            await asyncio.sleep(0.01)
+            assert len(captured_case4_wrappers) == 1
+            wrapper_4 = captured_case4_wrappers[0]
+            assert wrapper_4.done()
+            assert not wrapper_4.cancelled()
+            assert getattr(wrapper_4, "exception_calls", 0) > 0
+        finally:
+            client_module.async_create_task = orig_create_task_4
 
         # Case 5: Suspending callback that succeeds within budget
         resumed_within_budget = False
@@ -4767,6 +4799,52 @@ async def test_wait_for_review_pending_futures_and_clock(
                 timely_fut.cancel()
             elif not asyncio.Future.cancelled(timely_fut):
                 timely_fut.exception()
+        except BaseException:
+            pass
+
+    # Timely pending future failure propagates when clock advances after SDK done-callback
+    # but before waiter resumes
+    class ClockAdvancingFuture(asyncio.Future[None]):
+        def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+            super().add_done_callback(fn, context=context)
+            super().add_done_callback(lambda _: setattr(clock, "now", clock.now + 200.0))
+
+    timely_late_fut: Any = ClockAdvancingFuture(loop=asyncio.get_running_loop())
+    timely_late_producer: asyncio.Task[None] | None = None
+
+    async def fail_timely_late_soon() -> None:
+        await asyncio.sleep(0.01)
+        timely_late_fut.set_exception(ValueError("timely failure with late resumption"))
+
+    def timely_late_fail_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal timely_late_producer
+        timely_late_producer = asyncio.create_task(fail_timely_late_soon())
+        return timely_late_fut
+
+    try:
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(ValueError, match="timely failure with late resumption"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=timely_late_fail_cb,
+                    )
+        assert clock.now >= 200.0
+    finally:
+        if timely_late_producer is not None:
+            if not timely_late_producer.done():
+                timely_late_producer.cancel()
+            try:
+                await timely_late_producer
+            except BaseException:
+                pass
+        try:
+            if not asyncio.Future.done(timely_late_fut):
+                timely_late_fut.cancel()
+            elif not asyncio.Future.cancelled(timely_late_fut):
+                timely_late_fut.exception()
         except BaseException:
             pass
 
