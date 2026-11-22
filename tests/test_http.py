@@ -3021,6 +3021,8 @@ async def main() -> None:
         loop = asyncio.get_running_loop()
         old_handler = loop.get_exception_handler()
         loop.set_exception_handler(lambda _loop, ctx: unhandled_exceptions.append(ctx))
+        coro_trigger: asyncio.Event | None = None
+        waiter_coro_task: asyncio.Task[Any] | None = None
         try:
             # 6a: Future callback cancelled after startup
             failing_fut: asyncio.Future[None] = loop.create_future()
@@ -3155,7 +3157,8 @@ async def main() -> None:
             gc.collect()
             assert unhandled_exceptions == []
         finally:
-            coro_trigger.set()
+            if coro_trigger is not None:
+                coro_trigger.set()
             if waiter_coro_task is not None and not waiter_coro_task.done():
                 waiter_coro_task.cancel()
                 try:
@@ -3452,6 +3455,14 @@ asyncio.run(main())
         class UnhashableFuture(asyncio.Future[None]):
             __hash__ = None  # type: ignore[assignment]
 
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.exception_calls = 0
+
+            def exception(self) -> BaseException | None:
+                self.exception_calls += 1
+                return super().exception()
+
         async def complete_unhashable_soon(fut: Any) -> None:
             await asyncio.sleep(0.01)
             fut.set_result(None)
@@ -3516,15 +3527,18 @@ asyncio.run(main())
                             cancelled = True
                         assert cancelled
                         target_fut = unhash_box[0]
+                        fut_weakref = weakref.ref(target_fut)
                         assert id(target_fut) in _DETACHED_FUTURES
                         target_fut.set_exception(RuntimeError("unhashable late failure"))
                         await asyncio.sleep(0)
                         assert id(target_fut) not in _DETACHED_FUTURES
+                        assert target_fut.exception_calls > 0
                         del target_fut
                         unhash_box.clear()
                         import gc
 
                         gc.collect()
+                        assert fut_weakref() is None
                         assert unhash_cancel_reports == []
                     finally:
                         for t in (cb_wait_task, waiter_task):
@@ -4244,6 +4258,7 @@ asyncio.run(main())
     cloned_member = next(iter(copied_fs))
     assert cloned_member == member_payload
     assert cloned_member is not member_payload
+    assert next(iter(snap_sets.additional_properties["normal_s"])) is cloned_member
     assert cloned_member.payload is not member_payload.payload
     assert cloned_member in copied_fs
     cloned_member.payload.append("mutated_val")

@@ -263,13 +263,7 @@ def _has_mutable_captures(val: Any, seen: set[int] | None = None) -> bool:
 
     closure = getattr(val, "__closure__", None)
     if closure:
-        for cell in closure:
-            try:
-                contents = cell.cell_contents
-            except ValueError:
-                continue
-            if not _is_immutable(contents, seen):
-                return True
+        return True
 
     defaults = getattr(val, "__defaults__", None)
     if defaults:
@@ -318,6 +312,8 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
         return True
     if isinstance(val, (FunctionType, BuiltinFunctionType, MethodType)):
         if getattr(val, "__dict__", None):
+            return False
+        if getattr(val, "__closure__", None):
             return False
         return not _has_mutable_captures(val, seen)
     if t is datetime.datetime:
@@ -886,6 +882,49 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             dict_next_index[td_id] = 0
         dict_ordered_entries[td_id].append((orig_k, orig_v))
 
+    pending_frozensets: list[Any] = deferred_frozenset_insertions
+
+    def _is_member_state_populated(m_clone: Any) -> bool:
+        if _is_immutable(m_clone):
+            return True
+        visited: set[int] = set()
+        stack_nodes = [m_clone]
+        container_ids: set[int] = set()
+        while stack_nodes:
+            cur = stack_nodes.pop()
+            cid = id(cur)
+            if cid in visited:
+                continue
+            visited.add(cid)
+            container_ids.add(cid)
+            if hasattr(cur, "__dict__") and isinstance(cur.__dict__, dict):
+                stack_nodes.append(cur.__dict__)
+            if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
+                for _, _, slot_val in _get_obj_attrs(cur):
+                    if not _is_immutable(slot_val):
+                        stack_nodes.append(slot_val)
+            if isinstance(cur, dict):
+                for k, v in cur.items():
+                    if not _is_immutable(k):
+                        stack_nodes.append(k)
+                    if not _is_immutable(v):
+                        stack_nodes.append(v)
+            elif isinstance(cur, (list, tuple, set, deque)):
+                for item in cur:
+                    if not _is_immutable(item):
+                        stack_nodes.append(item)
+
+        for target, _, _, _, _, _ in pending_frozensets:
+            if id(target) in container_ids:
+                return False
+        for s, _, _ in deferred_set_insertions:
+            if id(s) in container_ids:
+                return False
+        for td_id, entries in dict_ordered_entries.items():
+            if td_id in container_ids and dict_next_index[td_id] < len(entries):
+                return False
+        return True
+
     def _flush_pending_structures() -> None:
         nonlocal deferred_tuple_finalizations, deferred_set_insertions
         changed = True
@@ -940,6 +979,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         resolved_members = [
                             m if _is_immutable(m) else memo[id(m)] for m in orig_members
                         ]
+                        if not all(_is_member_state_populated(rm) for rm in resolved_members):
+                            still_sets.append((s, orig_val, orig_members))
+                            continue
                         set.update(s, resolved_members)
                         if set(s) != set(resolved_members):
                             raise TypeError(
@@ -969,47 +1011,6 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 dict_next_index[td_id] = idx
 
     _flush_pending_structures()
-
-    def _is_member_state_populated(m_clone: Any) -> bool:
-        if _is_immutable(m_clone):
-            return True
-        visited: set[int] = set()
-        stack_nodes = [m_clone]
-        container_ids: set[int] = set()
-        while stack_nodes:
-            cur = stack_nodes.pop()
-            cid = id(cur)
-            if cid in visited:
-                continue
-            visited.add(cid)
-            container_ids.add(cid)
-            if hasattr(cur, "__dict__") and isinstance(cur.__dict__, dict):
-                stack_nodes.append(cur.__dict__)
-            if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
-                for _, _, slot_val in _get_obj_attrs(cur):
-                    if not _is_immutable(slot_val):
-                        stack_nodes.append(slot_val)
-            if isinstance(cur, dict):
-                for k, v in cur.items():
-                    if not _is_immutable(k):
-                        stack_nodes.append(k)
-                    if not _is_immutable(v):
-                        stack_nodes.append(v)
-            elif isinstance(cur, (list, tuple, set, deque)):
-                for item in cur:
-                    if not _is_immutable(item):
-                        stack_nodes.append(item)
-
-        for target, _, _, _, _, _ in pending_frozensets:
-            if id(target) in container_ids:
-                return False
-        for s, _, _ in deferred_set_insertions:
-            if id(s) in container_ids:
-                return False
-        for td_id, entries in dict_ordered_entries.items():
-            if td_id in container_ids and dict_next_index[td_id] < len(entries):
-                return False
-        return True
 
     pending_frozensets = deferred_frozenset_insertions
     while pending_frozensets:
@@ -1072,7 +1073,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
 
 _DETACHED_TASKS: dict[int, Any] = {}
-_DETACHED_FUTURES: dict[int, Any] = {}
+_DETACHED_FUTURES: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
 
 
 def _safe_cancel_target(target: Any) -> None:
@@ -1107,7 +1108,10 @@ def _detach_overdue_future(fut: Any) -> None:
         if loop is not running_loop or loop.is_closed():
             return
         fut_id = id(fut)
-        _DETACHED_FUTURES[fut_id] = fut
+        try:
+            _DETACHED_FUTURES[fut_id] = fut
+        except (TypeError, BaseException):
+            pass
 
         def _on_detached_fut_done(t: Any) -> None:
             _DETACHED_FUTURES.pop(fut_id, None)
@@ -2227,15 +2231,35 @@ class AsyncProoflineClient(AsyncOperations):
                                             return result
                                         break
                             else:
+                                waiter_task = async_current_task()
                                 coro = res
                                 completed_at = []
                                 wrapper_started = False
 
                                 async def _runner() -> None:
                                     nonlocal wrapper_started
-                                    wrapper_started = True
+                                    waiter_cancelling = False
+                                    if waiter_task is not None:
+                                        try:
+                                            if hasattr(waiter_task, "cancelling"):
+                                                waiter_cancelling = waiter_task.cancelling() > 0
+                                            elif hasattr(waiter_task, "cancelled"):
+                                                waiter_cancelling = waiter_task.cancelled()
+                                        except BaseException:
+                                            pass
+                                    try:
+                                        if hasattr(task, "cancelling") and task.cancelling() > 0:
+                                            waiter_cancelling = True
+                                        elif hasattr(task, "cancelled") and task.cancelled():
+                                            waiter_cancelling = True
+                                    except BaseException:
+                                        pass
+
                                     deadline_val = _transport.DEADLINE.get()
-                                    if deadline_val is not None and monotonic() > deadline_val:
+                                    deadline_expired = (
+                                        deadline_val is not None and monotonic() > deadline_val
+                                    )
+                                    if waiter_cancelling or deadline_expired:
                                         if (
                                             iscoroutine(coro)
                                             and getcoroutinestate(coro) == CORO_CREATED
@@ -2253,6 +2277,7 @@ class AsyncProoflineClient(AsyncOperations):
                                             except BaseException:
                                                 pass
                                         return
+                                    wrapper_started = True
                                     try:
                                         assert coro is not None
                                         await coro
