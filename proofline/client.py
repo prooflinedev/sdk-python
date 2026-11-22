@@ -21,6 +21,9 @@ from asyncio import (
     get_running_loop as async_get_running_loop,
 )
 from asyncio import (
+    isfuture as async_isfuture,
+)
+from asyncio import (
     sleep as async_sleep,
 )
 from asyncio import (
@@ -252,21 +255,34 @@ _IMMUTABLE_TYPES: set[type] = {
 
 
 def _has_mutable_captures(val: Any, seen: set[int] | None = None) -> bool:
-    closure = getattr(val, "__closure__", None)
-    if not closure:
-        return False
     if seen is None:
         seen = set()
     if id(val) in seen:
         return False
     seen.add(id(val))
-    for cell in closure:
-        try:
-            contents = cell.cell_contents
-        except ValueError:
-            continue
-        if not _is_immutable(contents, seen):
-            return True
+
+    closure = getattr(val, "__closure__", None)
+    if closure:
+        for cell in closure:
+            try:
+                contents = cell.cell_contents
+            except ValueError:
+                continue
+            if not _is_immutable(contents, seen):
+                return True
+
+    defaults = getattr(val, "__defaults__", None)
+    if defaults:
+        for d in defaults:
+            if not _is_immutable(d, seen):
+                return True
+
+    kwdefaults = getattr(val, "__kwdefaults__", None)
+    if kwdefaults and isinstance(kwdefaults, dict):
+        for d in kwdefaults.values():
+            if not _is_immutable(d, seen):
+                return True
+
     return False
 
 
@@ -346,6 +362,7 @@ _SET_EXPAND = 8
 _EXPAND_BATCH_SIZE = 64
 _MAX_SAFE_TUPLE_SIZE = 1000
 _MAX_SAFE_BUFFER_SIZE = 65_536
+_UNRESOLVED_SLOT = object()
 
 
 def _deadline_expired() -> bool:
@@ -785,7 +802,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     temp_list.append(memo[id(v)])
                 else:
                     idx = len(temp_list)
-                    temp_list.append(None)
+                    temp_list.append(_UNRESOLVED_SLOT)
                     stack.append((_TUPLE_EXPAND, temp_list, it))
                     stack.append((_ITEM_TASK, temp_list, idx, False, v))
                     break
@@ -800,7 +817,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 extra[2],
                 extra[3],
             )
-            if any(x is None for x in temp_list):
+            if any(x is _UNRESOLVED_SLOT for x in temp_list):
                 deferred_tuple_finalizations.append(
                     (target, key, is_attr, val_id, orig_val, temp_list)
                 )
@@ -842,34 +859,53 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         else:
             deferred_custom_dict_insertions.append((target_dict, orig_k, orig_v))
 
-    for target, key, is_attr, val_id, orig_val, orig_members in deferred_frozenset_insertions:
+    pending_frozensets = deferred_frozenset_insertions
+    while pending_frozensets:
         if _deadline_expired():
             return None
-        if val_id in memo:
-            res_set = memo[val_id]
-        else:
-            resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
-            if type(orig_val) is frozenset:
-                res_set = frozenset(resolved_members)
+        progress = False
+        remaining_frozensets = []
+        for target, key, is_attr, val_id, orig_val, orig_members in pending_frozensets:
+            if all(_is_immutable(m) or id(m) in memo for m in orig_members):
+                resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
+                if type(orig_val) is frozenset:
+                    res_set = frozenset(resolved_members)
+                else:
+                    try:
+                        res_set = frozenset.__new__(type(orig_val), resolved_members)
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(orig_val).__name__}"
+                        ) from exc
+                    if frozenset(res_set) != frozenset(resolved_members):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(orig_val).__name__}"
+                        )
+                memo[val_id] = res_set
+                if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                    for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
+                        val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
+                        _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
+                _assign_target(target, key, is_attr, res_set)
+                progress = True
             else:
-                try:
-                    res_set = frozenset.__new__(type(orig_val), resolved_members)
-                except Exception as exc:
-                    raise TypeError(
-                        "Unsupported mutable value in review extension data: "
-                        f"{type(orig_val).__name__}"
-                    ) from exc
-                if frozenset(res_set) != frozenset(resolved_members):
-                    raise TypeError(
-                        "Unsupported mutable value in review extension data: "
-                        f"{type(orig_val).__name__}"
-                    )
-            memo[val_id] = res_set
-            if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
-                for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
-                    val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
-                    _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
-        _assign_target(target, key, is_attr, res_set)
+                remaining_frozensets.append((target, key, is_attr, val_id, orig_val, orig_members))
+
+        pending_frozensets = remaining_frozensets
+
+        if progress and deferred_later_dict_insertions:
+            still_later_dict: list[tuple[Any, Any, Any]] = []
+            for target_dict, orig_k, orig_v in deferred_later_dict_insertions:
+                if id(orig_v) in memo:
+                    target_dict[orig_k] = memo[id(orig_v)]
+                else:
+                    still_later_dict.append((target_dict, orig_k, orig_v))
+            deferred_later_dict_insertions = still_later_dict
+
+        if not progress and pending_frozensets:
+            raise TypeError("Unsupported cyclic reference in frozenset")
 
     for target_dict, orig_k, orig_v in deferred_later_dict_insertions:
         if _deadline_expired():
@@ -981,6 +1017,35 @@ def _detach_overdue_task(
     res: Any,
     wrapper_started: bool,
 ) -> None:
+    try:
+        is_done = task.done() if hasattr(task, "done") else False
+    except BaseException:
+        is_done = False
+
+    if is_done:
+        try:
+            is_canc = task.cancelled() if hasattr(task, "cancelled") else False
+            if not is_canc and hasattr(task, "exception"):
+                task.exception()
+        except BaseException:
+            pass
+        if not wrapper_started:
+            try:
+                task.cancel()
+            except BaseException:
+                pass
+            if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
+                try:
+                    res.close()
+                except BaseException:
+                    pass
+            elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
+                try:
+                    res.close()
+                except BaseException:
+                    pass
+        return
+
     task_id = id(task)
     _DETACHED_TASKS[task_id] = task
 
@@ -1001,7 +1066,12 @@ def _detach_overdue_task(
             AsyncFuture.add_done_callback(task, _on_detached_task_done)
     except BaseException:
         _DETACHED_TASKS.pop(task_id, None)
+
     if not wrapper_started:
+        try:
+            task.cancel()
+        except BaseException:
+            pass
         if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
             try:
                 res.close()
@@ -1379,9 +1449,10 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery. Oversized tuples or buffers in review extension data skip
-        on_poll snapshot delivery even with time remaining, and snapshot copy
-        errors on unsupported mutable values propagate before on_poll runs.
+        delivery. Oversized tuples, buffers, or deques with more than 65,536 items in
+        review extension data skip on_poll snapshot delivery even with time
+        remaining, and snapshot copy errors on unsupported mutable values
+        propagate before on_poll runs.
         on_poll exceptions and return-validation errors propagate even when a
         terminal outcome has already been determined and can prevent the waiter
         from returning a classified outcome. Synchronous callbacks must return
@@ -1826,10 +1897,10 @@ class AsyncProoflineClient(AsyncOperations):
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Oversized
-        tuples or buffers in review extension data skip on_poll snapshot delivery
-        even with time remaining, and snapshot copy errors on unsupported mutable
-        values propagate before on_poll runs. Callback return-validation errors
-        and exceptions propagate even when a terminal outcome has already been
+        tuples, buffers, or deques with more than 65,536 items in review extension data skip
+        on_poll snapshot delivery even with time remaining, and snapshot copy errors on
+        unsupported mutable values propagate before on_poll runs. Callback return-validation
+        errors and exceptions propagate even when a terminal outcome has already been
         determined, preventing the waiter from returning a classified outcome.
         Inline failures and awaitable failures observed before the deadline propagate,
         but the deadline can suppress awaitable failures (and a pending future's
@@ -1881,10 +1952,11 @@ class AsyncProoflineClient(AsyncOperations):
                             if isgenerator(res) and getgeneratorstate(res) != GEN_CREATED:
                                 raise ValueError("Callbacks must return unstarted coroutines.")
 
-                            if isinstance(res, (AsyncTask, AsyncFuture)):
-                                is_done = (
-                                    res.done() if hasattr(res, "done") else AsyncFuture.done(res)
-                                )
+                            if async_isfuture(res):
+                                try:
+                                    is_done = res.done()
+                                except BaseException:
+                                    is_done = False
                                 if not is_done:
                                     try:
                                         res_loop = (
@@ -1895,7 +1967,9 @@ class AsyncProoflineClient(AsyncOperations):
                                     except Exception:
                                         res_loop = None
                                     running_loop = async_get_running_loop()
-                                    if res_loop is not running_loop or res_loop.is_closed():
+                                    if res_loop is not running_loop or (
+                                        res_loop is not None and res_loop.is_closed()
+                                    ):
                                         raise ValueError(
                                             "Pending callback futures must belong "
                                             "to the running event loop."
@@ -1913,16 +1987,17 @@ class AsyncProoflineClient(AsyncOperations):
                                         res.close()
                                     except BaseException:
                                         pass
-                                elif isinstance(res, (AsyncTask, AsyncFuture)):
+                                elif async_isfuture(res):
                                     _detach_overdue_future(res)
                                 if result is not None:
                                     return result
                                 break
 
-                            if isinstance(res, (AsyncTask, AsyncFuture)):
-                                is_done = (
-                                    res.done() if hasattr(res, "done") else AsyncFuture.done(res)
-                                )
+                            if async_isfuture(res):
+                                try:
+                                    is_done = res.done()
+                                except BaseException:
+                                    is_done = False
                                 if is_done:
                                     if hasattr(res, "result"):
                                         res.result()
@@ -2048,11 +2123,18 @@ class AsyncProoflineClient(AsyncOperations):
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
-                                task_is_done = (
-                                    task.done() if hasattr(task, "done") else AsyncFuture.done(task)
-                                )
+                                try:
+                                    task_is_done = task.done() if hasattr(task, "done") else False
+                                except BaseException:
+                                    _detach_overdue_task(task, res, wrapper_started)
+                                    raise
+
                                 if task_is_done and cb_finished_in_budget:
                                     if not wrapper_started:
+                                        try:
+                                            task.cancel()
+                                        except BaseException:
+                                            pass
                                         if (
                                             iscoroutine(res)
                                             and getcoroutinestate(res) == CORO_CREATED
@@ -2091,13 +2173,20 @@ class AsyncProoflineClient(AsyncOperations):
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
-                                task_is_done = (
-                                    task.done() if hasattr(task, "done") else AsyncFuture.done(task)
-                                )
+                                try:
+                                    task_is_done = task.done() if hasattr(task, "done") else False
+                                except BaseException:
+                                    _detach_overdue_task(task, res, wrapper_started)
+                                    raise
+
                                 if cb_finished_in_budget and (
                                     task_completion_fut in done or task_is_done
                                 ):
                                     if not wrapper_started:
+                                        try:
+                                            task.cancel()
+                                        except BaseException:
+                                            pass
                                         if (
                                             iscoroutine(res)
                                             and getcoroutinestate(res) == CORO_CREATED

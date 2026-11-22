@@ -2755,17 +2755,31 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         )
 
             # Late-observed pending future failure preserves the classified outcome
-            late_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            class TrackedFuture(asyncio.Future[None]):
+                def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                    super().__init__(loop=loop)
+                    self.exception_retrieved = False
+
+                def exception(self) -> BaseException | None:
+                    self.exception_retrieved = True
+                    return super().exception()
+
+            import weakref
+
+            late_fut: TrackedFuture | None = TrackedFuture(loop=asyncio.get_running_loop())
+            late_fut_ref = weakref.ref(late_fut)
             late_fut.add_done_callback(lambda _: setattr(clock, "now", clock.now + 200.0))
             producer_task: asyncio.Task[None] | None = None
 
             async def fail_late_soon() -> None:
                 await asyncio.sleep(0)
-                late_fut.set_exception(ValueError("late failure"))
+                if late_fut is not None:
+                    late_fut.set_exception(ValueError("late failure"))
 
             def late_fail_cb(r: Any) -> asyncio.Future[None]:
                 nonlocal producer_task
                 producer_task = asyncio.create_task(fail_late_soon())
+                assert late_fut is not None
                 return late_fut
 
             unhandled_reports: list[dict[str, Any]] = []
@@ -2782,14 +2796,19 @@ async def test_wait_for_review_invokes_on_poll_callback(
                             on_poll=late_fail_cb,
                         )
                         assert res_late.status == "COMPLETED"
+                        assert late_fut is not None
                         assert late_fut.done()
                         assert clock.now >= 200.0
                         if producer_task is not None:
                             await producer_task
+                        await asyncio.sleep(0)
+                        assert late_fut.exception_retrieved is True
+                        assert id(late_fut) not in client_module._DETACHED_FUTURES
                         del late_fut
                         import gc
 
                         gc.collect()
+                        assert late_fut_ref() is None
                         assert unhandled_reports == []
             finally:
                 loop.set_exception_handler(old_h)
@@ -2820,6 +2839,18 @@ async def main() -> None:
     clock = ControlledClock()
     client_module.monotonic = clock.time
     transport_module.monotonic = clock.time
+
+    sleep_forbidden = False
+    orig_async_sleep = client_module.async_sleep
+
+    async def guarded_async_sleep(delay: float) -> None:
+        if sleep_forbidden:
+            raise AssertionError(
+                "Ordinary polling sleep occurred before watchdog advanced callback deadline"
+            )
+        await orig_async_sleep(delay)
+
+    client_module.async_sleep = guarded_async_sleep
 
     running_detail = CustomerReviewDetail.from_dict(review("RUNNING"))
     completed_detail = CustomerReviewDetail.from_dict(review())
@@ -2904,23 +2935,27 @@ async def main() -> None:
 
         client.get_review = fake_running  # type: ignore
 
-        waiter_task_3 = asyncio.create_task(
-            client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=continuing_coro,
+        sleep_forbidden = True
+        try:
+            waiter_task_3 = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=continuing_coro,
+                )
             )
-        )
-        await callback_running.wait()
-        assert not waiter_task_3.done()
-        clock.advance(1.0)
-        res_3 = await waiter_task_3
-        assert res_3.status == "TIMED_OUT"
-        assert callback_running.is_set()
-        assert not callback_finished.is_set()
-        release_callback.set()
-        await callback_finished.wait()
+            await callback_running.wait()
+            assert not waiter_task_3.done()
+            clock.advance(1.0)
+            res_3 = await waiter_task_3
+            assert res_3.status == "TIMED_OUT"
+            assert callback_running.is_set()
+            assert not callback_finished.is_set()
+            release_callback.set()
+            await callback_finished.wait()
+        finally:
+            sleep_forbidden = False
 
         # Case 4: Overdue callback continues running without cancellation on terminal review
         callback_running_term = asyncio.Event()
@@ -3067,20 +3102,24 @@ async def main() -> None:
             callback_completed_7.set()
 
         client.get_review = fake_running  # type: ignore
-        polling_waiter_task = asyncio.create_task(
-            client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=awaiting_runner_callback,
+        sleep_forbidden = True
+        try:
+            polling_waiter_task = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=awaiting_runner_callback,
+                )
             )
-        )
-        await cb_7_started.wait()
-        assert not polling_waiter_task.done()
-        clock.advance(1.0)
-        res_7 = await polling_waiter_task
-        assert res_7.status == "TIMED_OUT"
-        await asyncio.wait_for(callback_completed_7.wait(), timeout=1.0)
+            await cb_7_started.wait()
+            assert not polling_waiter_task.done()
+            clock.advance(1.0)
+            res_7 = await polling_waiter_task
+            assert res_7.status == "TIMED_OUT"
+            await asyncio.wait_for(callback_completed_7.wait(), timeout=1.0)
+        finally:
+            sleep_forbidden = False
 
 asyncio.run(main())
 """
@@ -3359,7 +3398,16 @@ asyncio.run(main())
                             on_poll=unhash_failing_cb,
                         )
                     )
-                    await cb_started.wait()
+                    cb_wait_task = asyncio.create_task(cb_started.wait())
+                    done_set, _ = await asyncio.wait(
+                        {cb_wait_task, waiter_task},
+                        timeout=5.0,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_task in done_set and not cb_started.is_set():
+                        cb_wait_task.cancel()
+                        await waiter_task
+                    assert cb_wait_task in done_set, "Callback startup timed out"
                     waiter_task.cancel()
                     cancelled = False
                     try:
@@ -4030,9 +4078,21 @@ asyncio.run(main())
     assert "injected_shared_member" not in copied_injected_s
     assert "orig_member" in copied_injected_s
 
-    # Standard built-in set and frozenset properly snapshotted
-    normal_s = {"member1", "member2"}
-    normal_fs = frozenset(["fs1", "fs2"])
+    # Standard built-in set and frozenset properly snapshotted with hashable mutable payload
+    class HashablePayload:
+        def __init__(self, key: str, payload: list[str]) -> None:
+            self.key = key
+            self.payload = payload
+
+        def __hash__(self) -> int:
+            return hash(self.key)
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, HashablePayload) and self.key == other.key
+
+    member_payload = HashablePayload("test_key", ["original_val"])
+    normal_s = {member_payload}
+    normal_fs = frozenset([member_payload])
     detail_sets = CustomerReviewDetail.from_dict(responses[1])
     detail_sets.additional_properties["normal_s"] = normal_s
     detail_sets.additional_properties["normal_fs"] = normal_fs
@@ -4040,7 +4100,16 @@ asyncio.run(main())
     assert snap_sets is not None
     assert snap_sets.additional_properties["normal_s"] == normal_s
     assert snap_sets.additional_properties["normal_s"] is not normal_s
-    assert snap_sets.additional_properties["normal_fs"] == normal_fs
+    copied_fs = snap_sets.additional_properties["normal_fs"]
+    assert isinstance(copied_fs, frozenset)
+    assert len(copied_fs) == 1
+    cloned_member = next(iter(copied_fs))
+    assert cloned_member == member_payload
+    assert cloned_member is not member_payload
+    assert cloned_member.payload is not member_payload.payload
+    assert cloned_member in copied_fs
+    cloned_member.payload.append("mutated_val")
+    assert member_payload.payload == ["original_val"]
 
     # Deque traversed and snapshotted, and weakref inside deque rejected
     from collections import deque
