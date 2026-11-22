@@ -2683,6 +2683,34 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=failed_future_callback,
                     )
 
+            # Assert remaining budget with controlled clock
+            wait_timeouts: list[float | None] = []
+            orig_async_wait = client_module.async_wait
+
+            async def tracking_wait(fs: Any, *, timeout: float | None = None) -> Any:
+                wait_timeouts.append(timeout)
+                return await orig_async_wait(fs, timeout=timeout)
+
+            monkeypatch.setattr(client_module, "async_wait", tracking_wait)
+
+            async def dummy_async_cb(r: Any) -> None:
+                pass
+
+            def cb_consuming_clock(r: Any) -> Any:
+                clock.now += 35.0
+                return dummy_async_cb(r)
+
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=cb_consuming_clock,
+                    )
+            assert wait_timeouts == [65.0]
+            monkeypatch.setattr(client_module, "async_wait", orig_async_wait)
+
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
         # tasks cannot stall teardown.
         watchdog_code = """
@@ -2708,40 +2736,25 @@ async def main() -> None:
     ) as client:
         # Case 1: Pending same-loop Future that times out
         pending_fut: asyncio.Future[None] | None = None
-        fut_cancelled_time = 0.0
-        cb_return_t1 = 0.0
 
         def pending_future_callback(r: Any) -> asyncio.Future[None]:
-            nonlocal pending_fut, cb_return_t1
-            time.sleep(0.1)
+            nonlocal pending_fut
             loop = asyncio.get_running_loop()
             pending_fut = loop.create_future()
-
-            def record_cancel(_: Any) -> None:
-                nonlocal fut_cancelled_time
-                fut_cancelled_time = time.monotonic()
-
-            pending_fut.add_done_callback(record_cancel)
-            cb_return_t1 = time.monotonic()
             return pending_fut
 
         client.get_review = fake_running  # type: ignore
 
-        start_t1 = time.monotonic()
         res = await client.wait_for_review(
             ORG,
             REVIEW,
-            timeout=0.3,
+            timeout=0.2,
             on_poll=pending_future_callback,
         )
-        elapsed1 = time.monotonic() - start_t1
         assert res.status == "TIMED_OUT"
         await asyncio.sleep(0)
         assert pending_fut is not None
         assert pending_fut.cancelled()
-        wait_duration1 = fut_cancelled_time - cb_return_t1
-        assert 0.16 <= wait_duration1 <= 0.26
-        assert 0.27 <= elapsed1 <= 0.45
 
         # Case 2: Pending same-loop Future that completes within budget without cancellation
         completed_fut = asyncio.get_running_loop().create_future()
@@ -2769,83 +2782,51 @@ async def main() -> None:
         # Case 3: Blocking cleanup callback on non-terminal review
         cancellation_requested = asyncio.Event()
         cleanup_blocked = asyncio.Event()
-        cancellation_time = 0.0
 
         async def blocking_cleanup_coro(r: Any) -> None:
-            nonlocal cancellation_time
             try:
                 await asyncio.sleep(5.0)
             except asyncio.CancelledError:
-                cancellation_time = time.monotonic()
                 cancellation_requested.set()
                 await cleanup_blocked.wait()
                 raise
 
-        cb_return_t3 = 0.0
-
-        def blocking_cleanup_callback(r: Any) -> Any:
-            nonlocal cb_return_t3
-            time.sleep(0.1)
-            cb_return_t3 = time.monotonic()
-            return blocking_cleanup_coro(r)
-
         client.get_review = fake_running  # type: ignore
 
-        start_t3 = time.monotonic()
         res = await client.wait_for_review(
             ORG,
             REVIEW,
-            timeout=0.3,
-            on_poll=blocking_cleanup_callback,
+            timeout=0.2,
+            on_poll=blocking_cleanup_coro,
         )
-        elapsed3 = time.monotonic() - start_t3
         assert res.status == "TIMED_OUT"
         await asyncio.sleep(0)
         assert cancellation_requested.is_set()
-        wait_duration3 = cancellation_time - cb_return_t3
-        assert 0.16 <= wait_duration3 <= 0.26
-        assert 0.27 <= elapsed3 <= 0.45
         cleanup_blocked.set()
 
         # Case 4: Blocking cleanup callback on terminal review
         cancellation_requested_term = asyncio.Event()
         cleanup_blocked_term = asyncio.Event()
-        cancellation_time_term = 0.0
 
         async def blocking_cleanup_coro_term(r: Any) -> None:
-            nonlocal cancellation_time_term
             try:
                 await asyncio.sleep(5.0)
             except asyncio.CancelledError:
-                cancellation_time_term = time.monotonic()
                 cancellation_requested_term.set()
                 await cleanup_blocked_term.wait()
                 raise
 
-        cb_return_t4 = 0.0
-
-        def blocking_cleanup_callback_term(r: Any) -> Any:
-            nonlocal cb_return_t4
-            time.sleep(0.1)
-            cb_return_t4 = time.monotonic()
-            return blocking_cleanup_coro_term(r)
-
         client.get_review = fake_completed  # type: ignore
 
-        start_t4 = time.monotonic()
         res = await client.wait_for_review(
             ORG,
             REVIEW,
-            timeout=0.3,
-            on_poll=blocking_cleanup_callback_term,
+            timeout=0.2,
+            on_poll=blocking_cleanup_coro_term,
         )
-        elapsed4 = time.monotonic() - start_t4
         assert res.status == "COMPLETED"
         await asyncio.sleep(0)
         assert cancellation_requested_term.is_set()
-        wait_duration4 = cancellation_time_term - cb_return_t4
-        assert 0.16 <= wait_duration4 <= 0.26
-        assert 0.27 <= elapsed4 <= 0.45
         cleanup_blocked_term.set()
 
         # Case 5: Suspending callback that succeeds within budget
@@ -3079,6 +3060,29 @@ asyncio.run(main())
                 )
                 assert res_clean.status == "TIMED_OUT"
 
+        # Case with a waiter whose cancel() raises synchronously:
+        # assert called and outcome is TIMED_OUT
+        class SyncCancelRaisingFuture(asyncio.Future[None]):
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.cancel_called = False
+
+            def cancel(self, msg: Any = None) -> bool:
+                self.cancel_called = True
+                raise RuntimeError("synchronous cancel error")
+
+        fut_sync_cancel = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                res_sync_cancel = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.1,
+                    on_poll=lambda r: fut_sync_cancel,
+                )
+                assert res_sync_cancel.status == "TIMED_OUT"
+                assert fut_sync_cancel.cancel_called is True
+
     # Cyclic tuple whose list points back to it
     cyclic_list: list[Any] = []
     cyclic_tuple = (cyclic_list, "tuple_leaf")
@@ -3257,3 +3261,139 @@ asyncio.run(main())
     assert copied_itup.attr == ["orig_attr"]
     copied_itup.attr.append("mutated")
     assert itup.attr == ["orig_attr"]
+
+    # Oversized terminal reviews passed to both sync and async clients:
+    # on_poll skipped and outcome returned
+    detail_oversized = CustomerReviewDetail.from_dict(responses[1])
+    detail_oversized.additional_properties["huge"] = tuple(range(1001))
+
+    for test_mode in ("sync", "async"):
+        oversized_poll_called = False
+
+        def oversized_poll_cb(r: Any) -> None:
+            nonlocal oversized_poll_called
+            oversized_poll_called = True
+
+        async with session(test_mode, "https://api.proofline.sh") as client:
+            if test_mode == "async":
+                async def fake_get_ov(*args: Any, **kwargs: Any) -> Any:
+                    return detail_oversized
+
+                monkeypatch.setattr(client, "get_review", fake_get_ov)
+            else:
+                def fake_get_ov_sync(*args: Any, **kwargs: Any) -> Any:
+                    return detail_oversized
+
+                monkeypatch.setattr(client, "get_review", fake_get_ov_sync)
+
+            res_ov = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=10,
+                on_poll=oversized_poll_cb,
+            )
+            assert res_ov.status == "COMPLETED"
+            assert not oversized_poll_called
+
+    # Multidimensional memoryview shape and format preserved
+    raw_mv = bytearray(b"0123456789abcdef")
+    mv_orig = memoryview(raw_mv).cast("B", shape=[4, 4])
+    detail_mv = CustomerReviewDetail.from_dict(responses[1])
+    detail_mv.additional_properties["mv"] = mv_orig
+
+    snap_mv = _snapshot_review(detail_mv)
+    assert snap_mv is not None
+    copied_mv = snap_mv.additional_properties["mv"]
+    assert isinstance(copied_mv, memoryview)
+    assert copied_mv.shape == (4, 4)
+    assert copied_mv.format == "B"
+    assert copied_mv[1, 2] == mv_orig[1, 2]
+    copied_mv[1, 2] = ord("Z")
+    assert raw_mv != bytearray(copied_mv)
+
+    # Named tuple preserves named fields
+    from typing import NamedTuple
+
+    class Point(NamedTuple):
+        x: int
+        y: int
+
+    pt = Point(10, 20)
+    detail_pt = CustomerReviewDetail.from_dict(responses[1])
+    detail_pt.additional_properties["pt"] = pt
+
+    snap_pt = _snapshot_review(detail_pt)
+    assert snap_pt is not None
+    copied_pt = snap_pt.additional_properties["pt"]
+    assert type(copied_pt) is Point
+    assert copied_pt.x == 10
+    assert copied_pt.y == 20
+
+    # Derived slot does not hide base slot
+    class BaseSlot:
+        __slots__ = ("shared_slot",)
+
+    class DerivedSlot(BaseSlot):
+        __slots__ = ("shared_slot",)
+
+    slot_inst = DerivedSlot()
+    BaseSlot.shared_slot.__set__(slot_inst, ["base_data"])
+    DerivedSlot.shared_slot.__set__(slot_inst, ["derived_data"])
+    detail_slots = CustomerReviewDetail.from_dict(responses[1])
+    detail_slots.additional_properties["slots"] = slot_inst
+
+    snap_slots = _snapshot_review(detail_slots)
+    assert snap_slots is not None
+    copied_slots = snap_slots.additional_properties["slots"]
+    assert type(copied_slots) is DerivedSlot
+    assert BaseSlot.shared_slot.__get__(copied_slots) == ["base_data"]
+    assert BaseSlot.shared_slot.__get__(copied_slots) is not BaseSlot.shared_slot.__get__(slot_inst)
+    assert DerivedSlot.shared_slot.__get__(copied_slots) == ["derived_data"]
+    assert DerivedSlot.shared_slot.__get__(copied_slots) is not DerivedSlot.shared_slot.__get__(
+        slot_inst
+    )
+
+    # Empty tuple subclass with required __init__ argument
+    class EmptyArgTuple(tuple[Any, ...]):
+        def __init__(self, required_arg: Any) -> None:
+            self.attr = "initialized"
+
+    empty_tup_inst = tuple.__new__(EmptyArgTuple, ())
+    empty_tup_inst.attr = "custom_attr"  # type: ignore[attr-defined]
+    detail_empty_arg = CustomerReviewDetail.from_dict(responses[1])
+    detail_empty_arg.additional_properties["empty_arg"] = empty_tup_inst
+
+    snap_empty_arg = _snapshot_review(detail_empty_arg)
+    assert snap_empty_arg is not None
+    copied_empty_arg = snap_empty_arg.additional_properties["empty_arg"]
+    assert type(copied_empty_arg) is EmptyArgTuple
+    assert copied_empty_arg == ()
+    assert copied_empty_arg.attr == "custom_attr"
+
+    # Dict keys resolved through memo preserving alias with value
+    class KeyValObj:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    shared_obj = KeyValObj("shared_alias")
+    key_tup = (shared_obj, 1)
+    dict_with_alias = {key_tup: shared_obj}
+    detail_alias = CustomerReviewDetail.from_dict(responses[1])
+    detail_alias.additional_properties["alias_dict"] = dict_with_alias
+
+    snap_alias = _snapshot_review(detail_alias)
+    assert snap_alias is not None
+    copied_dict = snap_alias.additional_properties["alias_dict"]
+    for k, v in copied_dict.items():
+        assert k is not key_tup
+        assert k[0] is v
+        assert v is not shared_obj
+        assert v.name == "shared_alias"
+
+    # Set member containing oversized tuple skips snapshot delivery
+    set_with_huge_tuple = {tuple(range(1001))}
+    detail_set_huge = CustomerReviewDetail.from_dict(responses[1])
+    detail_set_huge.additional_properties["set_huge"] = set_with_huge_tuple
+    assert _snapshot_review(detail_set_huge) is None

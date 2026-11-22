@@ -243,10 +243,20 @@ def _is_immutable(val: Any) -> bool:
     return val is None or val is UNSET or type(val) in _IMMUTABLE_TYPES
 
 
-def _get_obj_attrs(obj: Any) -> list[tuple[str, Any]]:
-    result: dict[str, Any] = {}
-    if hasattr(obj, "__dict__") and isinstance(obj.__dict__, dict):
-        result.update(obj.__dict__)
+def _assign_target(target: Any, key: Any, is_attr: bool, val: Any) -> None:
+    if is_attr:
+        slot_or_name, is_desc = key
+        if is_desc:
+            slot_or_name.__set__(target, val)
+        else:
+            setattr(target, slot_or_name, val)
+    else:
+        target[key] = val
+
+
+def _get_obj_attrs(obj: Any) -> list[tuple[Any, bool, Any]]:
+    items: list[tuple[Any, bool, Any]] = []
+    seen_slots: set[int] = set()
 
     for cls in type(obj).__mro__:
         raw_slots = getattr(cls, "__slots__", None)
@@ -260,13 +270,22 @@ def _get_obj_attrs(obj: Any) -> list[tuple[str, Any]]:
                 attr_name = f"_{cls.__name__.lstrip('_')}{s}"
             else:
                 attr_name = s
-            if attr_name not in result and hasattr(obj, attr_name):
+            desc = cls.__dict__.get(attr_name)
+            if desc is not None and hasattr(desc, "__get__") and hasattr(desc, "__set__"):
+                if id(desc) in seen_slots:
+                    continue
+                seen_slots.add(id(desc))
                 try:
-                    result[attr_name] = getattr(obj, attr_name)
+                    val = desc.__get__(obj, type(obj))
+                    items.append((desc, True, val))
                 except AttributeError:
                     pass
 
-    return list(result.items())
+    if hasattr(obj, "__dict__") and isinstance(obj.__dict__, dict):
+        for k, v in obj.__dict__.items():
+            items.append((k, False, v))
+
+    return items
 
 
 _ITEM_TASK = 1
@@ -275,6 +294,8 @@ _LIST_EXPAND = 3
 _OBJ_EXPAND = 4
 _TUPLE_EXPAND = 5
 _TUPLE_FINALIZE = 6
+_SET_FINALIZE = 7
+_DICT_ITEM_FINALIZE = 8
 _EXPAND_BATCH_SIZE = 64
 _MAX_SAFE_TUPLE_SIZE = 1000
 _MAX_SAFE_BUFFER_SIZE = 65_536
@@ -304,34 +325,21 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         if task_type == _ITEM_TASK:
             key, is_attr, val = it_or_key, extra[0], extra[1]
             if _is_immutable(val):
-                if is_attr:
-                    setattr(target, key, val)
-                else:
-                    target[key] = val
+                _assign_target(target, key, is_attr, val)
                 continue
             val_id = id(val)
             if val_id in memo:
-                resolved = memo[val_id]
-                if is_attr:
-                    setattr(target, key, resolved)
-                else:
-                    target[key] = resolved
+                _assign_target(target, key, is_attr, memo[val_id])
                 continue
             if type(val) is dict:
                 new_dict: dict[Any, Any] = {}
                 memo[val_id] = new_dict
-                if is_attr:
-                    setattr(target, key, new_dict)
-                else:
-                    target[key] = new_dict
+                _assign_target(target, key, is_attr, new_dict)
                 stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
             elif type(val) is list:
                 new_list: list[Any] = []
                 memo[val_id] = new_list
-                if is_attr:
-                    setattr(target, key, new_list)
-                else:
-                    target[key] = new_list
+                _assign_target(target, key, is_attr, new_list)
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
             elif isinstance(val, tuple):
                 if len(val) > _MAX_SAFE_TUPLE_SIZE:
@@ -342,16 +350,13 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     else:
                         try:
                             val_cls: Any = type(val)
-                            res_empty = val_cls()
+                            res_empty = tuple.__new__(val_cls, ())
                         except Exception:
-                            res_empty = ()
+                            return None
                     memo[val_id] = res_empty
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         stack.append((_OBJ_EXPAND, res_empty, iter(_get_obj_attrs(val))))
-                    if is_attr:
-                        setattr(target, key, res_empty)
-                    else:
-                        target[key] = res_empty
+                    _assign_target(target, key, is_attr, res_empty)
                 else:
                     temp_list: list[Any] = []
                     stack.append(
@@ -370,10 +375,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 new_dict = copy.copy(val)
                 new_dict.clear()
                 memo[val_id] = new_dict
-                if is_attr:
-                    setattr(target, key, new_dict)
-                else:
-                    target[key] = new_dict
+                _assign_target(target, key, is_attr, new_dict)
                 stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_dict, iter(_get_obj_attrs(val))))
@@ -381,35 +383,49 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 new_list = copy.copy(val)
                 new_list.clear()
                 memo[val_id] = new_list
-                if is_attr:
-                    setattr(target, key, new_list)
-                else:
-                    target[key] = new_list
+                _assign_target(target, key, is_attr, new_list)
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
+            elif isinstance(val, (set, frozenset)):
+                if len(val) == 0:
+                    try:
+                        res_empty = type(val)()
+                    except Exception:
+                        return None
+                    memo[val_id] = res_empty
+                    _assign_target(target, key, is_attr, res_empty)
+                else:
+                    temp_set_list: list[Any] = []
+                    stack.append((_SET_FINALIZE, target, key, is_attr, val_id, val, temp_set_list))
+                    stack.append((_LIST_EXPAND, temp_set_list, iter(val)))
             elif isinstance(val, (memoryview, bytearray)):
                 byte_count = val.nbytes if isinstance(val, memoryview) else len(val)
                 if byte_count > _MAX_SAFE_BUFFER_SIZE:
                     return None
+                resolved: Any
                 if isinstance(val, bytearray):
                     resolved = bytearray(val)
                 elif val.readonly:
                     resolved = memoryview(bytes(val))
+                    if val.format != "B" or val.ndim > 1:
+                        try:
+                            resolved = resolved.cast(val.format, shape=val.shape)
+                        except Exception:
+                            pass
                 else:
                     resolved = memoryview(bytearray(val))
+                    if val.format != "B" or val.ndim > 1:
+                        try:
+                            resolved = resolved.cast(val.format, shape=val.shape)
+                        except Exception:
+                            pass
                 memo[val_id] = resolved
-                if is_attr:
-                    setattr(target, key, resolved)
-                else:
-                    target[key] = resolved
+                _assign_target(target, key, is_attr, resolved)
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                 new_obj = copy.copy(val)
                 memo[val_id] = new_obj
-                if is_attr:
-                    setattr(target, key, new_obj)
-                else:
-                    target[key] = new_obj
+                _assign_target(target, key, is_attr, new_obj)
                 stack.append((_OBJ_EXPAND, new_obj, iter(_get_obj_attrs(val))))
             else:
                 try:
@@ -419,10 +435,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     ) from exc
                 memo[val_id] = resolved
-                if is_attr:
-                    setattr(target, key, resolved)
-                else:
-                    target[key] = resolved
+                _assign_target(target, key, is_attr, resolved)
 
         elif task_type == _DICT_EXPAND:
             target_dict, it = target, it_or_key
@@ -431,16 +444,28 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     k, v = next(it)
                 except StopIteration:
                     break
-                if _is_immutable(v):
-                    target_dict[k] = v
-                elif id(v) in memo:
-                    target_dict[k] = memo[id(v)]
+                k_done = _is_immutable(k) or id(k) in memo
+                res_k = k if _is_immutable(k) else memo.get(id(k))
+                v_done = _is_immutable(v) or id(v) in memo
+                res_v = v if _is_immutable(v) else memo.get(id(v))
+
+                if k_done and v_done:
+                    target_dict[res_k] = res_v
                 else:
+                    box = [res_k, res_v]
                     stack.append((_DICT_EXPAND, target_dict, it))
-                    stack.append((_ITEM_TASK, target_dict, k, False, v))
+                    stack.append((_DICT_ITEM_FINALIZE, target_dict, box))
+                    if not v_done:
+                        stack.append((_ITEM_TASK, box, 1, False, v))
+                    if not k_done:
+                        stack.append((_ITEM_TASK, box, 0, False, k))
                     break
             else:
                 stack.append((_DICT_EXPAND, target_dict, it))
+
+        elif task_type == _DICT_ITEM_FINALIZE:
+            target_dict, box = target, it_or_key
+            target_dict[box[0]] = box[1]
 
         elif task_type == _LIST_EXPAND:
             target_list, it = target, it_or_key
@@ -466,16 +491,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             new_obj, it = target, it_or_key
             for _ in range(_EXPAND_BATCH_SIZE):
                 try:
-                    attr, attr_val = next(it)
+                    slot_or_name, is_desc, attr_val = next(it)
                 except StopIteration:
                     break
                 if _is_immutable(attr_val):
-                    setattr(new_obj, attr, attr_val)
+                    _assign_target(new_obj, (slot_or_name, is_desc), True, attr_val)
                 elif id(attr_val) in memo:
-                    setattr(new_obj, attr, memo[id(attr_val)])
+                    _assign_target(new_obj, (slot_or_name, is_desc), True, memo[id(attr_val)])
                 else:
                     stack.append((_OBJ_EXPAND, new_obj, it))
-                    stack.append((_ITEM_TASK, new_obj, attr, True, attr_val))
+                    stack.append((_ITEM_TASK, new_obj, (slot_or_name, is_desc), True, attr_val))
                     break
             else:
                 stack.append((_OBJ_EXPAND, new_obj, it))
@@ -519,16 +544,33 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 else:
                     try:
                         orig_cls: Any = type(orig_val)
-                        res_tuple = orig_cls(temp_list)
+                        res_tuple = tuple.__new__(orig_cls, temp_list)
                     except Exception:
-                        res_tuple = tuple(temp_list)
+                        return None
                 memo[val_id] = res_tuple
             if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                 stack.append((_OBJ_EXPAND, res_tuple, iter(_get_obj_attrs(orig_val))))
-            if is_attr:
-                setattr(target, key, res_tuple)
+            _assign_target(target, key, is_attr, res_tuple)
+
+        elif task_type == _SET_FINALIZE:
+            key, is_attr, val_id, orig_val, temp_set_list = (
+                it_or_key,
+                extra[0],
+                extra[1],
+                extra[2],
+                extra[3],
+            )
+            if val_id in memo:
+                res_set = memo[val_id]
             else:
-                target[key] = res_tuple
+                try:
+                    res_set = type(orig_val)(temp_set_list)
+                except Exception:
+                    return None
+                memo[val_id] = res_set
+            if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                stack.append((_OBJ_EXPAND, res_set, iter(_get_obj_attrs(orig_val))))
+            _assign_target(target, key, is_attr, res_set)
 
     return root
 
@@ -1381,7 +1423,9 @@ class AsyncProoflineClient(AsyncOperations):
         values propagate before on_poll runs. Inline failures and awaitable failures
         observed before the deadline propagate,
         but the deadline can suppress awaitable failures even before cancellation
-        or discard, including when an outcome is already classified. Synchronous
+        or discard (and a pending future's failure can be suppressed if its done
+        callback runs after the deadline), including when an outcome is already
+        classified. Synchronous
         callbacks must return before a terminal result can be delivered and the
         polling deadline cannot interrupt them.
         """
@@ -1504,7 +1548,29 @@ class AsyncProoflineClient(AsyncOperations):
                                     finally:
                                         completed_at.append(monotonic())
 
-                                task = async_create_task(_runner())
+                                runner_coro = _runner()
+                                try:
+                                    task = async_create_task(runner_coro)
+                                except BaseException:
+                                    if (
+                                        iscoroutine(runner_coro)
+                                        and getcoroutinestate(runner_coro) == CORO_CREATED
+                                    ):
+                                        try:
+                                            runner_coro.close()
+                                        except BaseException:
+                                            pass
+                                    if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
+                                        try:
+                                            res.close()
+                                        except BaseException:
+                                            pass
+                                    elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
+                                        try:
+                                            res.close()
+                                        except BaseException:
+                                            pass
+                                    raise
                                 remaining_budget = _transport.remaining()
                                 if remaining_budget is not None and remaining_budget <= 0:
                                     _safe_cleanup_task(task, res, wrapper_started)
