@@ -2334,8 +2334,11 @@ async def test_mcp_requests_send_text_as_utf8_within_the_request_limit(mode: str
 
             await reverify(note)
             await reverify(lone)
+            before = len(server.requests)
             with pytest.raises(ValueError, match="8192"):
                 await reverify("🚀" * 2_100)
+            # The size check runs before the handshake: nothing is sent.
+            assert len(server.requests) == before
     assert len(bodies) == 2
     sent, escaped = bodies
     assert len(sent) <= 8192
