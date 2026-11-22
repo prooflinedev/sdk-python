@@ -64,6 +64,10 @@ class CommitDeploy:
              deployment of the deploy names its attempt.
         workflow_run_id (int | None | Unset): The Actions run that created the deploy's deployments; absent outside
              Actions.
+        rolled_back (bool | Unset): Whether the deploy's newest recorded check found its service serving
+             an earlier deploy again, as its console page reads it. A later check
+             that finds none clears it, while `regressed` keeps an earlier
+             regression. Older responses omit it, which reads as false. Default: False.
     """
 
     checkpoints: list[DeployCoverageCheckpoint]
@@ -122,6 +126,7 @@ class CommitDeploy:
     workflow_run_attempt: int | None | Unset = UNSET
     workflow_run_attempts: list[int] | Unset = UNSET
     workflow_run_id: int | None | Unset = UNSET
+    rolled_back: bool | Unset = False
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -231,6 +236,8 @@ class CommitDeploy:
         else:
             workflow_run_id = self.workflow_run_id
 
+        rolled_back = self.rolled_back
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -256,6 +263,8 @@ class CommitDeploy:
             field_dict["workflow_run_attempts"] = workflow_run_attempts
         if workflow_run_id is not UNSET:
             field_dict["workflow_run_id"] = workflow_run_id
+        if rolled_back is not UNSET:
+            field_dict["rolled_back"] = rolled_back
 
         return field_dict
 
@@ -1003,6 +1012,8 @@ class CommitDeploy:
 
         workflow_run_id = _parse_workflow_run_id(d.pop("workflow_run_id", UNSET))
 
+        rolled_back = d.pop("rolled_back", UNSET)
+
         commit_deploy = cls(
             checkpoints=checkpoints,
             environment_id=environment_id,
@@ -1016,6 +1027,7 @@ class CommitDeploy:
             workflow_run_attempt=workflow_run_attempt,
             workflow_run_attempts=workflow_run_attempts,
             workflow_run_id=workflow_run_id,
+            rolled_back=rolled_back,
         )
 
         commit_deploy.additional_properties = d

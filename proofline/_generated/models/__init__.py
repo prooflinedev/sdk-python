@@ -82,6 +82,7 @@ from .finding_outcomes_selector import FindingOutcomesSelector
 from .finding_outcomes_validation_sources import FindingOutcomesValidationSources
 from .finding_placement_view import FindingPlacementView
 from .finding_promotion_view import FindingPromotionView
+from .finding_rule_incident_view import FindingRuleIncidentView
 from .finding_rule_ref_view import FindingRuleRefView
 from .finding_rule_revision_view import FindingRuleRevisionView
 from .finding_support import FindingSupport
@@ -263,6 +264,7 @@ __all__ = (
     "FindingOutcomesValidationSources",
     "FindingPlacementView",
     "FindingPromotionView",
+    "FindingRuleIncidentView",
     "FindingRuleRefView",
     "FindingRuleRevisionView",
     "FindingsExportRow",

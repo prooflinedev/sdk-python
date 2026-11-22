@@ -91,6 +91,20 @@ def generate(destination: Path) -> None:
     checkpoint = document["components"]["schemas"]["DeployCoverageCheckpoint"]
     properties = checkpoint["properties"]
     checkpoint["properties"] = {"result": properties["result"], **properties}
+    # The 7.3 SDK accepts (scope, source, revision) positionally; incident
+    # came later, so it follows them.
+    revision = document["components"]["schemas"]["FindingRuleRevisionView"]
+    revision["properties"] = {
+        **{k: v for k, v in revision["properties"].items() if k != "incident"},
+        "incident": revision["properties"]["incident"],
+    }
+    # CommitDeploy's optional arguments up to workflow_run_id are positional
+    # in the 7.4 SDK; rolled_back came later, so it follows them.
+    deploy = document["components"]["schemas"]["CommitDeploy"]
+    deploy["properties"] = {
+        **{k: v for k, v in deploy["properties"].items() if k != "rolled_back"},
+        "rolled_back": deploy["properties"]["rolled_back"],
+    }
     with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
         json_document = Path(temporary) / "openapi.json"
         json_document.write_text(json.dumps(json_operations(document)))
