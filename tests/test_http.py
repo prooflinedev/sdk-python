@@ -3396,19 +3396,40 @@ asyncio.run(main())
         loop.set_exception_handler(lambda _loop, ctx: cancel_reports.append(ctx))
         try:
             fut_sync_cancel = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
-            with Server(lambda request, index: Reply(body=responses[0])) as server:
-                async with session("async", server.url) as client:
+            clock_now = [1000.0]
+            orig_client_mono = client_module.monotonic
+            orig_trans_mono = _transport.monotonic
+            client_module.monotonic = lambda: clock_now[0]
+            _transport.monotonic = lambda: clock_now[0]
+
+            def sync_cancel_on_poll(r: Any) -> Any:
+                clock_now[0] += 0.2
+                return fut_sync_cancel
+
+            running_detail = CustomerReviewDetail.from_dict(review("RUNNING"))
+
+            async def fake_sync_cancel_running(org: Any, rev: Any) -> Any:
+                return running_detail
+
+            try:
+                async with AsyncProoflineClient(
+                    token="test_token", base_url="https://api.proofline.sh"
+                ) as client:
+                    client.get_review = fake_sync_cancel_running  # type: ignore
                     res_sync_cancel = await client.wait_for_review(
                         ORG,
                         REVIEW,
                         timeout=0.1,
-                        on_poll=lambda r: fut_sync_cancel,
+                        on_poll=sync_cancel_on_poll,
                     )
                     assert res_sync_cancel.status == "TIMED_OUT"
                     await asyncio.sleep(0)
                     assert fut_sync_cancel.cancel_called is False
                     assert id(fut_sync_cancel) in _DETACHED_FUTURES
                     assert cancel_reports == []
+            finally:
+                client_module.monotonic = orig_client_mono
+                _transport.monotonic = orig_trans_mono
         finally:
             if not fut_sync_cancel.done():
                 fut_sync_cancel.set_result(None)

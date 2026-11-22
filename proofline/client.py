@@ -251,16 +251,37 @@ _IMMUTABLE_TYPES: set[type] = {
 }
 
 
-def _is_immutable(val: Any) -> bool:
+def _has_mutable_captures(val: Any, seen: set[int] | None = None) -> bool:
+    closure = getattr(val, "__closure__", None)
+    if not closure:
+        return False
+    if seen is None:
+        seen = set()
+    if id(val) in seen:
+        return False
+    seen.add(id(val))
+    for cell in closure:
+        try:
+            contents = cell.cell_contents
+        except ValueError:
+            continue
+        if not _is_immutable(contents, seen):
+            return True
+    return False
+
+
+def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     if val is None or val is UNSET or isinstance(val, type):
         return True
-    if hasattr(val, "__self__") and not _is_immutable(val.__self__):
+    if hasattr(val, "__self__") and not _is_immutable(val.__self__, seen):
         return False
     t = type(val)
     if t in _IMMUTABLE_TYPES:
         return True
     if isinstance(val, (FunctionType, BuiltinFunctionType, MethodType)):
-        return not getattr(val, "__dict__", None)
+        if getattr(val, "__dict__", None):
+            return False
+        return not _has_mutable_captures(val, seen)
     if t is datetime.datetime:
         tz = val.tzinfo
         return tz is None or type(tz) is datetime.timezone
@@ -341,6 +362,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     memo[id(detail)] = root
 
     deferred_dict_insertions: list[tuple[Any, Any, Any]] = []
+    deferred_frozenset_insertions: list[tuple[Any, Any, bool, int, Any, list[Any]]] = []
+    deferred_tuple_finalizations: list[tuple[Any, Any, bool, int, Any, list[Any]]] = []
     deferred_set_insertions: list[tuple[Any, Any, list[Any]]] = []
 
     stack: list[Any] = [(_OBJ_EXPAND, root, iter(_get_obj_attrs(detail)))]
@@ -525,9 +548,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         stack.append((_OBJ_EXPAND, res_empty_fs, iter(_get_obj_attrs(val))))
                     _assign_target(target, key, is_attr, res_empty_fs)
                 else:
-                    temp_set_list: list[Any] = []
-                    stack.append((_SET_FINALIZE, target, key, is_attr, val_id, val, temp_set_list))
-                    stack.append((_LIST_EXPAND, temp_set_list, frozenset.__iter__(val)))
+                    deferred_frozenset_insertions.append(
+                        (target, key, is_attr, val_id, val, list(val))
+                    )
+                    stack.append((_SET_EXPAND, None, iter(val)))
             elif isinstance(val, deque):
                 if deque.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
@@ -776,6 +800,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 extra[2],
                 extra[3],
             )
+            if any(x is None for x in temp_list):
+                deferred_tuple_finalizations.append(
+                    (target, key, is_attr, val_id, orig_val, temp_list)
+                )
+                continue
             if val_id in memo:
                 res_tuple = memo[val_id]
             elif type(orig_val) is tuple and all(a is b for a, b in zip(orig_val, temp_list)):
@@ -795,49 +824,78 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 stack.append((_OBJ_EXPAND, res_tuple, iter(_get_obj_attrs(orig_val))))
             _assign_target(target, key, is_attr, res_tuple)
 
-        elif task_type == _SET_FINALIZE:
-            key, is_attr, val_id, orig_val, temp_set_list = (
-                it_or_key,
-                extra[0],
-                extra[1],
-                extra[2],
-                extra[3],
-            )
-            if val_id in memo:
-                res_set = memo[val_id]
-            else:
-                if type(orig_val) is frozenset:
-                    res_set = frozenset(temp_set_list)
-                else:  # frozenset subclass
-                    try:
-                        res_set = frozenset.__new__(type(orig_val), temp_set_list)
-                    except Exception as exc:
-                        raise TypeError(
-                            "Unsupported mutable value in review extension data: "
-                            f"{type(orig_val).__name__}"
-                        ) from exc
-                if frozenset(res_set) != frozenset(temp_set_list):
-                    raise TypeError(
-                        "Unsupported mutable value in review extension data: "
-                        f"{type(orig_val).__name__}"
-                    )
-                memo[val_id] = res_set
-            if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
-                stack.append((_OBJ_EXPAND, res_set, iter(_get_obj_attrs(orig_val))))
-            _assign_target(target, key, is_attr, res_set)
-
     if _deadline_expired():
         return None
 
     deferred_custom_dict_insertions: list[tuple[Any, Any, Any]] = []
+    deferred_later_dict_insertions: list[tuple[Any, Any, Any]] = []
     for target_dict, orig_k, orig_v in deferred_dict_insertions:
         if _deadline_expired():
             return None
         if _is_immutable(orig_k):
-            v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
-            target_dict[orig_k] = v
+            if _is_immutable(orig_v):
+                target_dict[orig_k] = orig_v
+            elif id(orig_v) in memo:
+                target_dict[orig_k] = memo[id(orig_v)]
+            else:
+                deferred_later_dict_insertions.append((target_dict, orig_k, orig_v))
         else:
             deferred_custom_dict_insertions.append((target_dict, orig_k, orig_v))
+
+    for target, key, is_attr, val_id, orig_val, orig_members in deferred_frozenset_insertions:
+        if _deadline_expired():
+            return None
+        if val_id in memo:
+            res_set = memo[val_id]
+        else:
+            resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
+            if type(orig_val) is frozenset:
+                res_set = frozenset(resolved_members)
+            else:
+                try:
+                    res_set = frozenset.__new__(type(orig_val), resolved_members)
+                except Exception as exc:
+                    raise TypeError(
+                        "Unsupported mutable value in review extension data: "
+                        f"{type(orig_val).__name__}"
+                    ) from exc
+                if frozenset(res_set) != frozenset(resolved_members):
+                    raise TypeError(
+                        "Unsupported mutable value in review extension data: "
+                        f"{type(orig_val).__name__}"
+                    )
+            memo[val_id] = res_set
+            if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
+                    val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
+                    _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
+        _assign_target(target, key, is_attr, res_set)
+
+    for target_dict, orig_k, orig_v in deferred_later_dict_insertions:
+        if _deadline_expired():
+            return None
+        target_dict[orig_k] = memo[id(orig_v)]
+
+    for target, key, is_attr, val_id, orig_val, temp_list in deferred_tuple_finalizations:
+        if _deadline_expired():
+            return None
+        if val_id in memo:
+            res_tuple = memo[val_id]
+        else:
+            if type(orig_val) is tuple:
+                res_tuple = tuple(temp_list)
+            else:
+                try:
+                    orig_tuple_cls: Any = type(orig_val)
+                    res_tuple = tuple.__new__(orig_tuple_cls, temp_list)
+                except Exception:
+                    return None
+            memo[val_id] = res_tuple
+        if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+            for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
+                val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
+                _assign_target(res_tuple, (slot_or_name, is_desc), True, val_to_set)
+        _assign_target(target, key, is_attr, res_tuple)
 
     for s, orig_val, orig_members in deferred_set_insertions:
         if _deadline_expired():
@@ -870,17 +928,22 @@ def _safe_cancel_target(target: Any) -> None:
         pass
 
 
-def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
+def _detach_overdue_future(fut: Any) -> None:
     try:
-        if AsyncFuture.done(fut):
-            if not AsyncFuture.cancelled(fut):
+        is_done = fut.done() if hasattr(fut, "done") else AsyncFuture.done(fut)
+        if is_done:
+            is_canc = fut.cancelled() if hasattr(fut, "cancelled") else AsyncFuture.cancelled(fut)
+            if not is_canc:
                 try:
-                    AsyncFuture.exception(fut)
+                    if hasattr(fut, "exception"):
+                        fut.exception()
+                    else:
+                        AsyncFuture.exception(fut)
                 except Exception:
                     pass
             return
         try:
-            loop = AsyncFuture.get_loop(fut)
+            loop = fut.get_loop() if hasattr(fut, "get_loop") else AsyncFuture.get_loop(fut)
         except Exception:
             return
         try:
@@ -895,13 +958,18 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
         def _on_detached_fut_done(t: Any) -> None:
             _DETACHED_FUTURES.pop(fut_id, None)
             try:
-                if not AsyncFuture.cancelled(t):
-                    AsyncFuture.exception(t)
+                is_canc = t.cancelled() if hasattr(t, "cancelled") else False
+                if not is_canc:
+                    if hasattr(t, "exception"):
+                        t.exception()
             except BaseException:
                 pass
 
         try:
-            AsyncFuture.add_done_callback(fut, _on_detached_fut_done)
+            if hasattr(fut, "add_done_callback"):
+                fut.add_done_callback(_on_detached_fut_done)
+            else:
+                AsyncFuture.add_done_callback(fut, _on_detached_fut_done)
         except BaseException:
             _DETACHED_FUTURES.pop(fut_id, None)
     except BaseException:
@@ -909,7 +977,7 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
 
 
 def _detach_overdue_task(
-    task: AsyncTask[Any],
+    task: Any,
     res: Any,
     wrapper_started: bool,
 ) -> None:
@@ -919,13 +987,18 @@ def _detach_overdue_task(
     def _on_detached_task_done(t: Any) -> None:
         _DETACHED_TASKS.pop(task_id, None)
         try:
-            if not AsyncFuture.cancelled(t):
-                AsyncTask.exception(t)
+            is_canc = t.cancelled() if hasattr(t, "cancelled") else False
+            if not is_canc:
+                if hasattr(t, "exception"):
+                    t.exception()
         except BaseException:
             pass
 
     try:
-        AsyncFuture.add_done_callback(task, _on_detached_task_done)
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(_on_detached_task_done)
+        else:
+            AsyncFuture.add_done_callback(task, _on_detached_task_done)
     except BaseException:
         _DETACHED_TASKS.pop(task_id, None)
     if not wrapper_started:
@@ -1340,7 +1413,11 @@ class ProoflineClient(Operations):
                     snapshot = _snapshot_review(last)
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
-                        if isawaitable(res):
+                        try:
+                            res_awaitable = isawaitable(res)
+                        except Exception:
+                            raise TypeError("Callbacks must return None.") from None
+                        if res_awaitable:
                             if iscoroutine(res):
                                 try:
                                     if getcoroutinestate(res) == CORO_CREATED:
@@ -1787,9 +1864,13 @@ class AsyncProoflineClient(AsyncOperations):
                     snapshot = _snapshot_review(last)
                     if snapshot is not None and (_transport.remaining() or 0) > 0:
                         res = on_poll(snapshot)
-                        if res is not None and not isawaitable(res):
+                        try:
+                            res_awaitable = isawaitable(res)
+                        except Exception:
+                            raise TypeError("Callbacks must return None or an awaitable.") from None
+                        if res is not None and not res_awaitable:
                             raise TypeError("Callbacks must return None or an awaitable.")
-                        if isawaitable(res):
+                        if res_awaitable:
                             if res is async_current_task():
                                 raise ValueError(
                                     "Callbacks cannot return the running polling task."
@@ -1801,9 +1882,16 @@ class AsyncProoflineClient(AsyncOperations):
                                 raise ValueError("Callbacks must return unstarted coroutines.")
 
                             if isinstance(res, (AsyncTask, AsyncFuture)):
-                                if not AsyncFuture.done(res):
+                                is_done = (
+                                    res.done() if hasattr(res, "done") else AsyncFuture.done(res)
+                                )
+                                if not is_done:
                                     try:
-                                        res_loop = AsyncFuture.get_loop(res)
+                                        res_loop = (
+                                            res.get_loop()
+                                            if hasattr(res, "get_loop")
+                                            else AsyncFuture.get_loop(res)
+                                        )
                                     except Exception:
                                         res_loop = None
                                     running_loop = async_get_running_loop()
@@ -1832,8 +1920,14 @@ class AsyncProoflineClient(AsyncOperations):
                                 break
 
                             if isinstance(res, (AsyncTask, AsyncFuture)):
-                                if AsyncFuture.done(res):
-                                    AsyncFuture.result(res)
+                                is_done = (
+                                    res.done() if hasattr(res, "done") else AsyncFuture.done(res)
+                                )
+                                if is_done:
+                                    if hasattr(res, "result"):
+                                        res.result()
+                                    else:
+                                        AsyncFuture.result(res)
                                 else:
                                     completion_fut = async_get_running_loop().create_future()
                                     completed_at: list[float] = []
@@ -1843,7 +1937,10 @@ class AsyncProoflineClient(AsyncOperations):
                                         if not completion_fut.done():
                                             completion_fut.set_result(None)
 
-                                    AsyncFuture.add_done_callback(res, _on_future_done)
+                                    if hasattr(res, "add_done_callback"):
+                                        res.add_done_callback(_on_future_done)
+                                    else:
+                                        AsyncFuture.add_done_callback(res, _on_future_done)
                                     remaining_budget = _transport.remaining()
                                     if remaining_budget is not None and remaining_budget <= 0:
                                         _detach_overdue_future(res)
@@ -1862,7 +1959,10 @@ class AsyncProoflineClient(AsyncOperations):
                                         deadline_val is None or completed_at[0] <= deadline_val
                                     )
                                     if cb_finished_in_budget and completion_fut in done:
-                                        AsyncFuture.result(res)
+                                        if hasattr(res, "result"):
+                                            res.result()
+                                        else:
+                                            AsyncFuture.result(res)
                                     else:
                                         _detach_overdue_future(res)
                                         if result is not None:
@@ -1896,6 +1996,7 @@ class AsyncProoflineClient(AsyncOperations):
                                                 pass
                                         return
                                     try:
+                                        assert coro is not None
                                         await coro
                                     finally:
                                         completed_at.append(monotonic())
@@ -1925,18 +2026,53 @@ class AsyncProoflineClient(AsyncOperations):
                                     raise
                                 task_completion_fut = async_get_running_loop().create_future()
 
-                                def _on_task_done(_: Any) -> None:
+                                def _on_task_done(t: Any) -> None:
+                                    if not completed_at:
+                                        try:
+                                            is_canc = (
+                                                t.cancelled() if hasattr(t, "cancelled") else False
+                                            )
+                                            if is_canc:
+                                                completed_at.append(monotonic())
+                                        except BaseException:
+                                            pass
                                     if not task_completion_fut.done():
                                         task_completion_fut.set_result(None)
 
-                                AsyncTask.add_done_callback(task, _on_task_done)
+                                if hasattr(task, "add_done_callback"):
+                                    task.add_done_callback(_on_task_done)
+                                else:
+                                    AsyncTask.add_done_callback(task, _on_task_done)
 
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
-                                if AsyncFuture.done(task) and cb_finished_in_budget:
-                                    AsyncTask.result(task)
+                                task_is_done = (
+                                    task.done() if hasattr(task, "done") else AsyncFuture.done(task)
+                                )
+                                if task_is_done and cb_finished_in_budget:
+                                    if not wrapper_started:
+                                        if (
+                                            iscoroutine(res)
+                                            and getcoroutinestate(res) == CORO_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
+                                        elif (
+                                            isgenerator(res)
+                                            and getgeneratorstate(res) == GEN_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
+                                    if hasattr(task, "result"):
+                                        task.result()
+                                    else:
+                                        AsyncTask.result(task)
 
                                 remaining_budget = _transport.remaining()
                                 if remaining_budget is not None and remaining_budget <= 0:
@@ -1955,8 +2091,33 @@ class AsyncProoflineClient(AsyncOperations):
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
-                                if cb_finished_in_budget and task_completion_fut in done:
-                                    AsyncTask.result(task)
+                                task_is_done = (
+                                    task.done() if hasattr(task, "done") else AsyncFuture.done(task)
+                                )
+                                if cb_finished_in_budget and (
+                                    task_completion_fut in done or task_is_done
+                                ):
+                                    if not wrapper_started:
+                                        if (
+                                            iscoroutine(res)
+                                            and getcoroutinestate(res) == CORO_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
+                                        elif (
+                                            isgenerator(res)
+                                            and getgeneratorstate(res) == GEN_CREATED
+                                        ):
+                                            try:
+                                                res.close()
+                                            except BaseException:
+                                                pass
+                                    if hasattr(task, "result"):
+                                        task.result()
+                                    else:
+                                        AsyncTask.result(task)
                                 else:
                                     _detach_overdue_task(task, res, wrapper_started)
                                     if result is not None:
