@@ -286,9 +286,31 @@ def _has_mutable_captures(val: Any, seen: set[int] | None = None) -> bool:
     return False
 
 
+_SAFE_BUILTIN_CLASSES: set[type] = {
+    int,
+    float,
+    str,
+    bool,
+    bytes,
+    list,
+    dict,
+    set,
+    tuple,
+    bytearray,
+    deque,
+    defaultdict,
+    datetime.date,
+    datetime.datetime,
+    datetime.time,
+    UUID,
+}
+
+
 def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
-    if val is None or val is UNSET or isinstance(val, type):
+    if val is None or val is UNSET:
         return True
+    if isinstance(val, type):
+        return val in _SAFE_BUILTIN_CLASSES
     if hasattr(val, "__self__") and not _is_immutable(val.__self__, seen):
         return False
     t = type(val)
@@ -859,6 +881,60 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         else:
             deferred_custom_dict_insertions.append((target_dict, orig_k, orig_v))
 
+    def _flush_pending_structures() -> None:
+        nonlocal deferred_later_dict_insertions, deferred_tuple_finalizations
+        changed = True
+        while changed:
+            changed = False
+            if deferred_tuple_finalizations:
+                still_tuples = []
+                for (
+                    target,
+                    key,
+                    is_attr,
+                    val_id,
+                    orig_val,
+                    temp_list,
+                ) in deferred_tuple_finalizations:
+                    if not any(x is _UNRESOLVED_SLOT for x in temp_list):
+                        if val_id in memo:
+                            res_tuple = memo[val_id]
+                        else:
+                            if type(orig_val) is tuple:
+                                res_tuple = tuple(temp_list)
+                            else:
+                                try:
+                                    orig_tuple_cls: Any = type(orig_val)
+                                    res_tuple = tuple.__new__(orig_tuple_cls, temp_list)
+                                except Exception:
+                                    continue
+                            memo[val_id] = res_tuple
+                        if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                            for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
+                                val_to_set = (
+                                    attr_val
+                                    if _is_immutable(attr_val)
+                                    else memo.get(id(attr_val), attr_val)
+                                )
+                                _assign_target(res_tuple, (slot_or_name, is_desc), True, val_to_set)
+                        _assign_target(target, key, is_attr, res_tuple)
+                        changed = True
+                    else:
+                        still_tuples.append((target, key, is_attr, val_id, orig_val, temp_list))
+                deferred_tuple_finalizations = still_tuples
+
+            if deferred_later_dict_insertions:
+                still_dicts = []
+                for target_dict, orig_k, orig_v in deferred_later_dict_insertions:
+                    if id(orig_v) in memo:
+                        target_dict[orig_k] = memo[id(orig_v)]
+                        changed = True
+                    else:
+                        still_dicts.append((target_dict, orig_k, orig_v))
+                deferred_later_dict_insertions = still_dicts
+
+    _flush_pending_structures()
+
     pending_frozensets = deferred_frozenset_insertions
     while pending_frozensets:
         if _deadline_expired():
@@ -890,48 +966,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
                 _assign_target(target, key, is_attr, res_set)
                 progress = True
+                _flush_pending_structures()
             else:
                 remaining_frozensets.append((target, key, is_attr, val_id, orig_val, orig_members))
 
         pending_frozensets = remaining_frozensets
 
-        if progress and deferred_later_dict_insertions:
-            still_later_dict: list[tuple[Any, Any, Any]] = []
-            for target_dict, orig_k, orig_v in deferred_later_dict_insertions:
-                if id(orig_v) in memo:
-                    target_dict[orig_k] = memo[id(orig_v)]
-                else:
-                    still_later_dict.append((target_dict, orig_k, orig_v))
-            deferred_later_dict_insertions = still_later_dict
-
         if not progress and pending_frozensets:
             raise TypeError("Unsupported cyclic reference in frozenset")
 
-    for target_dict, orig_k, orig_v in deferred_later_dict_insertions:
-        if _deadline_expired():
-            return None
-        target_dict[orig_k] = memo[id(orig_v)]
-
-    for target, key, is_attr, val_id, orig_val, temp_list in deferred_tuple_finalizations:
-        if _deadline_expired():
-            return None
-        if val_id in memo:
-            res_tuple = memo[val_id]
-        else:
-            if type(orig_val) is tuple:
-                res_tuple = tuple(temp_list)
-            else:
-                try:
-                    orig_tuple_cls: Any = type(orig_val)
-                    res_tuple = tuple.__new__(orig_tuple_cls, temp_list)
-                except Exception:
-                    return None
-            memo[val_id] = res_tuple
-        if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
-            for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
-                val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
-                _assign_target(res_tuple, (slot_or_name, is_desc), True, val_to_set)
-        _assign_target(target, key, is_attr, res_tuple)
+    _flush_pending_structures()
 
     for s, orig_val, orig_members in deferred_set_insertions:
         if _deadline_expired():
@@ -1449,10 +1493,10 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery. Oversized tuples, buffers, or deques with more than 65,536 items in
-        review extension data skip on_poll snapshot delivery even with time
-        remaining, and snapshot copy errors on unsupported mutable values
-        propagate before on_poll runs.
+        delivery. Oversized tuples, buffers, memoryviews with more than 65,536 bytes, or
+        deques with more than 65,536 items in review extension data skip on_poll snapshot
+        delivery even with time remaining, and snapshot copy errors on unsupported mutable
+        values propagate before on_poll runs.
         on_poll exceptions and return-validation errors propagate even when a
         terminal outcome has already been determined and can prevent the waiter
         from returning a classified outcome. Synchronous callbacks must return
@@ -1897,10 +1941,10 @@ class AsyncProoflineClient(AsyncOperations):
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Oversized
-        tuples, buffers, or deques with more than 65,536 items in review extension data skip
-        on_poll snapshot delivery even with time remaining, and snapshot copy errors on
-        unsupported mutable values propagate before on_poll runs. Callback return-validation
-        errors and exceptions propagate even when a terminal outcome has already been
+        tuples, buffers, memoryviews with more than 65,536 bytes, or deques with more than
+        65,536 items in review extension data skip on_poll snapshot delivery even with time
+        remaining, and snapshot copy errors on unsupported mutable values propagate before
+        on_poll runs. Callback return-validation errors and exceptions propagate even when a
         determined, preventing the waiter from returning a classified outcome.
         Inline failures and awaitable failures observed before the deadline propagate,
         but the deadline can suppress awaitable failures (and a pending future's
@@ -2012,10 +2056,14 @@ class AsyncProoflineClient(AsyncOperations):
                                         if not completion_fut.done():
                                             completion_fut.set_result(None)
 
-                                    if hasattr(res, "add_done_callback"):
-                                        res.add_done_callback(_on_future_done)
-                                    else:
-                                        AsyncFuture.add_done_callback(res, _on_future_done)
+                                    try:
+                                        if hasattr(res, "add_done_callback"):
+                                            res.add_done_callback(_on_future_done)
+                                        else:
+                                            AsyncFuture.add_done_callback(res, _on_future_done)
+                                    except BaseException:
+                                        _detach_overdue_future(res)
+                                        raise
                                     remaining_budget = _transport.remaining()
                                     if remaining_budget is not None and remaining_budget <= 0:
                                         _detach_overdue_future(res)
@@ -2114,10 +2162,14 @@ class AsyncProoflineClient(AsyncOperations):
                                     if not task_completion_fut.done():
                                         task_completion_fut.set_result(None)
 
-                                if hasattr(task, "add_done_callback"):
-                                    task.add_done_callback(_on_task_done)
-                                else:
-                                    AsyncTask.add_done_callback(task, _on_task_done)
+                                try:
+                                    if hasattr(task, "add_done_callback"):
+                                        task.add_done_callback(_on_task_done)
+                                    else:
+                                        AsyncTask.add_done_callback(task, _on_task_done)
+                                except BaseException:
+                                    _detach_overdue_task(task, res, wrapper_started)
+                                    raise
 
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (

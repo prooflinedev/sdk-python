@@ -3181,7 +3181,7 @@ asyncio.run(main())
 
     detail = CustomerReviewDetail.from_dict(responses[1])
     detail.additional_properties["deep"] = deep_container
-    detail.additional_properties["custom_tuple"] = ({"nested": "val"}, 42)
+    detail.additional_properties["custom_tuple"] = ({"nested": "val"}, None, 42)
 
     from proofline.client import _snapshot_review
 
@@ -3203,12 +3203,15 @@ asyncio.run(main())
     walk_snap["val"] = "mutated_leaf"
     assert walk_orig["val"] == "deepest"
 
-    assert isinstance(snap.additional_properties["custom_tuple"], tuple)
-    assert (
-        snap.additional_properties["custom_tuple"][0]
-        is not detail.additional_properties["custom_tuple"][0]
-    )
-    assert snap.additional_properties["custom_tuple"][0]["nested"] == "val"
+    custom_t = snap.additional_properties["custom_tuple"]
+    orig_t = detail.additional_properties["custom_tuple"]
+    assert isinstance(custom_t, tuple)
+    assert custom_t[0] is not orig_t[0]
+    assert custom_t[0]["nested"] == "val"
+    assert custom_t[1] is None
+    assert custom_t[2] == 42
+    custom_t[0]["nested"] = "mutated_nested"
+    assert orig_t[0]["nested"] == "val"
 
     # Tuple with deeply nested list must snapshot iteratively without RecursionError
     deep_nested_list: Any = "leaf"
@@ -3399,31 +3402,40 @@ asyncio.run(main())
                         )
                     )
                     cb_wait_task = asyncio.create_task(cb_started.wait())
-                    done_set, _ = await asyncio.wait(
-                        {cb_wait_task, waiter_task},
-                        timeout=5.0,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if waiter_task in done_set and not cb_started.is_set():
-                        cb_wait_task.cancel()
-                        await waiter_task
-                    assert cb_wait_task in done_set, "Callback startup timed out"
-                    waiter_task.cancel()
-                    cancelled = False
                     try:
-                        await waiter_task
-                    except asyncio.CancelledError:
-                        cancelled = True
-                    assert cancelled
-                    assert id(unhash_failing_fut) in _DETACHED_FUTURES
-                    unhash_failing_fut.set_exception(RuntimeError("unhashable late failure"))
-                    await asyncio.sleep(0)
-                    assert id(unhash_failing_fut) not in _DETACHED_FUTURES
-                    import gc
+                        done_set, _ = await asyncio.wait(
+                            {cb_wait_task, waiter_task},
+                            timeout=5.0,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if waiter_task in done_set and not cb_started.is_set():
+                            cb_wait_task.cancel()
+                            await waiter_task
+                        assert cb_wait_task in done_set, "Callback startup timed out"
+                        waiter_task.cancel()
+                        cancelled = False
+                        try:
+                            await waiter_task
+                        except asyncio.CancelledError:
+                            cancelled = True
+                        assert cancelled
+                        assert id(unhash_failing_fut) in _DETACHED_FUTURES
+                        unhash_failing_fut.set_exception(RuntimeError("unhashable late failure"))
+                        await asyncio.sleep(0)
+                        assert id(unhash_failing_fut) not in _DETACHED_FUTURES
+                        import gc
 
-                    del unhash_failing_fut
-                    gc.collect()
-                    assert unhash_cancel_reports == []
+                        del unhash_failing_fut
+                        gc.collect()
+                        assert unhash_cancel_reports == []
+                    finally:
+                        for t in (cb_wait_task, waiter_task):
+                            if not t.done():
+                                t.cancel()
+                            try:
+                                await t
+                            except (asyncio.CancelledError, BaseException):
+                                pass
         finally:
             loop.set_exception_handler(old_h_unhash)
 
@@ -4090,12 +4102,17 @@ asyncio.run(main())
         def __eq__(self, other: Any) -> bool:
             return isinstance(other, HashablePayload) and self.key == other.key
 
+    leaf_payload = HashablePayload("leaf_key", ["leaf_original"])
+    inner_fs = frozenset([leaf_payload])
+    outer_fs = frozenset([inner_fs])
+
     member_payload = HashablePayload("test_key", ["original_val"])
     normal_s = {member_payload}
     normal_fs = frozenset([member_payload])
     detail_sets = CustomerReviewDetail.from_dict(responses[1])
     detail_sets.additional_properties["normal_s"] = normal_s
     detail_sets.additional_properties["normal_fs"] = normal_fs
+    detail_sets.additional_properties["nested_fs"] = outer_fs
     snap_sets = _snapshot_review(detail_sets)
     assert snap_sets is not None
     assert snap_sets.additional_properties["normal_s"] == normal_s
@@ -4110,6 +4127,21 @@ asyncio.run(main())
     assert cloned_member in copied_fs
     cloned_member.payload.append("mutated_val")
     assert member_payload.payload == ["original_val"]
+
+    copied_outer = snap_sets.additional_properties["nested_fs"]
+    assert isinstance(copied_outer, frozenset)
+    assert len(copied_outer) == 1
+    copied_inner = next(iter(copied_outer))
+    assert isinstance(copied_inner, frozenset)
+    assert len(copied_inner) == 1
+    copied_leaf = next(iter(copied_inner))
+    assert copied_leaf == leaf_payload
+    assert copied_leaf is not leaf_payload
+    assert copied_leaf.payload is not leaf_payload.payload
+    assert copied_inner in copied_outer
+    assert copied_leaf in copied_inner
+    copied_leaf.payload.append("leaf_mutated")
+    assert leaf_payload.payload == ["leaf_original"]
 
     # Deque traversed and snapshotted, and weakref inside deque rejected
     from collections import deque
@@ -4226,16 +4258,28 @@ asyncio.run(main())
     assert inspect.getgeneratorstate(gen_cb_inst) == inspect.GEN_CLOSED
 
     # wait_for_review cleans up already-failed foreign-loop future returned when budget is exhausted
+    class TrackedForeignFuture(asyncio.Future[None]):
+        def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+            super().__init__(loop=loop)
+            self.exception_retrieved = False
+
+        def exception(self) -> BaseException | None:
+            self.exception_retrieved = True
+            return super().exception()
+
+    import weakref
+
     foreign_loop_failed = asyncio.new_event_loop()
     foreign_reports: list[dict[str, Any]] = []
     foreign_loop_failed.set_exception_handler(lambda _loop, ctx: foreign_reports.append(ctx))
     try:
-        foreign_box: list[Any] = [foreign_loop_failed.create_future()]
-        foreign_box[0].set_exception(RuntimeError("foreign future failed"))
+        foreign_failed_box: list[Any] = [TrackedForeignFuture(loop=foreign_loop_failed)]
+        foreign_failed_box[0].set_exception(RuntimeError("foreign future failed"))
+        foreign_failed_fut_ref = weakref.ref(foreign_failed_box[0])
 
         def foreign_fail_cb(r: Any) -> Any:
             clock.now += 150.0
-            return foreign_box[0]
+            return foreign_failed_box[0]
 
         with Server(lambda request, index: Reply(body=responses[1])) as server:
             async with session("async", server.url) as client:
@@ -4246,10 +4290,15 @@ asyncio.run(main())
                     on_poll=foreign_fail_cb,
                 )
                 assert res_foreign.status == "COMPLETED"
-                foreign_box.clear()
+                tracked_ref = foreign_failed_fut_ref()
+                assert tracked_ref is not None
+                assert tracked_ref.exception_retrieved is True
+                del tracked_ref
+                foreign_failed_box.clear()
                 import gc
 
                 gc.collect()
+                assert foreign_failed_fut_ref() is None
                 assert foreign_reports == []
     finally:
         foreign_loop_failed.close()
