@@ -33,10 +33,11 @@ class ReviewInvestigationFinding:
         requirement (None | ReviewRequirementTarget | Unset): The delivery target whose confirmed gate requirement the
             finding
              reports. Absent for an investigation's finding.
-        source (Literal['CONFIRMED_REQUIREMENT'] | Literal['INVESTIGATION'] | None | Unset): What published the finding:
-            a confirmed gate requirement its
-             delivery target's services violate, or the environment investigation.
-             Every listed finding carries it.
+        source (Literal['CONFIRMED_REQUIREMENT'] | Literal['INVESTIGATION'] | Literal['SHARED_IDENTITY'] | None |
+            Unset): What published the finding: a confirmed gate requirement its
+             delivery target's services violate, the environment investigation, or
+             a workload that loses an access because the change narrows the grants
+             of an identity it shares. Every listed finding carries it.
     """
 
     area: str
@@ -45,7 +46,13 @@ class ReviewInvestigationFinding:
     detail: str
     title: str
     requirement: None | ReviewRequirementTarget | Unset = UNSET
-    source: Literal["CONFIRMED_REQUIREMENT"] | Literal["INVESTIGATION"] | None | Unset = UNSET
+    source: (
+        Literal["CONFIRMED_REQUIREMENT"]
+        | Literal["INVESTIGATION"]
+        | Literal["SHARED_IDENTITY"]
+        | None
+        | Unset
+    ) = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -72,7 +79,13 @@ class ReviewInvestigationFinding:
         else:
             requirement = self.requirement
 
-        source: Literal["CONFIRMED_REQUIREMENT"] | Literal["INVESTIGATION"] | None | Unset
+        source: (
+            Literal["CONFIRMED_REQUIREMENT"]
+            | Literal["INVESTIGATION"]
+            | Literal["SHARED_IDENTITY"]
+            | None
+            | Unset
+        )
         if isinstance(self.source, Unset):
             source = UNSET
         else:
@@ -136,7 +149,13 @@ class ReviewInvestigationFinding:
 
         def _parse_source(
             data: object,
-        ) -> Literal["CONFIRMED_REQUIREMENT"] | Literal["INVESTIGATION"] | None | Unset:
+        ) -> (
+            Literal["CONFIRMED_REQUIREMENT"]
+            | Literal["INVESTIGATION"]
+            | Literal["SHARED_IDENTITY"]
+            | None
+            | Unset
+        ):
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -165,8 +184,26 @@ class ReviewInvestigationFinding:
                 return componentsschemas_kian_finding_source_type_1
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not (type(data) is str and data == "SHARED_IDENTITY"):
+                    raise TypeError()
+                componentsschemas_kian_finding_source_type_2 = cast(
+                    Literal["SHARED_IDENTITY"], data
+                )
+                if componentsschemas_kian_finding_source_type_2 != "SHARED_IDENTITY":
+                    raise ValueError(
+                        f"/components/schemas/KianFindingSource_type_2 must match const 'SHARED_IDENTITY', got '{componentsschemas_kian_finding_source_type_2}'"
+                    )
+                return componentsschemas_kian_finding_source_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             return cast(
-                Literal["CONFIRMED_REQUIREMENT"] | Literal["INVESTIGATION"] | None | Unset, data
+                Literal["CONFIRMED_REQUIREMENT"]
+                | Literal["INVESTIGATION"]
+                | Literal["SHARED_IDENTITY"]
+                | None
+                | Unset,
+                data,
             )
 
         source = _parse_source(d.pop("source", UNSET))
