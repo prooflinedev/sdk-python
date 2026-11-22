@@ -590,6 +590,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     deferred_frozenset_insertions.append(
                         (target, key, is_attr, val_id, val, list(val))
                     )
+                    if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                        for slot_or_name, is_desc, attr_val in _get_obj_attrs(val):
+                            if not _is_immutable(attr_val) and id(attr_val) not in memo:
+                                stack.append((_ITEM_TASK, None, None, False, attr_val))
                     stack.append((_SET_EXPAND, None, iter(val)))
             elif isinstance(val, deque):
                 if deque.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
@@ -870,26 +874,20 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     if _deadline_expired():
         return None
 
-    deferred_custom_dict_insertions: list[tuple[Any, Any, Any]] = []
-    deferred_later_dict_insertions: list[tuple[Any, Any, Any]] = []
+    dict_ordered_entries: dict[int, list[tuple[Any, Any]]] = {}
+    dict_targets: dict[int, Any] = {}
+    dict_next_index: dict[int, int] = {}
+
     for target_dict, orig_k, orig_v in deferred_dict_insertions:
-        if _deadline_expired():
-            return None
-        if _is_immutable(orig_k):
-            if _is_immutable(orig_v):
-                target_dict[orig_k] = orig_v
-            elif id(orig_v) in memo:
-                target_dict[orig_k] = memo[id(orig_v)]
-            else:
-                deferred_later_dict_insertions.append((target_dict, orig_k, orig_v))
-        else:
-            deferred_custom_dict_insertions.append((target_dict, orig_k, orig_v))
+        td_id = id(target_dict)
+        if td_id not in dict_ordered_entries:
+            dict_ordered_entries[td_id] = []
+            dict_targets[td_id] = target_dict
+            dict_next_index[td_id] = 0
+        dict_ordered_entries[td_id].append((orig_k, orig_v))
 
     def _flush_pending_structures() -> None:
-        nonlocal \
-            deferred_later_dict_insertions, \
-            deferred_custom_dict_insertions, \
-            deferred_tuple_finalizations
+        nonlocal deferred_tuple_finalizations, deferred_set_insertions
         changed = True
         while changed:
             changed = False
@@ -903,7 +901,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     orig_val,
                     temp_list,
                 ) in deferred_tuple_finalizations:
-                    if not any(x is _UNRESOLVED_SLOT for x in temp_list):
+                    elements_ready = not any(x is _UNRESOLVED_SLOT for x in temp_list)
+                    attrs_ready = True
+                    if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                        for _, _, attr_val in _get_obj_attrs(orig_val):
+                            if not _is_immutable(attr_val) and id(attr_val) not in memo:
+                                attrs_ready = False
+                                break
+                    if elements_ready and attrs_ready:
                         if val_id in memo:
                             res_tuple = memo[val_id]
                         else:
@@ -919,9 +924,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                             for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
                                 val_to_set = (
-                                    attr_val
-                                    if _is_immutable(attr_val)
-                                    else memo.get(id(attr_val), attr_val)
+                                    attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
                                 )
                                 _assign_target(res_tuple, (slot_or_name, is_desc), True, val_to_set)
                         _assign_target(target, key, is_attr, res_tuple)
@@ -930,39 +933,47 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         still_tuples.append((target, key, is_attr, val_id, orig_val, temp_list))
                 deferred_tuple_finalizations = still_tuples
 
-            if deferred_later_dict_insertions:
-                still_dicts = []
-                for target_dict, orig_k, orig_v in deferred_later_dict_insertions:
-                    if id(orig_v) in memo:
-                        target_dict[orig_k] = memo[id(orig_v)]
+            if deferred_set_insertions:
+                still_sets = []
+                for s, orig_val, orig_members in deferred_set_insertions:
+                    if all(_is_immutable(m) or id(m) in memo for m in orig_members):
+                        resolved_members = [
+                            m if _is_immutable(m) else memo[id(m)] for m in orig_members
+                        ]
+                        set.update(s, resolved_members)
+                        if set(s) != set(resolved_members):
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(orig_val).__name__}"
+                            )
                         changed = True
                     else:
-                        still_dicts.append((target_dict, orig_k, orig_v))
-                deferred_later_dict_insertions = still_dicts
+                        still_sets.append((s, orig_val, orig_members))
+                deferred_set_insertions = still_sets
 
-            if deferred_custom_dict_insertions:
-                still_custom = []
-                for target_dict, orig_k, orig_v in deferred_custom_dict_insertions:
-                    if id(orig_k) in memo:
-                        k = memo[id(orig_k)]
-                        if _is_immutable(orig_v):
-                            target_dict[k] = orig_v
-                            changed = True
-                        elif id(orig_v) in memo:
-                            target_dict[k] = memo[id(orig_v)]
-                            changed = True
-                        else:
-                            still_custom.append((target_dict, orig_k, orig_v))
+            for td_id, entries in dict_ordered_entries.items():
+                target_dict = dict_targets[td_id]
+                idx = dict_next_index[td_id]
+                while idx < len(entries):
+                    orig_k, orig_v = entries[idx]
+                    k_ready = _is_immutable(orig_k) or id(orig_k) in memo
+                    v_ready = _is_immutable(orig_v) or id(orig_v) in memo
+                    if k_ready and v_ready:
+                        k = orig_k if _is_immutable(orig_k) else memo[id(orig_k)]
+                        v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
+                        target_dict[k] = v
+                        idx += 1
+                        changed = True
                     else:
-                        still_custom.append((target_dict, orig_k, orig_v))
-                deferred_custom_dict_insertions = still_custom
+                        break
+                dict_next_index[td_id] = idx
 
     _flush_pending_structures()
 
     def _is_member_state_populated(m_clone: Any) -> bool:
         if _is_immutable(m_clone):
             return True
-        visited = set()
+        visited: set[int] = set()
         stack_nodes = [m_clone]
         container_ids: set[int] = set()
         while stack_nodes:
@@ -974,6 +985,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             container_ids.add(cid)
             if hasattr(cur, "__dict__") and isinstance(cur.__dict__, dict):
                 stack_nodes.append(cur.__dict__)
+            if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
+                for _, _, slot_val in _get_obj_attrs(cur):
+                    if not _is_immutable(slot_val):
+                        stack_nodes.append(slot_val)
             if isinstance(cur, dict):
                 for k, v in cur.items():
                     if not _is_immutable(k):
@@ -988,11 +1003,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         for target, _, _, _, _, _ in pending_frozensets:
             if id(target) in container_ids:
                 return False
-        for target_dict, _, _ in deferred_later_dict_insertions:
-            if id(target_dict) in container_ids:
+        for s, _, _ in deferred_set_insertions:
+            if id(s) in container_ids:
                 return False
-        for target_dict, _, _ in deferred_custom_dict_insertions:
-            if id(target_dict) in container_ids:
+        for td_id, entries in dict_ordered_entries.items():
+            if td_id in container_ids and dict_next_index[td_id] < len(entries):
                 return False
         return True
 
@@ -1007,7 +1022,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 _assign_target(target, key, is_attr, memo[val_id])
                 progress = True
                 continue
-            if all(_is_immutable(m) or id(m) in memo for m in orig_members):
+            members_ready = all(_is_immutable(m) or id(m) in memo for m in orig_members)
+            attrs_ready = True
+            if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                for _, _, attr_val in _get_obj_attrs(orig_val):
+                    if not _is_immutable(attr_val) and id(attr_val) not in memo:
+                        attrs_ready = False
+                        break
+            if members_ready and attrs_ready:
                 resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
                 if not all(_is_member_state_populated(rm) for rm in resolved_members):
                     remaining_frozensets.append(
@@ -1046,24 +1068,6 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             raise TypeError("Unsupported cyclic reference in frozenset")
 
     _flush_pending_structures()
-
-    for s, orig_val, orig_members in deferred_set_insertions:
-        if _deadline_expired():
-            return None
-        resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
-        set.update(s, resolved_members)
-        if set(s) != set(resolved_members):
-            raise TypeError(
-                f"Unsupported mutable value in review extension data: {type(orig_val).__name__}"
-            )
-
-    for target_dict, orig_k, orig_v in deferred_custom_dict_insertions:
-        if _deadline_expired():
-            return None
-        k = memo[id(orig_k)]
-        v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
-        target_dict[k] = v
-
     return root
 
 
@@ -1642,6 +1646,8 @@ class ProoflineClient(Operations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
+                if (_transport.remaining() or 0) <= 0:
+                    break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
                     snapshot = _snapshot_review(last)
@@ -2091,6 +2097,8 @@ class AsyncProoflineClient(AsyncOperations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
+                if (_transport.remaining() or 0) <= 0:
+                    break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if on_poll is not None and (_transport.remaining() or 0) > 0:
                     snapshot = _snapshot_review(last)
@@ -2165,7 +2173,11 @@ class AsyncProoflineClient(AsyncOperations):
                                     else:
                                         AsyncFuture.result(res)
                                 else:
-                                    completion_fut = async_get_running_loop().create_future()
+                                    try:
+                                        completion_fut = async_get_running_loop().create_future()
+                                    except BaseException:
+                                        _detach_overdue_future(res)
+                                        raise
                                     completed_at: list[float] = []
 
                                     def _on_future_done(_: Any) -> None:

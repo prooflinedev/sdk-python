@@ -3155,6 +3155,21 @@ async def main() -> None:
             gc.collect()
             assert unhandled_exceptions == []
         finally:
+            coro_trigger.set()
+            if waiter_coro_task is not None and not waiter_coro_task.done():
+                waiter_coro_task.cancel()
+                try:
+                    await waiter_coro_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            for t in list(client_module._DETACHED_TASKS.values()):
+                if hasattr(t, "done") and not t.done():
+                    t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            await asyncio.sleep(0.01)
             loop.set_exception_handler(old_handler)
 
         # Case 7: Overdue callback awaiting the polling task is not cancelled
@@ -3352,19 +3367,22 @@ asyncio.run(main())
 
         suspended_coro = dummy_coro()
         try:
-            suspended_coro.send(None)
-        except StopIteration:
-            pass
+            try:
+                suspended_coro.send(None)
+            except StopIteration:
+                pass
 
-        with Server(lambda request, index: Reply(body=responses[1])) as server:
-            async with session("async", server.url) as client:
-                with pytest.raises(ValueError, match="unstarted coroutines"):
-                    await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=10,
-                        on_poll=lambda r: suspended_coro,
-                    )
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="unstarted coroutines"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=10,
+                            on_poll=lambda r: suspended_coro,
+                        )
+        finally:
+            suspended_coro.close()
 
         # Started coroutine raises ValueError even after deadline expiry without closing
         async def dummy_started() -> None:
@@ -3464,12 +3482,12 @@ asyncio.run(main())
         try:
             with Server(lambda request, index: Reply(body=responses[0])) as server:
                 async with session("async", server.url) as client:
-                    unhash_failing_fut: Any = UnhashableFuture(loop=loop)
+                    unhash_box: list[Any] = [UnhashableFuture(loop=loop)]
                     cb_started = asyncio.Event()
 
                     def unhash_failing_cb(r: Any) -> Any:
                         cb_started.set()
-                        return unhash_failing_fut
+                        return unhash_box[0]
 
                     waiter_task = asyncio.create_task(
                         client.wait_for_review(
@@ -3497,13 +3515,15 @@ asyncio.run(main())
                         except asyncio.CancelledError:
                             cancelled = True
                         assert cancelled
-                        assert id(unhash_failing_fut) in _DETACHED_FUTURES
-                        unhash_failing_fut.set_exception(RuntimeError("unhashable late failure"))
+                        target_fut = unhash_box[0]
+                        assert id(target_fut) in _DETACHED_FUTURES
+                        target_fut.set_exception(RuntimeError("unhashable late failure"))
                         await asyncio.sleep(0)
-                        assert id(unhash_failing_fut) not in _DETACHED_FUTURES
+                        assert id(target_fut) not in _DETACHED_FUTURES
+                        del target_fut
+                        unhash_box.clear()
                         import gc
 
-                        del unhash_failing_fut
                         gc.collect()
                         assert unhash_cancel_reports == []
                     finally:
@@ -3514,6 +3534,9 @@ asyncio.run(main())
                                 await t
                             except (asyncio.CancelledError, BaseException):
                                 pass
+                        if unhash_box and not unhash_box[0].done():
+                            unhash_box[0].set_result(None)
+                        await asyncio.sleep(0)
         finally:
             loop.set_exception_handler(old_h_unhash)
 
@@ -3523,10 +3546,15 @@ asyncio.run(main())
             def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
                 super().__init__(loop=loop)
                 self.cancel_called = False
+                self.exception_calls = 0
 
             def cancel(self, msg: Any = None) -> bool:
                 self.cancel_called = True
                 raise RuntimeError("synchronous cancel error")
+
+            def exception(self) -> BaseException | None:
+                self.exception_calls += 1
+                return super().exception()
 
         cancel_reports: list[dict[str, Any]] = []
         loop = asyncio.get_running_loop()
@@ -3534,7 +3562,7 @@ asyncio.run(main())
         loop.set_exception_handler(lambda _loop, ctx: cancel_reports.append(ctx))
         try:
             try:
-                fut_sync_cancel = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
+                fut_sync_cancel: Any = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
                 clock_now = [1000.0]
                 orig_client_mono = client_module.monotonic
                 orig_trans_mono = _transport.monotonic
@@ -3571,9 +3599,18 @@ asyncio.run(main())
                     _transport.monotonic = orig_trans_mono
             finally:
                 if not fut_sync_cancel.done():
-                    fut_sync_cancel.set_result(None)
+                    fut_sync_cancel.set_exception(RuntimeError("sync cancel late error"))
                 await asyncio.sleep(0)
                 assert id(fut_sync_cancel) not in _DETACHED_FUTURES
+                assert fut_sync_cancel.exception_calls > 0
+                import weakref
+
+                fut_sync_ref = weakref.ref(fut_sync_cancel)
+                del fut_sync_cancel
+                import gc
+
+                gc.collect()
+                assert fut_sync_ref() is None
         finally:
             loop.set_exception_handler(old_h)
 
@@ -4193,6 +4230,7 @@ asyncio.run(main())
     detail_sets.additional_properties["normal_s"] = normal_s
     detail_sets.additional_properties["normal_fs"] = normal_fs
     detail_sets.additional_properties["nested_fs"] = outer_fs
+    detail_sets.additional_properties["fs_list"] = [normal_fs, normal_fs]
     snap_sets = _snapshot_review(detail_sets)
     assert snap_sets is not None
     assert snap_sets.additional_properties["normal_s"] == normal_s
@@ -4200,6 +4238,9 @@ asyncio.run(main())
     copied_fs = snap_sets.additional_properties["normal_fs"]
     assert isinstance(copied_fs, frozenset)
     assert len(copied_fs) == 1
+    copied_list = snap_sets.additional_properties["fs_list"]
+    assert copied_list[0] is copied_list[1]
+    assert copied_list[0] is copied_fs
     cloned_member = next(iter(copied_fs))
     assert cloned_member == member_payload
     assert cloned_member is not member_payload
