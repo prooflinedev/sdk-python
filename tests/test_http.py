@@ -2750,20 +2750,31 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 producer_task = asyncio.create_task(fail_late_soon())
                 return late_fut
 
-            with Server(lambda request, index: Reply(body=responses[1])) as server:
-                async with session("async", server.url) as client:
-                    res_late = await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=100.0,
-                        on_poll=late_fail_cb,
-                    )
-                    assert res_late.status == "COMPLETED"
-                    assert late_fut.done()
-                    assert isinstance(late_fut.exception(), ValueError)
-                    assert clock.now >= 200.0
-                    if producer_task is not None:
-                        await producer_task
+            unhandled_reports: list[dict[str, Any]] = []
+            loop = asyncio.get_running_loop()
+            old_h = loop.get_exception_handler()
+            loop.set_exception_handler(lambda _loop, ctx: unhandled_reports.append(ctx))
+            try:
+                with Server(lambda request, index: Reply(body=responses[1])) as server:
+                    async with session("async", server.url) as client:
+                        res_late = await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=100.0,
+                            on_poll=late_fail_cb,
+                        )
+                        assert res_late.status == "COMPLETED"
+                        assert late_fut.done()
+                        assert clock.now >= 200.0
+                        if producer_task is not None:
+                            await producer_task
+                        del late_fut
+                        import gc
+
+                        gc.collect()
+                        assert unhandled_reports == []
+            finally:
+                loop.set_exception_handler(old_h)
 
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
         # tasks cannot stall teardown.
@@ -2940,22 +2951,27 @@ async def main() -> None:
             loop.set_exception_handler(old_handler)
 
         # Case 7: Overdue callback awaiting the polling task is not cancelled
+        polling_waiter_task: asyncio.Task[Any] | None = None
         callback_completed_7 = asyncio.Event()
 
         async def awaiting_runner_callback(r: Any) -> None:
-            await asyncio.sleep(0.3)
+            assert polling_waiter_task is not None
+            outcome_inner = await polling_waiter_task
+            assert outcome_inner.status == "TIMED_OUT"
             callback_completed_7.set()
 
         client.get_review = fake_running  # type: ignore
-        res_7 = await client.wait_for_review(
-            ORG,
-            REVIEW,
-            timeout=0.2,
-            on_poll=awaiting_runner_callback,
+        polling_waiter_task = asyncio.create_task(
+            client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=0.2,
+                on_poll=awaiting_runner_callback,
+            )
         )
+        res_7 = await polling_waiter_task
         assert res_7.status == "TIMED_OUT"
-        await asyncio.sleep(0)
-        await callback_completed_7.wait()
+        await asyncio.wait_for(callback_completed_7.wait(), timeout=1.0)
 
 asyncio.run(main())
 """
@@ -3787,6 +3803,44 @@ asyncio.run(main())
     assert type(copied_deceptive_s) is DeceptiveSet
     assert "member1" in copied_deceptive_s and "member2" in copied_deceptive_s
 
+    # Set subclass whose constructor inserts extra member is rejected with TypeError
+    class InjectedSet(set[Any]):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.add("injected_shared_member")
+
+    injected_s = InjectedSet(["orig_member"])
+    detail_injected_s = CustomerReviewDetail.from_dict(responses[1])
+    detail_injected_s.additional_properties["injected_s"] = injected_s
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_injected_s)
+
+    # Standard built-in set and frozenset properly snapshotted
+    normal_s = {"member1", "member2"}
+    normal_fs = frozenset(["fs1", "fs2"])
+    detail_sets = CustomerReviewDetail.from_dict(responses[1])
+    detail_sets.additional_properties["normal_s"] = normal_s
+    detail_sets.additional_properties["normal_fs"] = normal_fs
+    snap_sets = _snapshot_review(detail_sets)
+    assert snap_sets is not None
+    assert snap_sets.additional_properties["normal_s"] == normal_s
+    assert snap_sets.additional_properties["normal_s"] is not normal_s
+    assert snap_sets.additional_properties["normal_fs"] == normal_fs
+
+    # Deque traversed and snapshotted, and weakref inside deque rejected
+    from collections import deque
+
+    dq: deque[Any] = deque(["elem1", ["nested_list"]])
+    detail_dq = CustomerReviewDetail.from_dict(responses[1])
+    detail_dq.additional_properties["dq"] = dq
+    snap_dq = _snapshot_review(detail_dq)
+    assert snap_dq is not None
+    copied_dq = snap_dq.additional_properties["dq"]
+    assert isinstance(copied_dq, deque)
+    assert copied_dq == dq
+    assert copied_dq is not dq
+    assert copied_dq[1] is not dq[1]
+
     # Deceptive bytearray subclass underreporting len with > 65536 bytes is skipped
     class DeceptiveByteArray(bytearray):
         def __len__(self) -> int:
@@ -3811,6 +3865,13 @@ asyncio.run(main())
     with pytest.raises(TypeError, match="Unsupported mutable value"):
         _snapshot_review(detail_weakref)
 
+    # Deque containing weak reference rejected with TypeError
+    dq_weakref: deque[Any] = deque([weak_ref_obj])
+    detail_dq_weakref = CustomerReviewDetail.from_dict(responses[1])
+    detail_dq_weakref.additional_properties["dq_weakref"] = dq_weakref
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_dq_weakref)
+
     # Synchronous wait_for_review passed an async callback raises TypeError
     async def async_cb_on_sync_client(r: Any) -> None:
         pass
@@ -3825,6 +3886,19 @@ asyncio.run(main())
                     REVIEW,
                     timeout=10,
                     on_poll=async_cb_on_sync_client,
+                )
+
+    # Synchronous wait_for_review rejecting non-None return with TypeError
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as sync_cli:
+            with pytest.raises(TypeError, match="Callbacks must return None"):
+                await call(
+                    sync_cli,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lambda r: False,
                 )
 
     # Synchronous wait_for_review closes generator awaitable in GEN_CREATED
@@ -3851,12 +3925,19 @@ asyncio.run(main())
 
     # Detach overdue future retrieves exception from completed failed foreign future
     foreign_loop_failed = asyncio.new_event_loop()
+    foreign_reports: list[dict[str, Any]] = []
+    foreign_loop_failed.set_exception_handler(lambda _loop, ctx: foreign_reports.append(ctx))
     try:
-        failed_foreign_fut = foreign_loop_failed.create_future()
+        failed_foreign_fut: Any = foreign_loop_failed.create_future()
         failed_foreign_fut.set_exception(RuntimeError("foreign future failed"))
         from proofline.client import _detach_overdue_future
 
         _detach_overdue_future(failed_foreign_fut)
+        del failed_foreign_fut
+        import gc
+
+        gc.collect()
+        assert foreign_reports == []
     finally:
         foreign_loop_failed.close()
 

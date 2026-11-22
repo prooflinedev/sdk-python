@@ -27,6 +27,7 @@ from asyncio import (
 from asyncio import (
     wait as async_wait,
 )
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from inspect import (
     CORO_CREATED,
@@ -409,21 +410,63 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 set_len = set.__len__(val) if isinstance(val, set) else frozenset.__len__(val)
                 set_it = set.__iter__(val) if isinstance(val, set) else frozenset.__iter__(val)
                 if set_len == 0:
-                    try:
-                        res_empty = type(val)()
-                    except Exception as exc:
-                        raise TypeError(
-                            "Unsupported mutable value in review extension data: "
-                            f"{type(val).__name__}"
-                        ) from exc
+                    if type(val) is set:
+                        res_empty = set()
+                    elif type(val) is frozenset:
+                        res_empty = frozenset()
+                    else:
+                        try:
+                            inst = type(val)()
+                            if len(inst) != 0:
+                                raise TypeError(
+                                    "Unsupported mutable value in review extension data: "
+                                    f"{type(val).__name__}"
+                                )
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            ) from exc
+                        if isinstance(val, set):
+                            res_empty = set.__new__(type(val))
+                            set.clear(res_empty)
+                        else:
+                            res_empty = frozenset.__new__(type(val), ())
+                        if set(res_empty) if isinstance(val, set) else frozenset(res_empty):
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            )
                     memo[val_id] = res_empty
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         stack.append((_OBJ_EXPAND, res_empty, iter(_get_obj_attrs(val))))
                     _assign_target(target, key, is_attr, res_empty)
                 else:
+                    if type(val) is not set and type(val) is not frozenset:
+                        try:
+                            inst = type(val)()
+                            if len(inst) != 0:
+                                raise TypeError(
+                                    "Unsupported mutable value in review extension data: "
+                                    f"{type(val).__name__}"
+                                )
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            ) from exc
                     temp_set_list: list[Any] = []
                     stack.append((_SET_FINALIZE, target, key, is_attr, val_id, val, temp_set_list))
                     stack.append((_LIST_EXPAND, temp_set_list, set_it))
+            elif isinstance(val, deque):
+                if len(val) > _MAX_SAFE_BUFFER_SIZE:
+                    return None
+                new_deque: deque[Any] = deque(maxlen=val.maxlen)
+                memo[val_id] = new_deque
+                _assign_target(target, key, is_attr, new_deque)
+                stack.append((_LIST_EXPAND, new_deque, iter(val)))
+                if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    stack.append((_OBJ_EXPAND, new_deque, iter(_get_obj_attrs(val))))
             elif isinstance(val, bytearray):
                 if bytearray.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
@@ -659,13 +702,36 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             if val_id in memo:
                 res_set = memo[val_id]
             else:
-                try:
-                    res_set = type(orig_val)(temp_set_list)
-                except Exception as exc:
+                if type(orig_val) is set:
+                    res_set = set(temp_set_list)
+                elif type(orig_val) is frozenset:
+                    res_set = frozenset(temp_set_list)
+                elif isinstance(orig_val, set):
+                    try:
+                        res_set = set.__new__(type(orig_val))
+                        set.clear(res_set)
+                        set.update(res_set, temp_set_list)
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(orig_val).__name__}"
+                        ) from exc
+                else:  # frozenset subclass
+                    try:
+                        res_set = frozenset.__new__(type(orig_val), temp_set_list)
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(orig_val).__name__}"
+                        ) from exc
+                expected_members = set(temp_set_list)
+                if (set(res_set) if isinstance(orig_val, set) else frozenset(res_set)) != (
+                    expected_members if isinstance(orig_val, set) else frozenset(temp_set_list)
+                ):
                     raise TypeError(
                         "Unsupported mutable value in review extension data: "
                         f"{type(orig_val).__name__}"
-                    ) from exc
+                    )
                 memo[val_id] = res_set
             if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                 stack.append((_OBJ_EXPAND, res_set, iter(_get_obj_attrs(orig_val))))
@@ -1151,6 +1217,8 @@ class ProoflineClient(Operations):
                                 "on_poll returned an awaitable; use AsyncProoflineClient "
                                 "for async callbacks."
                             )
+                        if res is not None:
+                            raise TypeError(f"Callbacks must return None, got {type(res).__name__}")
                 if result is not None:
                     return result
                 if (_transport.remaining() or 0) <= 0:
@@ -1549,8 +1617,10 @@ class AsyncProoflineClient(AsyncOperations):
         Inline failures and awaitable failures observed before the deadline propagate,
         but the deadline can suppress awaitable failures (and a pending future's
         failure can be suppressed if its done callback runs after the deadline),
-        including when an outcome is already classified. Overdue callbacks are
-        detached without cancelling them and may continue running. Synchronous
+        including when an outcome is already classified. When the deadline expires,
+        unstarted coroutines returned by on_poll are closed without being scheduled,
+        while already-running callback tasks and futures are detached without
+        cancellation and may continue running. Synchronous
         callbacks must return before a terminal result can be delivered and the
         polling deadline cannot interrupt them.
         """
@@ -1626,7 +1696,7 @@ class AsyncProoflineClient(AsyncOperations):
 
                             if isinstance(res, (AsyncTask, AsyncFuture)):
                                 if AsyncFuture.done(res):
-                                    res.result()
+                                    AsyncFuture.result(res)
                                 else:
                                     completed_at: list[float] = []
                                     AsyncFuture.add_done_callback(
@@ -1649,7 +1719,7 @@ class AsyncProoflineClient(AsyncOperations):
                                         deadline_val is None or completed_at[0] <= deadline_val
                                     )
                                     if cb_finished_in_budget and res in done:
-                                        res.result()
+                                        AsyncFuture.result(res)
                                     else:
                                         _detach_overdue_future(res)
                                         if result is not None:
@@ -1733,7 +1803,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
                                 if cb_finished_in_budget and task in done:
-                                    task.result()
+                                    AsyncTask.result(task)
                                 else:
                                     _detach_overdue_task(task, res, wrapper_started)
                                     if result is not None:
