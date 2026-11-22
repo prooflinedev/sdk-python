@@ -2636,8 +2636,9 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 r.status = "MUTATED"
                 r.actions.publish = True
                 r.additional_properties["mutated"] = "mutated_value"
-                if r.assessments:
-                    r.assessments[0].checks.receipt_recorded = False
+                assert len(r.assessments) > 0
+                assert r.assessments[0].checks.receipt_recorded is True
+                r.assessments[0].checks.receipt_recorded = False
 
             async with session("async", server.url) as client:
                 result = await call(
@@ -2738,13 +2739,15 @@ async def test_wait_for_review_invokes_on_poll_callback(
             # Late-observed pending future failure preserves the classified outcome
             late_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             late_fut.add_done_callback(lambda _: setattr(clock, "now", clock.now + 200.0))
+            producer_task: asyncio.Task[None] | None = None
 
             async def fail_late_soon() -> None:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0)
                 late_fut.set_exception(ValueError("late failure"))
 
             def late_fail_cb(r: Any) -> asyncio.Future[None]:
-                asyncio.create_task(fail_late_soon())
+                nonlocal producer_task
+                producer_task = asyncio.create_task(fail_late_soon())
                 return late_fut
 
             with Server(lambda request, index: Reply(body=responses[1])) as server:
@@ -2756,6 +2759,11 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         on_poll=late_fail_cb,
                     )
                     assert res_late.status == "COMPLETED"
+                    assert late_fut.done()
+                    assert isinstance(late_fut.exception(), ValueError)
+                    assert clock.now >= 200.0
+                    if producer_task is not None:
+                        await producer_task
 
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
         # tasks cannot stall teardown.
@@ -2780,7 +2788,7 @@ async def main() -> None:
     async with AsyncProoflineClient(
         token="test_token", base_url="https://api.proofline.sh"
     ) as client:
-        # Case 1: Pending same-loop Future that times out
+        # Case 1: Pending same-loop Future that times out is detached without cancelling
         pending_fut: asyncio.Future[None] | None = None
 
         def pending_future_callback(r: Any) -> asyncio.Future[None]:
@@ -2800,7 +2808,8 @@ async def main() -> None:
         assert res.status == "TIMED_OUT"
         await asyncio.sleep(0)
         assert pending_fut is not None
-        assert pending_fut.cancelled()
+        assert not pending_fut.cancelled()
+        assert not pending_fut.done()
 
         # Case 2: Pending same-loop Future that completes within budget without cancellation
         completed_fut = asyncio.get_running_loop().create_future()
@@ -2825,19 +2834,14 @@ async def main() -> None:
         assert completed_fut.done()
         assert not completed_fut.cancelled()
 
-        # Case 3: Blocking cleanup callback on non-terminal review
-        cancellation_requested = asyncio.Event()
-        cleanup_blocked = asyncio.Event()
-        cleanup_completed_3 = asyncio.Event()
+        # Case 3: Overdue callback continues running without cancellation on non-terminal review
+        callback_running = asyncio.Event()
+        callback_finished = asyncio.Event()
 
-        async def blocking_cleanup_coro(r: Any) -> None:
-            try:
-                await asyncio.sleep(5.0)
-            except asyncio.CancelledError:
-                cancellation_requested.set()
-                await cleanup_blocked.wait()
-                cleanup_completed_3.set()
-                raise
+        async def continuing_coro(r: Any) -> None:
+            callback_running.set()
+            await asyncio.sleep(0.3)
+            callback_finished.set()
 
         client.get_review = fake_running  # type: ignore
 
@@ -2846,30 +2850,23 @@ async def main() -> None:
             ORG,
             REVIEW,
             timeout=0.2,
-            on_poll=blocking_cleanup_coro,
+            on_poll=continuing_coro,
         )
         elapsed3 = time.monotonic() - start_t3
         assert 0.18 <= elapsed3 <= 0.60
         assert res.status == "TIMED_OUT"
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert cancellation_requested.is_set()
-        cleanup_blocked.set()
-        await cleanup_completed_3.wait()
+        assert callback_running.is_set()
+        assert not callback_finished.is_set()
+        await callback_finished.wait()
 
-        # Case 4: Blocking cleanup callback on terminal review
-        cancellation_requested_term = asyncio.Event()
-        cleanup_blocked_term = asyncio.Event()
-        cleanup_completed_4 = asyncio.Event()
+        # Case 4: Overdue callback continues running without cancellation on terminal review
+        callback_running_term = asyncio.Event()
+        callback_finished_term = asyncio.Event()
 
-        async def blocking_cleanup_coro_term(r: Any) -> None:
-            try:
-                await asyncio.sleep(5.0)
-            except asyncio.CancelledError:
-                cancellation_requested_term.set()
-                await cleanup_blocked_term.wait()
-                cleanup_completed_4.set()
-                raise
+        async def continuing_coro_term(r: Any) -> None:
+            callback_running_term.set()
+            await asyncio.sleep(0.3)
+            callback_finished_term.set()
 
         client.get_review = fake_completed  # type: ignore
 
@@ -2878,16 +2875,14 @@ async def main() -> None:
             ORG,
             REVIEW,
             timeout=0.2,
-            on_poll=blocking_cleanup_coro_term,
+            on_poll=continuing_coro_term,
         )
         elapsed4 = time.monotonic() - start_t4
         assert 0.18 <= elapsed4 <= 0.60
         assert res.status == "COMPLETED"
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert cancellation_requested_term.is_set()
-        cleanup_blocked_term.set()
-        await cleanup_completed_4.wait()
+        assert callback_running_term.is_set()
+        assert not callback_finished_term.is_set()
+        await callback_finished_term.wait()
 
         # Case 5: Suspending callback that succeeds within budget
         resumed_within_budget = False
@@ -2908,17 +2903,15 @@ async def main() -> None:
         assert res.status == "COMPLETED"
         assert resumed_within_budget
 
-        # Case 6: Pending future exception during cancellation does not replace TIMED_OUT
+        # Case 6: Overdue callback failure is observed without leaking to loop handler
         detached_task: asyncio.Task[None] | None = None
+        callback_trigger = asyncio.Event()
 
-        async def failing_cancel_coro(r: Any) -> None:
+        async def failing_overdue_coro(r: Any) -> None:
             nonlocal detached_task
             detached_task = asyncio.current_task()
-            fut = asyncio.get_running_loop().create_future()
-            try:
-                await fut
-            except asyncio.CancelledError:
-                raise RuntimeError("error during cancellation")
+            await callback_trigger.wait()
+            raise RuntimeError("error in overdue callback")
 
         unhandled_exceptions: list[dict[str, Any]] = []
         loop = asyncio.get_running_loop()
@@ -2930,12 +2923,14 @@ async def main() -> None:
                 ORG,
                 REVIEW,
                 timeout=0.2,
-                on_poll=failing_cancel_coro,
+                on_poll=failing_overdue_coro,
             )
             assert res_clean.status == "TIMED_OUT"
             assert detached_task is not None
+            callback_trigger.set()
             done, _ = await asyncio.wait({detached_task}, timeout=2.0)
             assert detached_task in done
+            del done
             del detached_task
             import gc
 
@@ -2943,6 +2938,24 @@ async def main() -> None:
             assert unhandled_exceptions == []
         finally:
             loop.set_exception_handler(old_handler)
+
+        # Case 7: Overdue callback awaiting the polling task is not cancelled
+        callback_completed_7 = asyncio.Event()
+
+        async def awaiting_runner_callback(r: Any) -> None:
+            await asyncio.sleep(0.3)
+            callback_completed_7.set()
+
+        client.get_review = fake_running  # type: ignore
+        res_7 = await client.wait_for_review(
+            ORG,
+            REVIEW,
+            timeout=0.2,
+            on_poll=awaiting_runner_callback,
+        )
+        assert res_7.status == "TIMED_OUT"
+        await asyncio.sleep(0)
+        await callback_completed_7.wait()
 
 asyncio.run(main())
 """
@@ -2963,8 +2976,9 @@ asyncio.run(main())
         r.status = "MUTATED"
         r.actions.publish = True
         r.additional_properties["mutated"] = "mutated_value"
-        if r.assessments:
-            r.assessments[0].checks.receipt_recorded = False
+        assert len(r.assessments) > 0
+        assert r.assessments[0].checks.receipt_recorded is True
+        r.assessments[0].checks.receipt_recorded = False
 
     async def async_mutating_callback(r: Any) -> None:
         nonlocal mutated_count
@@ -2972,8 +2986,9 @@ asyncio.run(main())
         r.status = "MUTATED"
         r.actions.publish = True
         r.additional_properties["mutated"] = "mutated_value"
-        if r.assessments:
-            r.assessments[0].checks.receipt_recorded = False
+        assert len(r.assessments) > 0
+        assert r.assessments[0].checks.receipt_recorded is True
+        r.assessments[0].checks.receipt_recorded = False
 
     with Server(lambda request, index: Reply(body=responses[1])) as server:
         async with session(mode, server.url) as client:
@@ -3191,7 +3206,7 @@ asyncio.run(main())
                     )
                     assert res_sync_cancel.status == "TIMED_OUT"
                     await asyncio.sleep(0)
-                    assert fut_sync_cancel.cancel_called is True
+                    assert fut_sync_cancel.cancel_called is False
                     assert cancel_reports == []
         finally:
             loop.set_exception_handler(old_h)
@@ -3811,3 +3826,55 @@ asyncio.run(main())
                     timeout=10,
                     on_poll=async_cb_on_sync_client,
                 )
+
+    # Synchronous wait_for_review closes generator awaitable in GEN_CREATED
+    import types
+
+    @types.coroutine
+    def gen_coro_cb(r: Any) -> Any:
+        yield
+
+    gen_cb_inst = gen_coro_cb(None)
+
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as sync_cli:
+            with pytest.raises(TypeError, match="AsyncProoflineClient"):
+                await call(
+                    sync_cli,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lambda r: gen_cb_inst,
+                )
+    assert inspect.getgeneratorstate(gen_cb_inst) == inspect.GEN_CLOSED
+
+    # Detach overdue future retrieves exception from completed failed foreign future
+    foreign_loop_failed = asyncio.new_event_loop()
+    try:
+        failed_foreign_fut = foreign_loop_failed.create_future()
+        failed_foreign_fut.set_exception(RuntimeError("foreign future failed"))
+        from proofline.client import _detach_overdue_future
+
+        _detach_overdue_future(failed_foreign_fut)
+    finally:
+        foreign_loop_failed.close()
+
+    # Datetime subclass whose replace fails and fallback lacks copied_tz raises TypeError
+    class BrokenSubDatetime(datetime):
+        def __new__(cls, y: int, m: int, d: int, tzinfo: Any = None) -> Any:
+            return super().__new__(cls, y, m, d, tzinfo=tzinfo)
+
+        def replace(self, **kwargs: Any) -> Any:
+            raise RuntimeError("cannot replace")
+
+        def __copy__(self) -> Any:
+            return super().__new__(
+                BrokenSubDatetime, self.year, self.month, self.day, tzinfo=self.tzinfo
+            )
+
+    broken_dt = BrokenSubDatetime(2026, 11, 22, tzinfo=custom_tz_inst)
+    detail_broken_dt = CustomerReviewDetail.from_dict(responses[1])
+    detail_broken_dt.additional_properties["broken_dt"] = broken_dt
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_broken_dt)

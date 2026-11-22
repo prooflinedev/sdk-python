@@ -505,7 +505,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 "Unsupported mutable value in review extension data: "
                                 f"{type(val).__name__}"
                             ) from exc
-                    if new_dt is val:
+                    if new_dt is val or new_dt.tzinfo is not copied_tz:
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
                             f"{type(val).__name__}"
@@ -683,6 +683,13 @@ def _safe_cancel_target(target: Any) -> None:
 
 def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
     try:
+        if AsyncFuture.done(fut):
+            if not AsyncFuture.cancelled(fut):
+                try:
+                    AsyncFuture.exception(fut)
+                except Exception:
+                    pass
+            return
         try:
             loop = AsyncFuture.get_loop(fut)
         except Exception:
@@ -693,22 +700,11 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
             return
         if loop is not running_loop or loop.is_closed():
             return
-        if AsyncFuture.done(fut):
-            if not AsyncFuture.cancelled(fut):
-                try:
-                    AsyncFuture.exception(fut)
-                except Exception:
-                    pass
-            return
         try:
             AsyncFuture.add_done_callback(
                 fut,
                 lambda t: AsyncFuture.exception(t) if not AsyncFuture.cancelled(t) else None,
             )
-        except BaseException:
-            pass
-        try:
-            loop.call_soon(_safe_cancel_target, fut)
         except BaseException:
             pass
     except BaseException:
@@ -725,12 +721,6 @@ def _detach_overdue_task(
             task,
             lambda t: AsyncTask.exception(t) if not AsyncFuture.cancelled(t) else None,
         )
-    except BaseException:
-        pass
-    try:
-        loop = AsyncFuture.get_loop(task)
-        if loop.is_running() and not loop.is_closed():
-            loop.call_soon(_safe_cancel_target, task)
     except BaseException:
         pass
     if not wrapper_started:
@@ -1114,10 +1104,11 @@ class ProoflineClient(Operations):
         delivery. Oversized tuples or buffers in review extension data skip
         on_poll snapshot delivery even with time remaining, and snapshot copy
         errors on unsupported mutable values propagate before on_poll runs.
-        on_poll exceptions propagate even when a terminal outcome
-        has already been determined. Synchronous callbacks must return before a
-        terminal result can be delivered and the polling deadline cannot
-        interrupt them.
+        on_poll exceptions and return-validation errors propagate even when a
+        terminal outcome has already been determined and can prevent the waiter
+        from returning a classified outcome. Synchronous callbacks must not
+        return awaitables and must return before a terminal result can be
+        delivered; the polling deadline cannot interrupt them.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -1147,6 +1138,12 @@ class ProoflineClient(Operations):
                             if iscoroutine(res):
                                 try:
                                     if getcoroutinestate(res) == CORO_CREATED:
+                                        res.close()
+                                except Exception:
+                                    pass
+                            elif isgenerator(res):
+                                try:
+                                    if getgeneratorstate(res) == GEN_CREATED:
                                         res.close()
                                 except Exception:
                                     pass
@@ -1546,12 +1543,14 @@ class AsyncProoflineClient(AsyncOperations):
         is reached are delivered; deadline expiry can suppress delivery. Oversized
         tuples or buffers in review extension data skip on_poll snapshot delivery
         even with time remaining, and snapshot copy errors on unsupported mutable
-        values propagate before on_poll runs. Inline failures and awaitable failures
-        observed before the deadline propagate,
-        but the deadline can suppress awaitable failures even before cancellation
-        or discard (and a pending future's failure can be suppressed if its done
-        callback runs after the deadline), including when an outcome is already
-        classified. Synchronous
+        values propagate before on_poll runs. Callback return-validation errors
+        and exceptions propagate even when a terminal outcome has already been
+        determined, preventing the waiter from returning a classified outcome.
+        Inline failures and awaitable failures observed before the deadline propagate,
+        but the deadline can suppress awaitable failures (and a pending future's
+        failure can be suppressed if its done callback runs after the deadline),
+        including when an outcome is already classified. Overdue callbacks are
+        detached without cancelling them and may continue running. Synchronous
         callbacks must return before a terminal result can be delivered and the
         polling deadline cannot interrupt them.
         """
