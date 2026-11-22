@@ -1431,6 +1431,75 @@ async def test_retry_after_is_bounded_by_wait_deadline(
 
 
 @MODES
+@pytest.mark.parametrize(
+    ("wait", "retry", "timed_out"),
+    [
+        (10, False, True),  # The wait deadline ends the only attempt.
+        (40, True, True),  # It ends the retry of a 503, not the first attempt.
+        (300, False, False),  # The request's own 30 s timeout ends it mid-wait.
+    ],
+)
+async def test_a_request_the_wait_deadline_ends_is_timed_out_while_the_clock_lags(
+    mode: str, wait: float, retry: bool, timed_out: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A request stops on its own clock. The wait's clock can trail it by a few
+    # milliseconds, as Windows' 15.6 ms monotonic ticks do before Python 3.13, so
+    # the wait cannot read its clock to learn which deadline ended the request.
+    clock = Clock(monkeypatch)
+    lag = 0.004
+    attempts = 0
+    sync_request = _sync_http.Transport.handle_request
+    async_request = httpx2.AsyncHTTPTransport.handle_async_request
+
+    def expired() -> httpx2.ReadTimeout:
+        caller = _transport.DEADLINE.get()
+        assert caller is not None
+        # The attempt runs until its I/O deadline, the wait's or its own, by a
+        # request clock that is lag ahead of the clock the wait reads.
+        clock.now = min(caller, clock.now + 30) - lag
+        return httpx2.ReadTimeout("The request deadline expired.")
+
+    def reaches_server() -> bool:
+        nonlocal attempts
+        attempts += 1
+        return retry and attempts == 1
+
+    def stop_sync(transport: _sync_http.Transport, request: httpx2.Request) -> httpx2.Response:
+        if reaches_server():
+            return sync_request(transport, request)
+        raise expired()
+
+    async def stop_async(
+        transport: httpx2.AsyncHTTPTransport, request: httpx2.Request
+    ) -> httpx2.Response:
+        if reaches_server():
+            return await async_request(transport, request)
+        raise expired()
+
+    monkeypatch.setattr(_sync_http.Transport, "handle_request", stop_sync)
+    monkeypatch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", stop_async)
+    with Server(
+        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "20"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            if timed_out:
+                result = await call(client, "wait_for_review", ORG, REVIEW, timeout=wait)
+                assert result.status == "TIMED_OUT"
+                assert result.review is None
+                assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+            else:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, "wait_for_review", ORG, REVIEW, timeout=wait)
+                assert raised.value.type == "urn:proofline:sdk:timeout"
+            # The wait leaves no deadline state behind for the caller's next request.
+            assert _transport.DEADLINE.get() is None
+            assert _transport.DEADLINE_BOUND.get() is False
+        assert attempts == (2 if retry else 1)
+        assert len(server.requests) == (1 if retry else 0)
+        assert clock.delays == ([20] if retry else [])
+
+
+@MODES
 @pytest.mark.parametrize("status", [429, 503, 403])
 async def test_deadline_expiring_with_a_received_problem_chunk_keeps_retry_policy(
     mode: str, status: int, monkeypatch: pytest.MonkeyPatch
