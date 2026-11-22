@@ -26,7 +26,7 @@ from asyncio import (
 from asyncio import (
     wait as async_wait,
 )
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from inspect import (
     CORO_CREATED,
@@ -42,7 +42,13 @@ from inspect import (
 )
 from string import hexdigits
 from time import monotonic, sleep
-from types import MemberDescriptorType, TracebackType
+from types import (
+    BuiltinFunctionType,
+    FunctionType,
+    MemberDescriptorType,
+    MethodType,
+    TracebackType,
+)
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
 from urllib.parse import quote
 from uuid import UUID
@@ -251,6 +257,8 @@ def _is_immutable(val: Any) -> bool:
     t = type(val)
     if t in _IMMUTABLE_TYPES:
         return True
+    if isinstance(val, (FunctionType, BuiltinFunctionType, MethodType)):
+        return not getattr(val, "__dict__", None)
     if t is datetime.datetime:
         tz = val.tzinfo
         return tz is None or type(tz) is datetime.timezone
@@ -258,6 +266,8 @@ def _is_immutable(val: Any) -> bool:
 
 
 def _assign_target(target: Any, key: Any, is_attr: bool, val: Any) -> None:
+    if target is None:
+        return
     if is_attr:
         slot_or_name, is_desc = key
         if is_desc:
@@ -304,7 +314,7 @@ _OBJ_EXPAND = 4
 _TUPLE_EXPAND = 5
 _TUPLE_FINALIZE = 6
 _SET_FINALIZE = 7
-_DICT_ITEM_FINALIZE = 8
+_SET_EXPAND = 8
 _EXPAND_BATCH_SIZE = 64
 _MAX_SAFE_TUPLE_SIZE = 1000
 _MAX_SAFE_BUFFER_SIZE = 65_536
@@ -322,6 +332,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     memo: dict[int, Any] = {id(UNSET): UNSET}
     root = object.__new__(type(detail))
     memo[id(detail)] = root
+
+    deferred_dict_insertions: list[tuple[Any, Any, Any]] = []
+    deferred_set_insertions: list[tuple[Any, Any, list[Any]]] = []
 
     stack: list[Any] = [(_OBJ_EXPAND, root, iter(_get_obj_attrs(detail)))]
 
@@ -390,10 +403,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     )
                 try:
-                    from collections import defaultdict
-
                     if isinstance(val, defaultdict):
-                        new_dict = type(val)(val.default_factory)
+                        new_dict = type(val)(None)
                     else:
                         new_dict = dict.__new__(type(val))
                     dict.clear(new_dict)
@@ -403,9 +414,19 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     ) from exc
                 memo[val_id] = new_dict
                 _assign_target(target, key, is_attr, new_dict)
-                stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
+                if isinstance(val, defaultdict) and val.default_factory is not None:
+                    stack.append(
+                        (
+                            _ITEM_TASK,
+                            new_dict,
+                            ("default_factory", False),
+                            True,
+                            val.default_factory,
+                        )
+                    )
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_dict, iter(_get_obj_attrs(val))))
+                stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
             elif isinstance(val, list):
                 if "__copy__" in type(val).__dict__:
                     raise TypeError(
@@ -423,10 +444,13 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                     stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
-            elif isinstance(val, (set, frozenset)):
-                set_len = set.__len__(val) if isinstance(val, set) else frozenset.__len__(val)
-                set_it = set.__iter__(val) if isinstance(val, set) else frozenset.__iter__(val)
-                if type(val) is not set and type(val) is not frozenset:
+            elif isinstance(val, set):
+                if "__copy__" in type(val).__dict__:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
+                set_len = set.__len__(val)
+                if type(val) is not set:
                     try:
                         if set_len == 0:
                             inspect_signature(type(val).__init__).bind(type(val))
@@ -437,44 +461,68 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             "Unsupported mutable value in review extension data: "
                             f"{type(val).__name__}"
                         )
-                if set_len == 0:
-                    if type(val) is set:
-                        res_empty = set()
-                    elif type(val) is frozenset:
-                        res_empty = frozenset()
-                    else:
-                        if isinstance(val, set):
-                            try:
-                                res_empty = set.__new__(type(val))
-                                set.clear(res_empty)
-                            except Exception as exc:
-                                raise TypeError(
-                                    "Unsupported mutable value in review extension data: "
-                                    f"{type(val).__name__}"
-                                ) from exc
+                if type(val) is set:
+                    new_set: set[Any] = set()
+                else:
+                    try:
+                        new_set = set.__new__(type(val))
+                        set.clear(new_set)
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        ) from exc
+                    if set(new_set):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
+                memo[val_id] = new_set
+                _assign_target(target, key, is_attr, new_set)
+                if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    stack.append((_OBJ_EXPAND, new_set, iter(_get_obj_attrs(val))))
+                if set_len > 0:
+                    deferred_set_insertions.append((new_set, val, list(val)))
+                    stack.append((_SET_EXPAND, None, iter(val)))
+            elif isinstance(val, frozenset):
+                fs_len = frozenset.__len__(val)
+                if type(val) is not frozenset:
+                    try:
+                        if fs_len == 0:
+                            inspect_signature(type(val).__init__).bind(type(val))
                         else:
-                            try:
-                                res_empty = frozenset.__new__(type(val), ())
-                            except Exception as exc:
-                                raise TypeError(
-                                    "Unsupported mutable value in review extension data: "
-                                    f"{type(val).__name__}"
-                                ) from exc
-                        if set(res_empty) if isinstance(val, set) else frozenset(res_empty):
+                            inspect_signature(type(val).__init__).bind(type(val), ())
+                    except TypeError:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
+                if fs_len == 0:
+                    if type(val) is frozenset:
+                        res_empty_fs: Any = frozenset()
+                    else:
+                        try:
+                            res_empty_fs = frozenset.__new__(type(val), ())
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(val).__name__}"
+                            ) from exc
+                        if frozenset(res_empty_fs):
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
                                 f"{type(val).__name__}"
                             )
-                    memo[val_id] = res_empty
+                    memo[val_id] = res_empty_fs
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
-                        stack.append((_OBJ_EXPAND, res_empty, iter(_get_obj_attrs(val))))
-                    _assign_target(target, key, is_attr, res_empty)
+                        stack.append((_OBJ_EXPAND, res_empty_fs, iter(_get_obj_attrs(val))))
+                    _assign_target(target, key, is_attr, res_empty_fs)
                 else:
                     temp_set_list: list[Any] = []
                     stack.append((_SET_FINALIZE, target, key, is_attr, val_id, val, temp_set_list))
-                    stack.append((_LIST_EXPAND, temp_set_list, set_it))
+                    stack.append((_LIST_EXPAND, temp_set_list, frozenset.__iter__(val)))
             elif isinstance(val, deque):
-                if len(val) > _MAX_SAFE_BUFFER_SIZE:
+                if deque.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
                 if type(val) is deque:
                     new_deque: deque[Any] = deque(maxlen=val.maxlen)
@@ -625,28 +673,32 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     k, v = next(it)
                 except StopIteration:
                     break
-                k_done = _is_immutable(k) or id(k) in memo
-                res_k = k if _is_immutable(k) else memo.get(id(k))
-                v_done = _is_immutable(v) or id(v) in memo
-                res_v = v if _is_immutable(v) else memo.get(id(v))
-
-                if k_done and v_done:
-                    target_dict[res_k] = res_v
-                else:
-                    box = [res_k, res_v]
+                deferred_dict_insertions.append((target_dict, k, v))
+                k_needed = not _is_immutable(k) and id(k) not in memo
+                v_needed = not _is_immutable(v) and id(v) not in memo
+                if k_needed or v_needed:
                     stack.append((_DICT_EXPAND, target_dict, it))
-                    stack.append((_DICT_ITEM_FINALIZE, target_dict, box))
-                    if not v_done:
-                        stack.append((_ITEM_TASK, box, 1, False, v))
-                    if not k_done:
-                        stack.append((_ITEM_TASK, box, 0, False, k))
+                    if v_needed:
+                        stack.append((_ITEM_TASK, None, 0, False, v))
+                    if k_needed:
+                        stack.append((_ITEM_TASK, None, 0, False, k))
                     break
             else:
                 stack.append((_DICT_EXPAND, target_dict, it))
 
-        elif task_type == _DICT_ITEM_FINALIZE:
-            target_dict, box = target, it_or_key
-            target_dict[box[0]] = box[1]
+        elif task_type == _SET_EXPAND:
+            it = it_or_key
+            for _ in range(_EXPAND_BATCH_SIZE):
+                try:
+                    m = next(it)
+                except StopIteration:
+                    break
+                if not _is_immutable(m) and id(m) not in memo:
+                    stack.append((_SET_EXPAND, None, it))
+                    stack.append((_ITEM_TASK, None, 0, False, m))
+                    break
+            else:
+                stack.append((_SET_EXPAND, None, it))
 
         elif task_type == _LIST_EXPAND:
             target_list, it = target, it_or_key
@@ -744,20 +796,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             if val_id in memo:
                 res_set = memo[val_id]
             else:
-                if type(orig_val) is set:
-                    res_set = set(temp_set_list)
-                elif type(orig_val) is frozenset:
+                if type(orig_val) is frozenset:
                     res_set = frozenset(temp_set_list)
-                elif isinstance(orig_val, set):
-                    try:
-                        res_set = set.__new__(type(orig_val))
-                        set.clear(res_set)
-                        set.update(res_set, temp_set_list)
-                    except Exception as exc:
-                        raise TypeError(
-                            "Unsupported mutable value in review extension data: "
-                            f"{type(orig_val).__name__}"
-                        ) from exc
                 else:  # frozenset subclass
                     try:
                         res_set = frozenset.__new__(type(orig_val), temp_set_list)
@@ -766,10 +806,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             "Unsupported mutable value in review extension data: "
                             f"{type(orig_val).__name__}"
                         ) from exc
-                expected_members = set(temp_set_list)
-                if (set(res_set) if isinstance(orig_val, set) else frozenset(res_set)) != (
-                    expected_members if isinstance(orig_val, set) else frozenset(temp_set_list)
-                ):
+                if frozenset(res_set) != frozenset(temp_set_list):
                     raise TypeError(
                         "Unsupported mutable value in review extension data: "
                         f"{type(orig_val).__name__}"
@@ -779,7 +816,31 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 stack.append((_OBJ_EXPAND, res_set, iter(_get_obj_attrs(orig_val))))
             _assign_target(target, key, is_attr, res_set)
 
+    if _deadline_expired():
+        return None
+
+    for s, orig_val, orig_members in deferred_set_insertions:
+        if _deadline_expired():
+            return None
+        resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
+        set.update(s, resolved_members)
+        if set(s) != set(resolved_members):
+            raise TypeError(
+                f"Unsupported mutable value in review extension data: {type(orig_val).__name__}"
+            )
+
+    for target_dict, orig_k, orig_v in deferred_dict_insertions:
+        if _deadline_expired():
+            return None
+        k = orig_k if _is_immutable(orig_k) else memo[id(orig_k)]
+        v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
+        target_dict[k] = v
+
     return root
+
+
+_DETACHED_TASKS: set[Any] = set()
+_DETACHED_FUTURES: set[Any] = set()
 
 
 def _safe_cancel_target(target: Any) -> None:
@@ -808,13 +869,20 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
             return
         if loop is not running_loop or loop.is_closed():
             return
+        _DETACHED_FUTURES.add(fut)
+
+        def _on_detached_fut_done(t: Any) -> None:
+            _DETACHED_FUTURES.discard(t)
+            try:
+                if not AsyncFuture.cancelled(t):
+                    AsyncFuture.exception(t)
+            except BaseException:
+                pass
+
         try:
-            AsyncFuture.add_done_callback(
-                fut,
-                lambda t: AsyncFuture.exception(t) if not AsyncFuture.cancelled(t) else None,
-            )
+            AsyncFuture.add_done_callback(fut, _on_detached_fut_done)
         except BaseException:
-            pass
+            _DETACHED_FUTURES.discard(fut)
     except BaseException:
         pass
 
@@ -824,13 +892,20 @@ def _detach_overdue_task(
     res: Any,
     wrapper_started: bool,
 ) -> None:
+    _DETACHED_TASKS.add(task)
+
+    def _on_detached_task_done(t: Any) -> None:
+        _DETACHED_TASKS.discard(t)
+        try:
+            if not AsyncFuture.cancelled(t):
+                AsyncTask.exception(t)
+        except BaseException:
+            pass
+
     try:
-        AsyncFuture.add_done_callback(
-            task,
-            lambda t: AsyncTask.exception(t) if not AsyncFuture.cancelled(t) else None,
-        )
+        AsyncFuture.add_done_callback(task, _on_detached_task_done)
     except BaseException:
-        pass
+        _DETACHED_TASKS.discard(task)
     if not wrapper_started:
         if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
             try:
@@ -1829,6 +1904,14 @@ class AsyncProoflineClient(AsyncOperations):
                                         except BaseException:
                                             pass
                                     raise
+                                task_completion_fut = async_get_running_loop().create_future()
+
+                                def _on_task_done(_: Any) -> None:
+                                    if not task_completion_fut.done():
+                                        task_completion_fut.set_result(None)
+
+                                AsyncTask.add_done_callback(task, _on_task_done)
+
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
@@ -1843,7 +1926,9 @@ class AsyncProoflineClient(AsyncOperations):
                                         return result
                                     break
                                 try:
-                                    done, _ = await async_wait({task}, timeout=remaining_budget)
+                                    done, _ = await async_wait(
+                                        {task_completion_fut}, timeout=remaining_budget
+                                    )
                                 except BaseException:
                                     _detach_overdue_task(task, res, wrapper_started)
                                     raise
@@ -1851,7 +1936,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
                                 )
-                                if cb_finished_in_budget and task in done:
+                                if cb_finished_in_budget and task_completion_fut in done:
                                     AsyncTask.result(task)
                                 else:
                                     _detach_overdue_task(task, res, wrapper_started)

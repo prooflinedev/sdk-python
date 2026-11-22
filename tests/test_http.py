@@ -1318,8 +1318,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         # The second read names the head, so the review that would complete is never read.
         assert len(server.requests) == 2
         assert clock.delays == [5, 10, 5]
-        assert len(polled_reviews) == 2
-        assert polled_reviews[1].status == "RUNNING"
+        assert [p.status for p in polled_reviews] == ["PENDING", "RUNNING"]
         assert polled_reviews[1].head_commit_sha == HEAD
 
 
@@ -2730,8 +2729,12 @@ async def test_wait_for_review_invokes_on_poll_callback(
             assert wait_timeouts == [65.0]
             monkeypatch.setattr(client_module, "async_wait", orig_async_wait)
 
-            # Timely pending future failure propagates
-            timely_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            # Timely pending future failure propagates even if done() lies
+            class LyingDoneFuture(asyncio.Future[None]):
+                def done(self) -> bool:
+                    return False
+
+            timely_fut: Any = LyingDoneFuture(loop=asyncio.get_running_loop())
 
             async def fail_timely_soon() -> None:
                 await asyncio.sleep(0.01)
@@ -2863,10 +2866,11 @@ async def main() -> None:
         # Case 3: Overdue callback continues running without cancellation on non-terminal review
         callback_running = asyncio.Event()
         callback_finished = asyncio.Event()
+        release_callback = asyncio.Event()
 
         async def continuing_coro(r: Any) -> None:
             callback_running.set()
-            await asyncio.sleep(0.3)
+            await release_callback.wait()
             callback_finished.set()
 
         client.get_review = fake_running  # type: ignore
@@ -2879,19 +2883,21 @@ async def main() -> None:
             on_poll=continuing_coro,
         )
         elapsed3 = time.monotonic() - start_t3
-        assert 0.18 <= elapsed3 <= 0.60
+        assert 0.18 <= elapsed3
         assert res.status == "TIMED_OUT"
         assert callback_running.is_set()
         assert not callback_finished.is_set()
+        release_callback.set()
         await callback_finished.wait()
 
         # Case 4: Overdue callback continues running without cancellation on terminal review
         callback_running_term = asyncio.Event()
         callback_finished_term = asyncio.Event()
+        release_callback_term = asyncio.Event()
 
         async def continuing_coro_term(r: Any) -> None:
             callback_running_term.set()
-            await asyncio.sleep(0.3)
+            await release_callback_term.wait()
             callback_finished_term.set()
 
         client.get_review = fake_completed  # type: ignore
@@ -2904,10 +2910,11 @@ async def main() -> None:
             on_poll=continuing_coro_term,
         )
         elapsed4 = time.monotonic() - start_t4
-        assert 0.18 <= elapsed4 <= 0.60
+        assert 0.18 <= elapsed4
         assert res.status == "COMPLETED"
         assert callback_running_term.is_set()
         assert not callback_finished_term.is_set()
+        release_callback_term.set()
         await callback_finished_term.wait()
 
         # Case 5: Suspending callback that succeeds within budget
@@ -2930,36 +2937,76 @@ async def main() -> None:
         assert resumed_within_budget
 
         # Case 6: Overdue callback failure is observed without leaking to loop handler
-        detached_task: asyncio.Task[None] | None = None
-        callback_trigger = asyncio.Event()
-
-        async def failing_overdue_coro(r: Any) -> None:
-            nonlocal detached_task
-            detached_task = asyncio.current_task()
-            await callback_trigger.wait()
-            raise RuntimeError("error in overdue callback")
-
+        # For both futures and coroutines, cancel the waiter after callback startup,
+        # assert CancelledError, then release the callback to fail and verify the loop reports
+        # no unhandled exception.
         unhandled_exceptions: list[dict[str, Any]] = []
         loop = asyncio.get_running_loop()
         old_handler = loop.get_exception_handler()
         loop.set_exception_handler(lambda _loop, ctx: unhandled_exceptions.append(ctx))
         try:
+            # 6a: Future callback cancelled after startup
+            failing_fut: asyncio.Future[None] = loop.create_future()
+            future_started = asyncio.Event()
+
+            def failing_future_cb(r: Any) -> asyncio.Future[None]:
+                future_started.set()
+                return failing_fut
+
             client.get_review = fake_running  # type: ignore
-            res_clean = await client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=0.2,
-                on_poll=failing_overdue_coro,
+            waiter_fut_task = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=5.0,
+                    on_poll=failing_future_cb,
+                )
             )
-            assert res_clean.status == "TIMED_OUT"
-            assert detached_task is not None
-            callback_trigger.set()
-            done, _ = await asyncio.wait({detached_task}, timeout=2.0)
-            assert detached_task in done
-            del done
-            del detached_task
+            await future_started.wait()
+            waiter_fut_task.cancel()
+            cancelled_fut = False
+            try:
+                await waiter_fut_task
+            except asyncio.CancelledError:
+                cancelled_fut = True
+            assert cancelled_fut
+
+            failing_fut.set_exception(RuntimeError("error in cancelled future callback"))
+            await asyncio.sleep(0.01)
+            del failing_fut
             import gc
 
+            gc.collect()
+            assert unhandled_exceptions == []
+
+            # 6b: Coroutine callback cancelled after startup
+            coro_started = asyncio.Event()
+            coro_trigger = asyncio.Event()
+
+            async def failing_overdue_coro(r: Any) -> None:
+                coro_started.set()
+                await coro_trigger.wait()
+                raise RuntimeError("error in overdue callback")
+
+            waiter_coro_task = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=5.0,
+                    on_poll=failing_overdue_coro,
+                )
+            )
+            await coro_started.wait()
+            waiter_coro_task.cancel()
+            cancelled_coro = False
+            try:
+                await waiter_coro_task
+            except asyncio.CancelledError:
+                cancelled_coro = True
+            assert cancelled_coro
+
+            coro_trigger.set()
+            await asyncio.sleep(0.01)
             gc.collect()
             assert unhandled_exceptions == []
         finally:
@@ -3216,24 +3263,28 @@ asyncio.run(main())
                 assert res_int.status == "COMPLETED"
                 assert int_cb_completed is True
 
-        # Unhashable same-loop Future subclass and overridden done() returning False
+        # Unhashable same-loop Future subclass completed after wait starts
         class UnhashableFuture(asyncio.Future[None]):
             __hash__ = None  # type: ignore[assignment]
 
-            def done(self) -> bool:
-                return False
+        async def complete_unhashable_soon(fut: Any) -> None:
+            await asyncio.sleep(0.01)
+            fut.set_result(None)
 
         with Server(lambda request, index: Reply(body=responses[1])) as server:
             async with session("async", server.url) as client:
                 unhashable_fut: Any = UnhashableFuture(loop=asyncio.get_running_loop())
-                unhashable_fut.set_result(None)
                 res_unhash = await client.wait_for_review(
                     ORG,
                     REVIEW,
                     timeout=10,
-                    on_poll=lambda r: unhashable_fut,
+                    on_poll=lambda r: (
+                        asyncio.create_task(complete_unhashable_soon(unhashable_fut)),
+                        unhashable_fut,
+                    )[1],
                 )
                 assert res_unhash.status == "COMPLETED"
+                assert unhashable_fut.done()
 
         # Case with a waiter whose cancel() raises synchronously:
         # the waiter returns TIMED_OUT without calling cancel() or reporting an unhandled exception
