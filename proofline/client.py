@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import datetime
 import math
 import weakref
@@ -420,6 +421,31 @@ _MAX_SAFE_BUFFER_SIZE = 65_536
 _UNRESOLVED_SLOT = object()
 
 
+class _Py_buffer(ctypes.Structure):
+    _fields_ = [
+        ("buf", ctypes.c_void_p),
+        ("obj", ctypes.c_void_p),
+        ("len", ctypes.c_ssize_t),
+        ("itemsize", ctypes.c_ssize_t),
+        ("readonly", ctypes.c_int),
+        ("ndim", ctypes.c_int),
+        ("format", ctypes.c_char_p),
+        ("shape", ctypes.POINTER(ctypes.c_ssize_t)),
+        ("strides", ctypes.POINTER(ctypes.c_ssize_t)),
+        ("suboffsets", ctypes.POINTER(ctypes.c_ssize_t)),
+        ("internal", ctypes.c_void_p),
+    ]
+
+
+_py_get_buffer = ctypes.pythonapi.PyObject_GetBuffer
+_py_get_buffer.restype = ctypes.c_int
+_py_get_buffer.argtypes = [ctypes.py_object, ctypes.POINTER(_Py_buffer), ctypes.c_int]
+
+_py_release_buffer = ctypes.pythonapi.PyBuffer_Release
+_py_release_buffer.restype = None
+_py_release_buffer.argtypes = [ctypes.POINTER(_Py_buffer)]
+
+
 def _deadline_expired() -> bool:
     budget = _transport.remaining()
     return budget is not None and budget <= 0
@@ -673,55 +699,86 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             elif isinstance(val, memoryview):
                 if val.nbytes > _MAX_SAFE_BUFFER_SIZE:
                     return None
+                exporter = getattr(val, "obj", None)
                 resolved_mv: Any
-                if val.readonly:
-                    resolved_mv = memoryview(bytes(val))
-                    if val.format != "B" or val.ndim > 1:
+                if isinstance(exporter, bytearray):
+                    exp_id = id(exporter)
+                    if exp_id in memo:
+                        cloned_exporter = memo[exp_id]
+                    else:
+                        if bytearray.__len__(exporter) > _MAX_SAFE_BUFFER_SIZE:
+                            return None
                         try:
-                            resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
+                            cloned_exporter = bytearray.__new__(type(exporter))
+                            bytearray.__init__(cloned_exporter, exporter)
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
-                                f"{type(val).__name__}"
+                                f"{type(exporter).__name__}"
                             ) from exc
-                else:
-                    exporter = getattr(val, "obj", None)
-                    if isinstance(exporter, bytearray):
-                        exp_id = id(exporter)
-                        if exp_id in memo:
-                            cloned_exporter = memo[exp_id]
-                        else:
-                            if bytearray.__len__(exporter) > _MAX_SAFE_BUFFER_SIZE:
-                                return None
-                            try:
-                                cloned_exporter = bytearray.__new__(type(exporter))
-                                bytearray.__init__(cloned_exporter, exporter)
-                            except Exception as exc:
-                                raise TypeError(
-                                    "Unsupported mutable value in review extension data: "
-                                    f"{type(exporter).__name__}"
-                                ) from exc
-                            memo[exp_id] = cloned_exporter
+                        memo[exp_id] = cloned_exporter
+                    b_val = _Py_buffer()
+                    b_exp = _Py_buffer()
+                    if _py_get_buffer(val, ctypes.byref(b_val), 0x0118) != 0:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
+                    try:
+                        if _py_get_buffer(exporter, ctypes.byref(b_exp), 0x0118) != 0:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(exporter).__name__}"
+                            )
                         try:
-                            import ctypes
-
-                            p_exp = ctypes.c_char.from_buffer(exporter)
-                            p_val = ctypes.c_char.from_buffer(val)
-                            offset = ctypes.addressof(p_val) - ctypes.addressof(p_exp)
-                            base_mv = memoryview(cloned_exporter)
-                            resolved_mv = base_mv[offset : offset + val.nbytes]
-                        except Exception:
-                            resolved_mv = memoryview(cloned_exporter)
+                            offset = b_val.buf - b_exp.buf
+                        finally:
+                            _py_release_buffer(ctypes.byref(b_exp))
+                    finally:
+                        _py_release_buffer(ctypes.byref(b_val))
+                    base_mv = memoryview(cloned_exporter)
+                    val_strides = val.strides
+                    val_shape = val.shape
+                    if val.ndim == 1 and val_shape is not None and val_strides is not None:
+                        shape = val_shape[0]
+                        itemsize = val.itemsize
+                        stride = val_strides[0]
+                        step = stride // itemsize
+                        off = offset // itemsize
+                        if shape == 0:
+                            resolved_mv = base_mv[0:0]
+                        elif step > 0:
+                            calc_stop = off + shape * step
+                            resolved_mv = base_mv[off:calc_stop:step]
+                        else:
+                            calc_stop = off + shape * step
+                            if calc_stop < 0:
+                                calc_stop = None
+                            resolved_mv = base_mv[off:calc_stop:step]
+                    elif val.ndim == 0:
+                        resolved_mv = base_mv[offset:offset]
+                    elif val.c_contiguous:
+                        resolved_mv = base_mv[offset : offset + val.nbytes]
+                    else:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
+                else:
+                    if val.readonly:
+                        resolved_mv = memoryview(bytes(val))
                     else:
                         resolved_mv = memoryview(bytearray(val))
-                    if val.format != "B" or val.ndim > 1:
-                        try:
-                            resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
-                        except Exception as exc:
-                            raise TypeError(
-                                "Unsupported mutable value in review extension data: "
-                                f"{type(val).__name__}"
-                            ) from exc
+                if val.format != "B" or (val.ndim > 1 and val.shape != resolved_mv.shape):
+                    try:
+                        resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        ) from exc
+                if val.readonly:
+                    resolved_mv = resolved_mv.toreadonly()
                 memo[val_id] = resolved_mv
                 _assign_target(target, key, is_attr, resolved_mv)
             elif isinstance(val, datetime.datetime):
@@ -974,6 +1031,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         container_ids: set[int] = set()
         while stack_nodes:
             cur = stack_nodes.pop()
+            if _is_immutable(cur) or _is_identity_hashed(cur):
+                continue
             cid = id(cur)
             if cid in visited:
                 continue
@@ -983,17 +1042,17 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 stack_nodes.append(cur.__dict__)
             if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
                 for _, _, slot_val in _get_obj_attrs(cur):
-                    if not _is_immutable(slot_val):
+                    if not _is_immutable(slot_val) and not _is_identity_hashed(slot_val):
                         stack_nodes.append(slot_val)
             if isinstance(cur, dict):
                 for k, v in cur.items():
-                    if not _is_immutable(k):
+                    if not _is_immutable(k) and not _is_identity_hashed(k):
                         stack_nodes.append(k)
-                    if not _is_immutable(v):
+                    if not _is_immutable(v) and not _is_identity_hashed(v):
                         stack_nodes.append(v)
             elif isinstance(cur, (list, tuple, set, deque)):
                 for item in cur:
-                    if not _is_immutable(item):
+                    if not _is_immutable(item) and not _is_identity_hashed(item):
                         stack_nodes.append(item)
 
         for target, _, _, _, _, _ in deferred_tuple_finalizations:
@@ -1064,28 +1123,41 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 for s, orig_val, orig_members in deferred_set_insertions:
                     if _deadline_expired():
                         return
-                    if all(_is_immutable(m) or id(m) in memo for m in orig_members):
-                        resolved_members = []
-                        for m_idx, m in enumerate(orig_members):
-                            if (m_idx & 63) == 0 and _deadline_expired():
-                                return
-                            resolved_members.append(m if _is_immutable(m) else memo[id(m)])
-                        if not all(_is_member_state_populated(rm) for rm in resolved_members):
-                            still_sets.append((s, orig_val, orig_members))
-                            continue
-                        for ins_idx in range(0, len(resolved_members), 64):
-                            if ins_idx > 0 and _deadline_expired():
-                                return
-                            chunk = resolved_members[ins_idx : ins_idx + 64]
-                            set.update(s, chunk)
-                        if set(s) != set(resolved_members):
-                            raise TypeError(
-                                "Unsupported mutable value in review extension data: "
-                                f"{type(orig_val).__name__}"
-                            )
-                        changed = True
-                    else:
+                    members_ready = True
+                    for m_idx, m in enumerate(orig_members):
+                        if (m_idx & 63) == 0 and _deadline_expired():
+                            return
+                        if not (_is_immutable(m) or id(m) in memo):
+                            members_ready = False
+                            break
+                    if not members_ready:
                         still_sets.append((s, orig_val, orig_members))
+                        continue
+                    resolved_members = []
+                    for m_idx, m in enumerate(orig_members):
+                        if (m_idx & 63) == 0 and _deadline_expired():
+                            return
+                        rm = m if _is_immutable(m) else memo[id(m)]
+                        resolved_members.append(rm)
+                        if not _is_member_state_populated(rm):
+                            members_ready = False
+                            break
+                    if not members_ready:
+                        still_sets.append((s, orig_val, orig_members))
+                        continue
+                    for ins_idx in range(0, len(resolved_members), 64):
+                        if ins_idx > 0 and _deadline_expired():
+                            return
+                        chunk = resolved_members[ins_idx : ins_idx + 64]
+                        set.update(s, chunk)
+                    if _deadline_expired():
+                        return
+                    if set.__len__(s) != len(orig_members):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(orig_val).__name__}"
+                        )
+                    changed = True
                 deferred_set_insertions = still_sets
 
             op_count = 0
@@ -1126,7 +1198,13 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 _assign_target(target, key, is_attr, memo[val_id])
                 progress = True
                 continue
-            members_ready = all(_is_immutable(m) or id(m) in memo for m in orig_members)
+            members_ready = True
+            for m_idx, m in enumerate(orig_members):
+                if (m_idx & 63) == 0 and _deadline_expired():
+                    return None
+                if not (_is_immutable(m) or id(m) in memo):
+                    members_ready = False
+                    break
             attrs_ready = True
             if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                 for _, _, attr_val in _get_obj_attrs(orig_val):
@@ -1134,8 +1212,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         attrs_ready = False
                         break
             if members_ready and attrs_ready:
-                resolved_members = [m if _is_immutable(m) else memo[id(m)] for m in orig_members]
-                if not all(_is_member_state_populated(rm) for rm in resolved_members):
+                resolved_members = []
+                for m_idx, m in enumerate(orig_members):
+                    if (m_idx & 63) == 0 and _deadline_expired():
+                        return None
+                    rm = m if _is_immutable(m) else memo[id(m)]
+                    resolved_members.append(rm)
+                    if not _is_member_state_populated(rm):
+                        members_ready = False
+                        break
+                if not members_ready:
                     remaining_frozensets.append(
                         (target, key, is_attr, val_id, orig_val, orig_members)
                     )
@@ -1150,7 +1236,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             "Unsupported mutable value in review extension data: "
                             f"{type(orig_val).__name__}"
                         ) from exc
-                    if frozenset(res_set) != frozenset(resolved_members):
+                    if frozenset.__len__(res_set) != len(orig_members):
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
                             f"{type(orig_val).__name__}"
@@ -1196,6 +1282,9 @@ def _safe_cancel_target(target: Any) -> None:
 
 
 def _detach_overdue_future(fut: Any) -> None:
+    if hasattr(fut, "get_coro"):
+        _detach_overdue_task(fut)
+        return
     try:
         is_done = fut.done() if hasattr(fut, "done") else AsyncFuture.done(fut)
         if is_done:
@@ -1270,8 +1359,8 @@ def _detach_overdue_future(fut: Any) -> None:
 
 def _detach_overdue_task(
     task: Any,
-    res: Any,
-    wrapper_started: bool,
+    res: Any = None,
+    wrapper_started: bool = True,
 ) -> None:
     try:
         is_done = task.done() if hasattr(task, "done") else False
@@ -2222,12 +2311,12 @@ class AsyncProoflineClient(AsyncOperations):
         Separately, awaitable failures observed before the deadline propagate, but the
         deadline suppresses awaitable failures observed after expiry (and a pending future's
         failure is suppressed if its done callback runs after the deadline), allowing any
-        classified outcome to be returned. When the deadline expires,
-        unstarted coroutines returned by on_poll are closed without being scheduled,
-        while already-running callback tasks and futures are detached without
-        cancellation and may continue running. Synchronous
-        callbacks must return before a terminal result can be delivered and the
-        polling deadline cannot interrupt them.
+        classified outcome to be returned. When the deadline expires or when the wait is
+        cancelled, unstarted coroutines returned by on_poll are closed without entering
+        their body (a wrapper task may already have been scheduled), while already-running
+        callback tasks and futures are detached without cancellation and may continue
+        running. Synchronous callbacks must return before a terminal result can be
+        delivered and the polling deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -2278,6 +2367,8 @@ class AsyncProoflineClient(AsyncOperations):
                                         res.close()
                                     except BaseException:
                                         pass
+                                elif async_isfuture(res) and res is not waiter_task:
+                                    _detach_overdue_future(res)
                                 raise AsyncCancelledError()
                         try:
                             res_awaitable = isawaitable(res)

@@ -2736,24 +2736,41 @@ async def test_wait_for_review_invokes_on_poll_callback(
                     return False
 
             timely_fut: Any = LyingDoneFuture(loop=asyncio.get_running_loop())
+            timely_producer: asyncio.Task[None] | None = None
 
             async def fail_timely_soon() -> None:
                 await asyncio.sleep(0.01)
                 timely_fut.set_exception(ValueError("timely failure"))
 
             def timely_fail_cb(r: Any) -> asyncio.Future[None]:
-                asyncio.create_task(fail_timely_soon())
+                nonlocal timely_producer
+                timely_producer = asyncio.create_task(fail_timely_soon())
                 return timely_fut
 
-            with Server(lambda request, index: Reply(body=responses[0])) as server:
-                async with session("async", server.url) as client:
-                    with pytest.raises(ValueError, match="timely failure"):
-                        await client.wait_for_review(
-                            ORG,
-                            REVIEW,
-                            timeout=100.0,
-                            on_poll=timely_fail_cb,
-                        )
+            try:
+                with Server(lambda request, index: Reply(body=responses[0])) as server:
+                    async with session("async", server.url) as client:
+                        with pytest.raises(ValueError, match="timely failure"):
+                            await client.wait_for_review(
+                                ORG,
+                                REVIEW,
+                                timeout=100.0,
+                                on_poll=timely_fail_cb,
+                            )
+            finally:
+                if timely_producer is not None and not timely_producer.done():
+                    timely_producer.cancel()
+                    try:
+                        await timely_producer
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                try:
+                    if not asyncio.Future.done(timely_fut):
+                        timely_fut.cancel()
+                    elif not asyncio.Future.cancelled(timely_fut):
+                        timely_fut.exception()
+                except BaseException:
+                    pass
 
             # Late-observed pending future failure preserves the classified outcome
             class TrackedFuture(asyncio.Future[None]):
@@ -2832,6 +2849,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
         # tasks cannot stall teardown.
         watchdog_code = """
 import asyncio
+import pytest
 import time
 from typing import Any
 from proofline import AsyncProoflineClient
@@ -2991,6 +3009,7 @@ async def main() -> None:
             callback_running_term.set()
             await release_callback_term.wait()
             callback_finished_term.set()
+            raise RuntimeError("overdue coroutine failure")
 
         client.get_review = fake_completed  # type: ignore
 
@@ -3005,11 +3024,10 @@ async def main() -> None:
         await callback_running_term.wait()
         assert not waiter_task_4.done()
         clock.advance(1.0)
+        release_callback_term.set()
         res_4 = await waiter_task_4
         assert res_4.status == "COMPLETED"
         assert callback_running_term.is_set()
-        assert not callback_finished_term.is_set()
-        release_callback_term.set()
         await callback_finished_term.wait()
 
         # Case 5: Suspending callback that succeeds within budget
@@ -3140,10 +3158,8 @@ async def main() -> None:
                 assert inspect.getcoroutinestate(user_coro_created[0]) == inspect.CORO_CLOSED
                 assert wrapper_tasks[0].done()
 
-                try:
+                with pytest.raises(asyncio.CancelledError):
                     await pre_waiter_task
-                except asyncio.CancelledError:
-                    pass
             finally:
                 client_module.async_create_task = orig_create_task
                 if pre_waiter_task is not None and not pre_waiter_task.done():
@@ -3522,24 +3538,43 @@ asyncio.run(main())
                 self.exception_calls += 1
                 return super().exception()
 
+        complete_task: asyncio.Task[None] | None = None
+
         async def complete_unhashable_soon(fut: Any) -> None:
             await asyncio.sleep(0.01)
             fut.set_result(None)
 
-        with Server(lambda request, index: Reply(body=responses[1])) as server:
-            async with session("async", server.url) as client:
-                unhashable_fut: Any = UnhashableFuture(loop=asyncio.get_running_loop())
-                res_unhash = await client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=10,
-                    on_poll=lambda r: (
-                        asyncio.create_task(complete_unhashable_soon(unhashable_fut)),
-                        unhashable_fut,
-                    )[1],
-                )
-                assert res_unhash.status == "COMPLETED"
-                assert unhashable_fut.done()
+        def complete_unhashable_cb(r: Any) -> Any:
+            nonlocal complete_task
+            complete_task = asyncio.create_task(complete_unhashable_soon(unhashable_fut))
+            return unhashable_fut
+
+        unhashable_fut: Any = UnhashableFuture(loop=asyncio.get_running_loop())
+        try:
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    res_unhash = await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=complete_unhashable_cb,
+                    )
+                    assert res_unhash.status == "COMPLETED"
+                    assert unhashable_fut.done()
+        finally:
+            if complete_task is not None and not complete_task.done():
+                complete_task.cancel()
+                try:
+                    await complete_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            try:
+                if not asyncio.Future.done(unhashable_fut):
+                    unhashable_fut.cancel()
+                elif not asyncio.Future.cancelled(unhashable_fut):
+                    unhashable_fut.exception()
+            except BaseException:
+                pass
 
         # Cancel the waiter while an UnhashableFuture is pending, then fail and release
         # the future and assert that the loop reports no unhandled exception.
@@ -3640,9 +3675,11 @@ asyncio.run(main())
         loop = asyncio.get_running_loop()
         old_h = loop.get_exception_handler()
         loop.set_exception_handler(lambda _loop, ctx: cancel_reports.append(ctx))
+        fut_sync_box: list[Any] = []
         try:
             try:
                 fut_sync_cancel: Any = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
+                fut_sync_box.append(fut_sync_cancel)
                 clock_now = [1000.0]
                 orig_client_mono = client_module.monotonic
                 orig_trans_mono = _transport.monotonic
@@ -3678,19 +3715,30 @@ asyncio.run(main())
                     client_module.monotonic = orig_client_mono
                     _transport.monotonic = orig_trans_mono
             finally:
-                if not fut_sync_cancel.done():
-                    fut_sync_cancel.set_exception(RuntimeError("sync cancel late error"))
-                await asyncio.sleep(0)
-                assert id(fut_sync_cancel) not in _DETACHED_FUTURES
-                assert fut_sync_cancel.exception_calls > 0
-                import weakref
+                try:
+                    if not fut_sync_cancel.done():
+                        fut_sync_cancel.set_exception(RuntimeError("sync cancel late error"))
+                    await asyncio.sleep(0)
+                    assert id(fut_sync_cancel) not in _DETACHED_FUTURES
+                    assert fut_sync_cancel.exception_calls > 0
+                    import weakref
 
-                fut_sync_ref = weakref.ref(fut_sync_cancel)
-                del fut_sync_cancel
-                import gc
+                    fut_sync_ref = weakref.ref(fut_sync_cancel)
+                    fut_sync_box.clear()
+                    del fut_sync_cancel
+                    import gc
 
-                gc.collect()
-                assert fut_sync_ref() is None
+                    gc.collect()
+                    assert fut_sync_ref() is None
+                finally:
+                    if fut_sync_box:
+                        try:
+                            f = fut_sync_box[0]
+                            if asyncio.Future.done(f) and not asyncio.Future.cancelled(f):
+                                f.exception()
+                        except BaseException:
+                            pass
+                        fut_sync_box.clear()
         finally:
             loop.set_exception_handler(old_h)
 
@@ -4503,6 +4551,14 @@ asyncio.run(main())
                 assert foreign_failed_fut_ref() is None
                 assert foreign_reports == []
     finally:
+        if foreign_failed_box:
+            try:
+                ff = foreign_failed_box[0]
+                if not ff.cancelled():
+                    ff.exception()
+            except BaseException:
+                pass
+            foreign_failed_box.clear()
         foreign_loop_failed.close()
 
     # Datetime subclass whose replace fails and fallback lacks copied_tz raises TypeError
