@@ -2714,8 +2714,12 @@ async def test_wait_for_review_invokes_on_poll_callback(
             # Timely pending future failure propagates
             timely_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
-            def timely_fail_cb(r: Any) -> asyncio.Future[None]:
+            async def fail_timely_soon() -> None:
+                await asyncio.sleep(0.01)
                 timely_fut.set_exception(ValueError("timely failure"))
+
+            def timely_fail_cb(r: Any) -> asyncio.Future[None]:
+                asyncio.create_task(fail_timely_soon())
                 return timely_fut
 
             with Server(lambda request, index: Reply(body=responses[0])) as server:
@@ -2730,10 +2734,14 @@ async def test_wait_for_review_invokes_on_poll_callback(
 
             # Late-observed pending future failure preserves the classified outcome
             late_fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            late_fut.add_done_callback(lambda _: setattr(clock, "now", clock.now + 200.0))
+
+            async def fail_late_soon() -> None:
+                await asyncio.sleep(0.01)
+                late_fut.set_exception(ValueError("late failure"))
 
             def late_fail_cb(r: Any) -> asyncio.Future[None]:
-                clock.now += 150.0
-                late_fut.set_exception(ValueError("late failure"))
+                asyncio.create_task(fail_late_soon())
                 return late_fut
 
             with Server(lambda request, index: Reply(body=responses[1])) as server:
@@ -3099,15 +3107,25 @@ asyncio.run(main())
             except asyncio.CancelledError:
                 raise RuntimeError("error during cancellation")
 
-        with Server(lambda request, index: Reply(body=responses[0])) as server:
-            async with session("async", server.url) as client:
-                res_clean = await client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=0.1,
-                    on_poll=failing_cancel_coro,
-                )
-                assert res_clean.status == "TIMED_OUT"
+        unhandled_exceptions: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: unhandled_exceptions.append(ctx))
+        try:
+            with Server(lambda request, index: Reply(body=responses[0])) as server:
+                async with session("async", server.url) as client:
+                    res_clean = await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=0.1,
+                        on_poll=failing_cancel_coro,
+                    )
+                    assert res_clean.status == "TIMED_OUT"
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    assert unhandled_exceptions == []
+        finally:
+            loop.set_exception_handler(old_handler)
 
         # Case with a waiter whose cancel() raises synchronously:
         # assert called and outcome is TIMED_OUT
@@ -3360,6 +3378,45 @@ asyncio.run(main())
             assert res_ov.status == "COMPLETED"
             assert not oversized_poll_called
 
+    # Lock-bearing reviews passed to both sync and async clients:
+    # TypeError propagates and on_poll is not called
+    import threading
+
+    detail_lock = CustomerReviewDetail.from_dict(responses[1])
+    detail_lock.additional_properties["lock"] = threading.Lock()
+
+    for test_mode in ("sync", "async"):
+        lock_poll_called = False
+
+        def lock_poll_cb(r: Any) -> None:
+            nonlocal lock_poll_called
+            lock_poll_called = True
+
+        async with session(test_mode, "https://api.proofline.sh") as client:
+            if test_mode == "async":
+
+                async def fake_get_lock(*args: Any, **kwargs: Any) -> Any:
+                    return detail_lock
+
+                monkeypatch.setattr(client, "get_review", fake_get_lock)
+            else:
+
+                def fake_get_lock_sync(*args: Any, **kwargs: Any) -> Any:
+                    return detail_lock
+
+                monkeypatch.setattr(client, "get_review", fake_get_lock_sync)
+
+            with pytest.raises(TypeError, match="Unsupported mutable value"):
+                await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lock_poll_cb,
+                )
+            assert not lock_poll_called
+
     # Multidimensional memoryview shape and format preserved
     raw_mv = bytearray(b"0123456789abcdef")
     mv_orig = memoryview(raw_mv).cast("B", shape=[4, 4])
@@ -3510,3 +3567,71 @@ asyncio.run(main())
     detail_req_set.additional_properties["req_set"] = req_set
     with pytest.raises(TypeError, match="Unsupported mutable value"):
         _snapshot_review(detail_req_set)
+
+    # Bytearray subclass preserves subclass type and copies instance attributes
+    class CustomByteArray(bytearray):
+        pass
+
+    custom_ba = CustomByteArray(b"custom_bytes")
+    custom_ba.extra_attr = ["extra"]  # type: ignore[attr-defined]
+    detail_custom_ba = CustomerReviewDetail.from_dict(responses[1])
+    detail_custom_ba.additional_properties["custom_ba"] = custom_ba
+    snap_ba = _snapshot_review(detail_custom_ba)
+    assert snap_ba is not None
+    copied_ba = snap_ba.additional_properties["custom_ba"]
+    assert type(copied_ba) is CustomByteArray
+    assert copied_ba == b"custom_bytes"
+    assert copied_ba is not custom_ba
+    assert copied_ba.extra_attr is not custom_ba.extra_attr
+    assert copied_ba.extra_attr == ["extra"]
+
+    # Class with exhausted __slots__ iterator has installed descriptors enumerated
+    class ExhaustedSlotsObj:
+        __slots__ = iter(["slot_attr"])
+
+        def __init__(self, val: Any) -> None:
+            self.slot_attr = val
+
+        def __copy__(self) -> Any:
+            res = ExhaustedSlotsObj.__new__(ExhaustedSlotsObj)
+            res.slot_attr = self.slot_attr
+            return res
+
+    orig_slots_inst = ExhaustedSlotsObj(["slot_val"])
+    detail_slots = CustomerReviewDetail.from_dict(responses[1])
+    detail_slots.additional_properties["exhausted_slots"] = orig_slots_inst
+    snap_slots = _snapshot_review(detail_slots)
+    assert snap_slots is not None
+    copied_slots_inst = snap_slots.additional_properties["exhausted_slots"]
+    assert copied_slots_inst is not orig_slots_inst
+    assert copied_slots_inst.slot_attr is not orig_slots_inst.slot_attr
+    assert copied_slots_inst.slot_attr == ["slot_val"]
+
+    # Datetime with custom mutable tzinfo copies tzinfo and avoids leaking mutation
+    import datetime as dt_mod
+
+    class CustomMutableTz(dt_mod.tzinfo):
+        def __init__(self, offset_minutes: int = 0) -> None:
+            self.offset_minutes = offset_minutes
+            self.tz_attr = ["tz_state"]
+
+        def utcoffset(self, dt_val: Any) -> timedelta:
+            return timedelta(minutes=self.offset_minutes)
+
+        def tzname(self, dt_val: Any) -> str:
+            return "CUSTOM"
+
+        def dst(self, dt_val: Any) -> timedelta:
+            return timedelta(0)
+
+    custom_tz_inst = CustomMutableTz(60)
+    dt_with_custom_tz = datetime(2026, 11, 22, 10, 0, 0, tzinfo=custom_tz_inst)
+    detail_dt = CustomerReviewDetail.from_dict(responses[1])
+    detail_dt.additional_properties["custom_tz_dt"] = dt_with_custom_tz
+    snap_dt = _snapshot_review(detail_dt)
+    assert snap_dt is not None
+    copied_dt = snap_dt.additional_properties["custom_tz_dt"]
+    assert copied_dt == dt_with_custom_tz
+    assert copied_dt.tzinfo is not custom_tz_inst
+    assert copied_dt.tzinfo.tz_attr is not custom_tz_inst.tz_attr
+    assert copied_dt.tzinfo.tz_attr == ["tz_state"]

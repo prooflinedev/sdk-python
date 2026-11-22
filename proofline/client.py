@@ -38,7 +38,7 @@ from inspect import (
 )
 from string import hexdigits
 from time import monotonic, sleep
-from types import TracebackType
+from types import MemberDescriptorType, TracebackType
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
 from urllib.parse import quote
 from uuid import UUID
@@ -238,12 +238,19 @@ _IMMUTABLE_TYPES: set[type] = {
     bytes,
     UUID,
     datetime.date,
-    datetime.datetime,
 }
 
 
 def _is_immutable(val: Any) -> bool:
-    return val is None or val is UNSET or type(val) in _IMMUTABLE_TYPES
+    if val is None or val is UNSET or isinstance(val, type):
+        return True
+    t = type(val)
+    if t in _IMMUTABLE_TYPES:
+        return True
+    if t is datetime.datetime:
+        tz = val.tzinfo
+        return tz is None or type(tz) is datetime.timezone
+    return False
 
 
 def _assign_target(target: Any, key: Any, is_attr: bool, val: Any) -> None:
@@ -262,24 +269,19 @@ def _get_obj_attrs(obj: Any) -> list[tuple[Any, bool, Any]]:
     seen_slots: set[int] = set()
 
     for cls in type(obj).__mro__:
-        raw_slots = getattr(cls, "__slots__", None)
-        if not raw_slots:
-            continue
-        slot_names = [raw_slots] if isinstance(raw_slots, str) else raw_slots
-        for s in slot_names:
-            if s in ("__dict__", "__weakref__"):
-                continue
-            if s.startswith("__") and not s.endswith("__"):
-                attr_name = f"_{cls.__name__.lstrip('_')}{s}"
-            else:
-                attr_name = s
-            desc = cls.__dict__.get(attr_name)
-            if desc is not None and hasattr(desc, "__get__") and hasattr(desc, "__set__"):
+        for name, desc in cls.__dict__.items():
+            if isinstance(desc, MemberDescriptorType) or (
+                type(desc).__name__ == "member_descriptor"
+                and hasattr(desc, "__get__")
+                and hasattr(desc, "__set__")
+            ):
+                if name in ("__dict__", "__weakref__"):
+                    continue
                 if id(desc) in seen_slots:
                     continue
                 seen_slots.add(id(desc))
                 try:
-                    val = desc.__get__(obj, type(obj))
+                    val = desc.__get__(obj, cls)
                     items.append((desc, True, val))
                 except AttributeError:
                     pass
@@ -415,35 +417,64 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     temp_set_list: list[Any] = []
                     stack.append((_SET_FINALIZE, target, key, is_attr, val_id, val, temp_set_list))
                     stack.append((_LIST_EXPAND, temp_set_list, iter(val)))
-            elif isinstance(val, (memoryview, bytearray)):
-                byte_count = val.nbytes if isinstance(val, memoryview) else len(val)
-                if byte_count > _MAX_SAFE_BUFFER_SIZE:
+            elif isinstance(val, bytearray):
+                if len(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
-                resolved: Any
-                if isinstance(val, bytearray):
+                try:
+                    resolved = type(val)(val)
+                except Exception:
                     resolved = bytearray(val)
-                elif val.readonly:
-                    resolved = memoryview(bytes(val))
+                memo[val_id] = resolved
+                _assign_target(target, key, is_attr, resolved)
+                if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    stack.append((_OBJ_EXPAND, resolved, iter(_get_obj_attrs(val))))
+            elif isinstance(val, memoryview):
+                if val.nbytes > _MAX_SAFE_BUFFER_SIZE:
+                    return None
+                resolved_mv: Any
+                if val.readonly:
+                    resolved_mv = memoryview(bytes(val))
                     if val.format != "B" or val.ndim > 1:
                         try:
-                            resolved = resolved.cast(val.format, shape=val.shape)
+                            resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
                                 f"{type(val).__name__}"
                             ) from exc
                 else:
-                    resolved = memoryview(bytearray(val))
+                    resolved_mv = memoryview(bytearray(val))
                     if val.format != "B" or val.ndim > 1:
                         try:
-                            resolved = resolved.cast(val.format, shape=val.shape)
+                            resolved_mv = resolved_mv.cast(val.format, shape=val.shape)
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
                                 f"{type(val).__name__}"
                             ) from exc
-                memo[val_id] = resolved
-                _assign_target(target, key, is_attr, resolved)
+                memo[val_id] = resolved_mv
+                _assign_target(target, key, is_attr, resolved_mv)
+            elif isinstance(val, datetime.datetime):
+                if val.tzinfo is None or type(val.tzinfo) is datetime.timezone:
+                    _assign_target(target, key, is_attr, val)
+                else:
+                    tz = val.tzinfo
+                    if id(tz) in memo:
+                        copied_tz = memo[id(tz)]
+                    else:
+                        try:
+                            copied_tz = copy.copy(tz)
+                        except Exception as exc:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(tz).__name__}"
+                            ) from exc
+                        memo[id(tz)] = copied_tz
+                        if hasattr(tz, "__dict__") or hasattr(tz, "__slots__"):
+                            stack.append((_OBJ_EXPAND, copied_tz, iter(_get_obj_attrs(tz))))
+                    new_dt = val.replace(tzinfo=copied_tz)
+                    memo[val_id] = new_dt
+                    _assign_target(target, key, is_attr, new_dt)
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                 new_obj = copy.copy(val)
                 if new_obj is val:
@@ -604,6 +635,13 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     return root
 
 
+def _safe_cancel_target(target: Any) -> None:
+    try:
+        target.cancel()
+    except BaseException:
+        pass
+
+
 def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
     try:
         try:
@@ -618,14 +656,17 @@ def _detach_overdue_future(fut: AsyncTask[Any] | AsyncFuture[Any]) -> None:
             return
         if fut.done():
             if not fut.cancelled():
-                fut.exception()
+                try:
+                    AsyncFuture.exception(fut)
+                except Exception:
+                    pass
             return
         try:
-            fut.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            fut.add_done_callback(lambda t: AsyncFuture.exception(t) if not t.cancelled() else None)
         except BaseException:
             pass
         try:
-            loop.call_soon(fut.cancel)
+            loop.call_soon(_safe_cancel_target, fut)
         except BaseException:
             pass
     except BaseException:
@@ -638,13 +679,13 @@ def _detach_overdue_task(
     wrapper_started: bool,
 ) -> None:
     try:
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        task.add_done_callback(lambda t: AsyncTask.exception(t) if not t.cancelled() else None)
     except BaseException:
         pass
     try:
         loop = task.get_loop()
         if loop.is_running() and not loop.is_closed():
-            loop.call_soon(task.cancel)
+            loop.call_soon(_safe_cancel_target, task)
     except BaseException:
         pass
     if not wrapper_started:
@@ -1442,7 +1483,8 @@ class AsyncProoflineClient(AsyncOperations):
         snapshot and returns None or an awaitable (supporting both sync and
         async callbacks). Any coroutines returned by on_poll must be unstarted, and
         any pending futures returned by on_poll must belong to the running event
-        loop. Callbacks must return promptly even when they return
+        loop. Callbacks cannot return the running polling task (doing so raises
+        ValueError). Callbacks must return promptly even when they return
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Oversized
