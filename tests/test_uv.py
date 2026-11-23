@@ -91,6 +91,17 @@ def test_windows_bootstrap_downloads_the_zip_and_saves_an_exe(
     assert checked == [binary]
 
 
+def test_windows_bootstrap_refuses_an_unexpected_uv_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = windows_zip()
+    fake_windows(monkeypatch, "AMD64", content)
+    monkeypatch.setitem(uv.CHECKSUMS, "x86_64-pc-windows-msvc", hashlib.sha256(content).hexdigest())
+    monkeypatch.setattr(uv, "matching", lambda executable: False)
+    with pytest.raises(SystemExit, match="unexpected version"):
+        uv.executable(tmp_path)
+
+
 @pytest.mark.parametrize(
     ("cached", "message"),
     [(False, "release archive does not match"), (True, "cached uv archive does not match")],
