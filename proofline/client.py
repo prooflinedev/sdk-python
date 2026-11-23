@@ -569,8 +569,13 @@ class ProoflineClient(Operations):
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    # TIMED_OUT only when the wait deadline, not the request's timeout, ended it.
-                    if error.type == _transport.TIMEOUT_TYPE and _transport.DEADLINE_BOUND.get():
+                    # TIMED_OUT only when the wait deadline, not the request's timeout, ended
+                    # it. An HTTP problem can carry any type, so the SDK's timeout has status 0.
+                    if (
+                        error.status == 0
+                        and error.type == _transport.TIMEOUT_TYPE
+                        and _transport.DEADLINE_BOUND.get()
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
@@ -958,8 +963,13 @@ class AsyncProoflineClient(AsyncOperations):
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    # TIMED_OUT only when the wait deadline, not the request's timeout, ended it.
-                    if error.type == _transport.TIMEOUT_TYPE and _transport.DEADLINE_BOUND.get():
+                    # TIMED_OUT only when the wait deadline, not the request's timeout, ended
+                    # it. An HTTP problem can carry any type, so the SDK's timeout has status 0.
+                    if (
+                        error.status == 0
+                        and error.type == _transport.TIMEOUT_TYPE
+                        and _transport.DEADLINE_BOUND.get()
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:

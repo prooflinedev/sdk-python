@@ -1500,6 +1500,20 @@ async def test_a_request_the_wait_deadline_ends_is_timed_out_while_the_clock_lag
 
 
 @MODES
+async def test_an_http_problem_named_like_the_sdk_timeout_is_not_timed_out(mode: str) -> None:
+    # The problem type comes from the server's document, so only a status-0 error is
+    # the SDK's own timeout, even while the wait deadline bounds the attempt.
+    problem = {"type": "urn:proofline:sdk:timeout", "title": "forbidden", "detail": PRIVATE}
+    with Server(lambda request, index: Reply(403, problem)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_review", ORG, REVIEW, timeout=10)
+        assert raised.value.status == 403
+        assert raised.value.type == "urn:proofline:sdk:timeout"
+        assert len(server.requests) == 1
+
+
+@MODES
 @pytest.mark.parametrize("status", [429, 503, 403])
 async def test_deadline_expiring_with_a_received_problem_chunk_keeps_retry_policy(
     mode: str, status: int, monkeypatch: pytest.MonkeyPatch
