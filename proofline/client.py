@@ -6,6 +6,7 @@ import array
 import ctypes
 import datetime
 import math
+import mmap
 import weakref
 from asyncio import (
     CancelledError as AsyncCancelledError,
@@ -495,13 +496,6 @@ def _install_cloned_dict(
                     except Exception:
                         cloned_dict = {}
                     memo[dict_id] = cloned_dict
-                    for k, v in inst_dict.items():
-                        if _is_immutable(k) and _is_immutable(v):
-                            if type(k) is bytes and len(k) > _MAX_SAFE_BUFFER_SIZE:
-                                continue
-                            if type(v) is bytes and len(v) > _MAX_SAFE_BUFFER_SIZE:
-                                continue
-                            cloned_dict[k] = v
                     stack.append((_DICT_EXPAND, cloned_dict, iter(inst_dict.items())))
                 if new_obj is not None:
                     try:
@@ -569,6 +563,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     fallback_built_frozensets: list[tuple[Any, list[Any]]] = []
     deferred_attr_assignments: list[tuple[Any, tuple[Any, bool], Any]] = []
     populated_mutable_sets: list[tuple[Any, list[Any]]] = []
+    backing_buffer_memo: dict[int, Any] = {}
 
     def _collect_set_members(val: Any) -> list[Any] | None:
         if isinstance(val, set):
@@ -606,18 +601,23 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
         if task_type == _ITEM_TASK:
             key, is_attr, val = it_or_key, extra[0], extra[1]
-            if isinstance(
-                val,
-                (
-                    FunctionType,
-                    MethodType,
-                    weakref.ref,
-                    weakref.ProxyType,
-                    weakref.CallableProxyType,
-                ),
-            ) or (
-                isinstance(val, BuiltinFunctionType)
-                and isinstance(getattr(val, "__self__", None), ModuleType)
+            if (
+                isinstance(
+                    val,
+                    (
+                        FunctionType,
+                        MethodType,
+                        weakref.ref,
+                        weakref.ProxyType,
+                        weakref.CallableProxyType,
+                    ),
+                )
+                or (
+                    isinstance(val, BuiltinFunctionType)
+                    and isinstance(getattr(val, "__self__", None), ModuleType)
+                )
+                or isinstance(val, mmap.mmap)
+                or type(val).__name__ == "mmap"
             ):
                 raise TypeError(
                     f"Unsupported mutable value in review extension data: {type(val).__name__}"
@@ -1128,9 +1128,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             f"{type(val).__name__}"
                         )
                     if exporter is not None:
+                        if isinstance(exporter, mmap.mmap) or type(exporter).__name__ == "mmap":
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(exporter).__name__}"
+                            )
                         exp_id = id(exporter)
-                        if exp_id in memo:
-                            cloned_buf = memo[exp_id]
+                        if exp_id in backing_buffer_memo:
+                            cloned_buf = backing_buffer_memo[exp_id]
                         else:
                             exp_readonly = False
                             try:
@@ -1152,7 +1157,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 cloned_buf = bytes(exporter)
                             else:
                                 cloned_buf = bytearray(exporter)
-                            memo[exp_id] = cloned_buf
+                            backing_buffer_memo[exp_id] = cloned_buf
                         offset = 0
                         try:
                             b_val = _Py_buffer()
@@ -1425,6 +1430,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 deferred_tuple_finalizations.append(
                     (target, key, is_attr, val_id, orig_val, temp_list)
                 )
+                if hasattr(orig_val, "__dict__"):
+                    _install_cloned_dict(orig_val, None, memo, stack)
                 if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                     for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
                         if not _is_immutable(attr_val) and id(attr_val) not in memo:
@@ -1621,6 +1628,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 except Exception:
                                     continue
                             memo[val_id] = res_tuple
+                        if hasattr(orig_val, "__dict__"):
+                            _install_cloned_dict(orig_val, res_tuple, memo, stack)
                         if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                             for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
                                 val_to_set = (
@@ -3236,28 +3245,39 @@ class AsyncProoflineClient(AsyncOperations):
                                             raise
                                     done: set[Any] = set()
                                     try:
-                                        deadline_val = _transport.DEADLINE.get()
-                                        cb_finished_in_budget = bool(completed_at) and (
-                                            deadline_val is None or completed_at[0] <= deadline_val
-                                        )
-                                        if cb_finished_in_budget:
-                                            if hasattr(res, "result"):
-                                                res.result()
-                                            else:
-                                                AsyncFuture.result(res)
-                                        remaining_budget = _transport.remaining()
-                                        if remaining_budget is not None and remaining_budget <= 0:
-                                            _detach_overdue_future(res)
-                                            if result is not None:
-                                                return result
-                                            break
-                                        try:
-                                            done, _ = await async_wait(
-                                                {completion_fut}, timeout=remaining_budget
+                                        while True:
+                                            deadline_val = _transport.DEADLINE.get()
+                                            cb_finished_in_budget = bool(completed_at) and (
+                                                deadline_val is None
+                                                or completed_at[0] <= deadline_val
                                             )
-                                        except BaseException:
-                                            _detach_overdue_future(res)
-                                            raise
+                                            if cb_finished_in_budget:
+                                                if hasattr(res, "result"):
+                                                    res.result()
+                                                else:
+                                                    AsyncFuture.result(res)
+                                                break
+                                            remaining_budget = _transport.remaining()
+                                            if (
+                                                remaining_budget is not None
+                                                and remaining_budget <= 0
+                                            ):
+                                                _detach_overdue_future(res)
+                                                if result is not None:
+                                                    return result
+                                                break
+                                            try:
+                                                done, _ = await async_wait(
+                                                    {completion_fut}, timeout=remaining_budget
+                                                )
+                                            except BaseException:
+                                                _detach_overdue_future(res)
+                                                raise
+                                            if completion_fut in done:
+                                                break
+                                            rem_after = _transport.remaining()
+                                            if rem_after is not None and rem_after <= 0:
+                                                break
                                     finally:
                                         try:
                                             if hasattr(res, "remove_done_callback"):
@@ -3424,19 +3444,25 @@ class AsyncProoflineClient(AsyncOperations):
                                         if isinstance(res_val, (SystemExit, KeyboardInterrupt)):
                                             raise res_val
 
-                                    remaining_budget = _transport.remaining()
-                                    if remaining_budget is not None and remaining_budget <= 0:
-                                        _detach_overdue_task(task, res, wrapper_started)
-                                        if result is not None:
-                                            return result
-                                        break
-                                    try:
-                                        done_wait, _ = await async_wait(
-                                            {task_completion_fut}, timeout=remaining_budget
-                                        )
-                                    except BaseException:
-                                        _detach_overdue_task(task, res, wrapper_started)
-                                        raise
+                                    while True:
+                                        remaining_budget = _transport.remaining()
+                                        if remaining_budget is not None and remaining_budget <= 0:
+                                            _detach_overdue_task(task, res, wrapper_started)
+                                            if result is not None:
+                                                return result
+                                            break
+                                        try:
+                                            done_wait, _ = await async_wait(
+                                                {task_completion_fut}, timeout=remaining_budget
+                                            )
+                                        except BaseException:
+                                            _detach_overdue_task(task, res, wrapper_started)
+                                            raise
+                                        if task_completion_fut in done_wait:
+                                            break
+                                        rem_after = _transport.remaining()
+                                        if rem_after is not None and rem_after <= 0:
+                                            break
                                 finally:
                                     try:
                                         if hasattr(task, "remove_done_callback"):

@@ -1351,38 +1351,47 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                         on_poll=cb,
                     )
                 )
-                first_waiter = asyncio.create_task(first_cb_event.wait())
                 try:
-                    done_first, _ = await asyncio.wait(
-                        {first_waiter, waiter_task},
-                        timeout=5.0,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if waiter_task in done_first:
-                        await waiter_task
-                    assert first_cb_event.is_set()
-                finally:
-                    if not first_waiter.done():
-                        first_waiter.cancel()
+                    first_waiter = asyncio.create_task(first_cb_event.wait())
+                    try:
+                        done_first, _ = await asyncio.wait(
+                            {first_waiter, waiter_task},
+                            timeout=5.0,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if waiter_task in done_first:
+                            await waiter_task
+                        assert first_cb_event.is_set()
+                    finally:
+                        if not first_waiter.done():
+                            first_waiter.cancel()
 
-                gate_waiter = asyncio.create_task(second_cb_reached.wait())
-                try:
-                    done_gate, _ = await asyncio.wait(
-                        {gate_waiter, waiter_task},
-                        timeout=5.0,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if waiter_task in done_gate:
-                        await waiter_task
-                    assert second_cb_reached.is_set()
-                finally:
-                    if not gate_waiter.done():
-                        gate_waiter.cancel()
+                    gate_waiter = asyncio.create_task(second_cb_reached.wait())
+                    try:
+                        done_gate, _ = await asyncio.wait(
+                            {gate_waiter, waiter_task},
+                            timeout=5.0,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if waiter_task in done_gate:
+                            await waiter_task
+                        assert second_cb_reached.is_set()
+                    finally:
+                        if not gate_waiter.done():
+                            gate_waiter.cancel()
 
-                await asyncio.sleep(0.01)
-                assert not waiter_task.done()
-                cb_gate.set()
-                result = await asyncio.wait_for(asyncio.shield(waiter_task), timeout=5.0)
+                    await asyncio.sleep(0.01)
+                    assert not waiter_task.done()
+                    cb_gate.set()
+                    result = await asyncio.wait_for(waiter_task, timeout=5.0)
+                finally:
+                    if waiter_task is not None and not waiter_task.done():
+                        waiter_task.cancel()
+                    if waiter_task is not None:
+                        try:
+                            await waiter_task
+                        except (asyncio.CancelledError, BaseException):
+                            pass
             else:
                 result = await call(
                     client,
@@ -2861,6 +2870,8 @@ async def main() -> None:
             def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
                 super().add_done_callback(fn, context=context)
                 self.active_callbacks.append(fn)
+                if "_on_future_done" in getattr(fn, "__name__", ""):
+                    clock.advance(1.0)
                 self.wait_entered.set()
 
             def remove_done_callback(self, fn: Any) -> int:
@@ -2899,37 +2910,23 @@ async def main() -> None:
             if waiter_task_1 in done_1:
                 await waiter_task_1
             assert pending_fut is not None
-            wait_entered_task_1 = asyncio.create_task(pending_fut.wait_entered.wait())
-            try:
-                done_entered, _ = await asyncio.wait(
-                    {wait_entered_task_1, waiter_task_1},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if waiter_task_1 in done_entered:
-                    await waiter_task_1
-                assert not waiter_task_1.done()
-                assert id(pending_fut) not in client_module._DETACHED_FUTURES
-                clock.advance(1.0)
-                res_1 = await waiter_task_1
-                assert res_1.status == "TIMED_OUT"
-                assert not pending_fut.cancelled()
-                assert not pending_fut.done()
-                assert id(pending_fut) in client_module._DETACHED_FUTURES
-                assert len(pending_fut.removed_callbacks) > 0
-                assert any(
-                    "_on_future_done" in getattr(cb, "__name__", "")
-                    for cb in pending_fut.removed_callbacks
-                )
-                pending_fut.set_result(None)
-                await asyncio.sleep(0)
-                assert id(pending_fut) not in client_module._DETACHED_FUTURES
-            finally:
-                if not wait_entered_task_1.done():
-                    wait_entered_task_1.cancel()
-                try:
-                    await wait_entered_task_1
-                except (asyncio.CancelledError, BaseException):
-                    pass
+            res_1 = await asyncio.wait_for(waiter_task_1, timeout=1.0)
+            assert res_1.status == "TIMED_OUT"
+            assert not pending_fut.cancelled()
+            assert not pending_fut.done()
+            assert id(pending_fut) in client_module._DETACHED_FUTURES
+            assert len(pending_fut.removed_callbacks) > 0
+            assert any(
+                "_on_future_done" in getattr(cb, "__name__", "")
+                for cb in pending_fut.removed_callbacks
+            )
+            assert not any(
+                "_on_future_done" in getattr(cb, "__name__", "")
+                for cb in pending_fut.active_callbacks
+            )
+            pending_fut.set_result(None)
+            await asyncio.sleep(0)
+            assert id(pending_fut) not in client_module._DETACHED_FUTURES
         finally:
             if not startup_waiter_1.done():
                 startup_waiter_1.cancel()
@@ -3210,9 +3207,15 @@ async def main() -> None:
             assert res_4.status == "COMPLETED"
             assert not callback_finished_term.is_set()
 
-            release_callback_term.set()
             assert len(captured_case4_wrappers) == 1
             wrapper_4 = captured_case4_wrappers[0]
+            wrapper_4_cbs = [
+                cb[0] if isinstance(cb, tuple) else cb
+                for cb in (getattr(wrapper_4, "_callbacks", None) or [])
+            ]
+            assert not any(getattr(cb, "__name__", "") == "_on_task_done" for cb in wrapper_4_cbs)
+
+            release_callback_term.set()
             finish_waiter_4 = asyncio.create_task(callback_finished_term.wait())
             try:
                 done_fin_4, _ = await asyncio.wait(
@@ -3528,6 +3531,11 @@ async def main() -> None:
             assert len(client_module._DETACHED_TASKS) == 1
             detached_task_id = next(iter(client_module._DETACHED_TASKS.keys()))
             detached_task = client_module._DETACHED_TASKS[detached_task_id]
+            detached_cbs = [
+                cb[0] if isinstance(cb, tuple) else cb
+                for cb in (getattr(detached_task, "_callbacks", None) or [])
+            ]
+            assert not any(getattr(cb, "__name__", "") == "_on_task_done" for cb in detached_cbs)
 
             coro_trigger.set()
             await asyncio.wait_for(about_to_raise.wait(), timeout=1.0)
