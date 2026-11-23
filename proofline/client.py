@@ -528,12 +528,12 @@ class ProoflineClient(Operations):
         count = 0
         for _ in range(max_pages):
             page = self.list_reviews(organization_id, **params)
+            cursor = _next_cursor(page, seen)
             for item in page.items:
                 if count == max_items:
                     raise _pagination_limit()
                 yield item
                 count += 1
-            cursor = _next_cursor(page, seen)
             if cursor is None:
                 return
             params["cursor"] = cursor
@@ -923,12 +923,12 @@ class AsyncProoflineClient(AsyncOperations):
         count = 0
         for _ in range(max_pages):
             page = await self.list_reviews(organization_id, **params)
+            cursor = _next_cursor(page, seen)
             for item in page.items:
                 if count == max_items:
                     raise _pagination_limit()
                 yield item
                 count += 1
-            cursor = _next_cursor(page, seen)
             if cursor is None:
                 return
             params["cursor"] = cursor
