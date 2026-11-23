@@ -1178,7 +1178,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
     pending_frozensets: list[Any] = deferred_frozenset_insertions
 
-    def _is_member_state_populated(m_clone: Any) -> bool:
+    def _is_member_state_populated(m_clone: Any, current_target_id: int | None = None) -> bool:
         if _is_immutable(m_clone):
             return True
         if _is_identity_hashed(m_clone):
@@ -1242,16 +1242,45 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
         for target, _, _, _, _, _ in deferred_tuple_finalizations:
             if id(target) in container_ids:
+                if id(target) == current_target_id:
+                    try:
+                        hash(m_clone)
+                        _ = m_clone == m_clone
+                        continue
+                    except Exception:
+                        return False
                 return False
         for target, _, _, _, _, _ in pending_frozensets:
             if id(target) in container_ids:
+                if id(target) == current_target_id:
+                    try:
+                        hash(m_clone)
+                        _ = m_clone == m_clone
+                        continue
+                    except Exception:
+                        return False
                 return False
         for s, _, _ in deferred_set_insertions:
             if id(s) in container_ids:
+                if id(s) == current_target_id:
+                    try:
+                        hash(m_clone)
+                        _ = m_clone == m_clone
+                        continue
+                    except Exception:
+                        return False
                 return False
         for td_id, entries in dict_ordered_entries.items():
-            if td_id in container_ids and dict_next_index[td_id] < len(entries):
-                return False
+            if td_id in container_ids:
+                if td_id == current_target_id:
+                    try:
+                        hash(m_clone)
+                        _ = m_clone == m_clone
+                        continue
+                    except Exception:
+                        return False
+                if dict_next_index[td_id] < len(entries):
+                    return False
         return True
 
     def _flush_pending_structures() -> None:
@@ -1324,7 +1353,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             return
                         rm = m if _is_immutable(m) else memo[id(m)]
                         resolved_members.append(rm)
-                        if not _is_member_state_populated(rm):
+                        if not _is_member_state_populated(rm, current_target_id=id(s)):
                             members_ready = False
                             break
                     if not members_ready:
@@ -1403,7 +1432,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         return None
                     rm = m if _is_immutable(m) else memo[id(m)]
                     resolved_members.append(rm)
-                    if not _is_member_state_populated(rm):
+                    if not _is_member_state_populated(rm, current_target_id=id(target)):
                         members_ready = False
                         break
                 if not members_ready:
@@ -1440,6 +1469,41 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         pending_frozensets = remaining_frozensets
 
         if not progress and pending_frozensets:
+            resolved_any = False
+            still_pending = []
+            for target, key, is_attr, val_id, orig_val, orig_members in pending_frozensets:
+                can_resolve = True
+                resolved_members = []
+                for m in orig_members:
+                    rm = m if _is_immutable(m) else memo.get(id(m))
+                    if rm is None:
+                        can_resolve = False
+                        break
+                    try:
+                        hash(rm)
+                        _ = rm == rm
+                    except Exception:
+                        can_resolve = False
+                        break
+                    resolved_members.append(rm)
+                if can_resolve:
+                    if type(orig_val) is frozenset:
+                        res_set = frozenset(resolved_members)
+                    else:
+                        res_set = frozenset.__new__(type(orig_val), resolved_members)
+                    memo[val_id] = res_set
+                    if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                        for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
+                            val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
+                            _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
+                    _assign_target(target, key, is_attr, res_set)
+                    resolved_any = True
+                else:
+                    still_pending.append((target, key, is_attr, val_id, orig_val, orig_members))
+            if resolved_any:
+                pending_frozensets = still_pending
+                _flush_pending_structures()
+                continue
             raise TypeError("Unsupported cyclic reference in frozenset")
 
     _flush_pending_structures()
@@ -1542,26 +1606,47 @@ def _detach_overdue_future(fut: Any) -> None:
         pass
 
 
+def _safe_close(obj: Any) -> None:
+    try:
+        closer = getattr(obj, "close", None)
+        if callable(closer):
+            closer()
+    except BaseException:
+        pass
+
+
+def _cleanup_discarded_awaitable(res: Any, waiter_task: Any = None) -> None:
+    if res is None:
+        return
+    if getattr(res, "_proofline_cleaned_up", False):
+        return
+    try:
+        setattr(res, "_proofline_cleaned_up", True)
+    except BaseException:
+        pass
+    if iscoroutine(res):
+        try:
+            if getcoroutinestate(res) == CORO_CREATED:
+                res.close()
+        except BaseException:
+            pass
+    elif isgenerator(res):
+        try:
+            if getgeneratorstate(res) == GEN_CREATED:
+                res.close()
+        except BaseException:
+            pass
+    else:
+        _safe_close(res)
+        if async_isfuture(res) and (waiter_task is None or res is not waiter_task):
+            _detach_overdue_future(res)
+
+
 def _detach_overdue_task(
     task: Any,
     res: Any = None,
     wrapper_started: bool = True,
 ) -> None:
-    try:
-        running_loop = async_get_running_loop()
-    except Exception:
-        running_loop = None
-
-    try:
-        loop = task.get_loop() if hasattr(task, "get_loop") else running_loop
-    except Exception:
-        loop = running_loop
-
-    if running_loop is not None and loop is not running_loop:
-        return
-    if loop is None or loop.is_closed():
-        return
-
     try:
         is_done = task.done() if hasattr(task, "done") else False
     except BaseException:
@@ -1579,16 +1664,22 @@ def _detach_overdue_task(
                 task.cancel()
             except BaseException:
                 pass
-            if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
-                try:
-                    res.close()
-                except BaseException:
-                    pass
-            elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
-                try:
-                    res.close()
-                except BaseException:
-                    pass
+            _cleanup_discarded_awaitable(res)
+        return
+
+    try:
+        running_loop = async_get_running_loop()
+    except Exception:
+        running_loop = None
+
+    try:
+        loop = task.get_loop() if hasattr(task, "get_loop") else running_loop
+    except Exception:
+        loop = running_loop
+
+    if running_loop is not None and loop is not running_loop:
+        return
+    if loop is None or loop.is_closed():
         return
 
     try:
@@ -1677,44 +1768,7 @@ def _detach_overdue_task(
             task.cancel()
         except BaseException:
             pass
-        if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
-            try:
-                res.close()
-            except BaseException:
-                pass
-        elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
-            try:
-                res.close()
-            except BaseException:
-                pass
-
-
-def _safe_close(obj: Any) -> None:
-    try:
-        closer = getattr(obj, "close", None)
-        if callable(closer):
-            closer()
-    except BaseException:
-        pass
-
-
-def _cleanup_discarded_awaitable(res: Any, waiter_task: Any = None) -> None:
-    if iscoroutine(res):
-        try:
-            if getcoroutinestate(res) == CORO_CREATED:
-                res.close()
-        except BaseException:
-            pass
-    elif isgenerator(res):
-        try:
-            if getgeneratorstate(res) == GEN_CREATED:
-                res.close()
-        except BaseException:
-            pass
-    else:
-        _safe_close(res)
-        if async_isfuture(res) and (waiter_task is None or res is not waiter_task):
-            _detach_overdue_future(res)
+        _cleanup_discarded_awaitable(res)
 
 
 def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
@@ -2083,9 +2137,10 @@ class ProoflineClient(Operations):
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
         delivery. Oversized tuples, buffers, memoryviews with more than 65,536 bytes (or
-        backed by a buffer larger than 65,536 bytes), or deques with more than 65,536 items
-        in review extension data skip on_poll snapshot delivery even with time remaining,
-        and snapshot copy errors on unsupported mutable values propagate before on_poll runs.
+        backed by a buffer larger than 65,536 bytes), sets, frozensets, or deques with
+        more than 65,536 items in review extension data skip on_poll snapshot delivery even
+        with time remaining, and snapshot copy errors on unsupported mutable values propagate
+        before on_poll runs.
         on_poll exceptions and return-validation errors propagate even when a
         terminal outcome has already been determined and can prevent the waiter
         from returning a classified outcome. Synchronous callbacks must return
@@ -2539,9 +2594,9 @@ class AsyncProoflineClient(AsyncOperations):
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Oversized
         tuples, buffers, memoryviews with more than 65,536 bytes (or backed by a buffer
-        larger than 65,536 bytes), or deques with more than 65,536 items in review extension
-        data skip on_poll snapshot delivery even with time remaining, and snapshot copy errors
-        on unsupported mutable values propagate before on_poll runs. Callback
+        larger than 65,536 bytes), sets, frozensets, or deques with more than 65,536 items
+        in review extension data skip on_poll snapshot delivery even with time remaining, and
+        snapshot copy errors on unsupported mutable values propagate before on_poll runs. Callback
         return-validation errors and inline exceptions propagate unconditionally, even when a
         terminal outcome has already been determined (cancellation requested during callback
         invocation takes precedence over return validation), preventing the waiter from
@@ -2697,6 +2752,15 @@ class AsyncProoflineClient(AsyncOperations):
                                     except BaseException:
                                         _detach_overdue_future(res)
                                         raise
+                                deadline_val = _transport.DEADLINE.get()
+                                cb_finished_in_budget = bool(completed_at) and (
+                                    deadline_val is None or completed_at[0] <= deadline_val
+                                )
+                                if cb_finished_in_budget:
+                                    if hasattr(res, "result"):
+                                        res.result()
+                                    else:
+                                        AsyncFuture.result(res)
                                 remaining_budget = _transport.remaining()
                                 if remaining_budget is not None and remaining_budget <= 0:
                                     _detach_overdue_future(res)
@@ -2756,22 +2820,7 @@ class AsyncProoflineClient(AsyncOperations):
                                         and monotonic() > captured_deadline
                                     )
                                     if waiter_cancelling or deadline_expired:
-                                        if (
-                                            iscoroutine(coro)
-                                            and getcoroutinestate(coro) == CORO_CREATED
-                                        ):
-                                            try:
-                                                coro.close()
-                                            except BaseException:
-                                                pass
-                                        elif (
-                                            isgenerator(coro)
-                                            and getgeneratorstate(coro) == GEN_CREATED
-                                        ):
-                                            try:
-                                                coro.close()
-                                            except BaseException:
-                                                pass
+                                        _cleanup_discarded_awaitable(coro)
                                         return
                                     wrapper_started = True
                                     _transport.DEADLINE.set(None)
@@ -2864,22 +2913,7 @@ class AsyncProoflineClient(AsyncOperations):
                                             task.cancel()
                                         except BaseException:
                                             pass
-                                        if (
-                                            iscoroutine(res)
-                                            and getcoroutinestate(res) == CORO_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
-                                        elif (
-                                            isgenerator(res)
-                                            and getgeneratorstate(res) == GEN_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
+                                        _cleanup_discarded_awaitable(res)
                                     if hasattr(task, "result"):
                                         task.result()
                                     else:
@@ -2916,22 +2950,7 @@ class AsyncProoflineClient(AsyncOperations):
                                             task.cancel()
                                         except BaseException:
                                             pass
-                                        if (
-                                            iscoroutine(res)
-                                            and getcoroutinestate(res) == CORO_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
-                                        elif (
-                                            isgenerator(res)
-                                            and getgeneratorstate(res) == GEN_CREATED
-                                        ):
-                                            try:
-                                                res.close()
-                                            except BaseException:
-                                                pass
+                                        _cleanup_discarded_awaitable(res)
                                     if hasattr(task, "result"):
                                         task.result()
                                     else:

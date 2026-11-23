@@ -1341,6 +1341,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         assert clock.delays == [5, 10, 5, 5]
         assert [p[0].status for p in polled_reviews] == ["PENDING", "RUNNING"]
         assert [p[1] for p in polled_reviews] == [1, 2]
+        assert polled_reviews[0][0].head_commit_sha is UNSET
         assert polled_reviews[1][0].head_commit_sha == HEAD
 
 
@@ -2878,6 +2879,16 @@ async def main() -> None:
         callback_running = asyncio.Event()
         callback_finished = asyncio.Event()
         release_callback = asyncio.Event()
+        cb_task_3: asyncio.Task[Any] | None = None
+        orig_create_task_3 = client_module.async_create_task
+
+        def tracking_create_task_3(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
+            nonlocal cb_task_3
+            t = orig_create_task_3(coro_arg, **kwargs)
+            cb_task_3 = t
+            return t
+
+        client_module.async_create_task = tracking_create_task_3
 
         async def continuing_coro(r: Any) -> None:
             callback_running.set()
@@ -2906,7 +2917,16 @@ async def main() -> None:
             release_callback.set()
             await callback_finished.wait()
         finally:
+            client_module.async_create_task = orig_create_task_3
             sleep_forbidden = False
+            release_callback.set()
+            if cb_task_3 is not None:
+                if not cb_task_3.done():
+                    cb_task_3.cancel()
+                try:
+                    await cb_task_3
+                except (asyncio.CancelledError, BaseException):
+                    pass
 
         # Case 3b: Return a Task from a synchronous callback, release it after the polling deadline
         # and waiter exit, and assert its client request succeeds against the local test server.
@@ -2940,8 +2960,14 @@ async def main() -> None:
                         on_poll=sync_cb_returning_task,
                     )
                 )
+                startup_waiter = asyncio.create_task(task_worker_started.wait())
                 try:
-                    await task_worker_started.wait()
+                    done, _ = await asyncio.wait(
+                        {startup_waiter, waiter_task_3b},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_task_3b in done:
+                        await waiter_task_3b
                     assert cb_task_3b is not None
                     assert not cb_task_3b.done()
                     clock.advance(1.0)
@@ -2951,6 +2977,18 @@ async def main() -> None:
                     task_release_3b.set()
                     await asyncio.wait_for(asyncio.shield(cb_task_3b), timeout=1.0)
                 finally:
+                    if not startup_waiter.done():
+                        startup_waiter.cancel()
+                    try:
+                        await startup_waiter
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                    if not waiter_task_3b.done():
+                        waiter_task_3b.cancel()
+                    try:
+                        await waiter_task_3b
+                    except (asyncio.CancelledError, BaseException):
+                        pass
                     if cb_task_3b is not None:
                         if not cb_task_3b.done():
                             cb_task_3b.cancel()
@@ -3772,10 +3810,11 @@ asyncio.run(main())
                     _transport.monotonic = orig_trans_mono
             finally:
                 if fut_sync_box:
+                    f = fut_sync_box[0]
                     try:
-                        f = fut_sync_box[0]
                         if not asyncio.Future.done(f):
-                            f.cancel()
+                            f.set_result(None)
+                            await asyncio.sleep(0)
                         elif not asyncio.Future.cancelled(f):
                             f.exception()
                     except BaseException:
