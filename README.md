@@ -22,6 +22,8 @@ When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment
 
 Both clients accept `rate_limit` to pace HTTP request attempts, including retries and calls made through the shared MCP, knowledge, fixes, and export clients. The value is a finite positive number of attempts per second; `None` (the default) disables pacing. The limit applies to one client instance and is not shared across processes or separate client instances. Waiting for a request counts against the configured HTTP timeout and any active wait deadline.
 
+The configured HTTP `timeout` bounds a complete HTTP operation, including request pacing, retry attempts, retry waits, and response reading. An active `wait_for_review` deadline can shorten that budget.
+
 ```python
 with ProoflineClient(rate_limit=2.0) as client:
     ...  # At most one request attempt every 0.5 seconds on average.

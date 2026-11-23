@@ -390,8 +390,11 @@ def problem(response: httpx2.Response, token: SecretStr) -> ProoflineError:
     )
 
 
-def delay_within_deadline(delay: float) -> float:
+def delay_within_deadline(delay: float, deadline: float | None = None) -> float:
     budget = remaining()
+    if deadline is not None:
+        operation_budget = max(0.0, deadline - monotonic())
+        budget = operation_budget if budget is None else min(budget, operation_budget)
     return delay if budget is None else min(delay, budget)
 
 
@@ -500,11 +503,11 @@ class RetryTransport(httpx2.BaseTransport):
         self._inner = SyncHTTPTransport()
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        deadline = monotonic() + self._timeout
+        caller_deadline = DEADLINE.get()
+        if caller_deadline is not None:
+            deadline = min(deadline, caller_deadline)
         for attempt in range(4):
-            deadline = monotonic() + self._timeout
-            caller_deadline = DEADLINE.get()
-            if caller_deadline is not None:
-                deadline = min(deadline, caller_deadline)
             self._pacer.wait_sync(deadline)
             limit_timeout(request, deadline)
             marker = IO_DEADLINE.set(io_deadline(deadline))
@@ -541,7 +544,7 @@ class RetryTransport(httpx2.BaseTransport):
                 or delay is None
             ):
                 raise error from None
-            sleep(delay_within_deadline(delay))
+            sleep(delay_within_deadline(delay, deadline))
         raise timeout_error()
 
     def close(self) -> None:
@@ -556,11 +559,11 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
         self._inner = httpx2.AsyncHTTPTransport()
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        deadline = monotonic() + self._timeout
+        caller_deadline = DEADLINE.get()
+        if caller_deadline is not None:
+            deadline = min(deadline, caller_deadline)
         for attempt in range(4):
-            deadline = monotonic() + self._timeout
-            caller_deadline = DEADLINE.get()
-            if caller_deadline is not None:
-                deadline = min(deadline, caller_deadline)
             await self._pacer.wait_async(deadline)
             limit_timeout(request, deadline)
             try:
@@ -597,7 +600,7 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
                 or delay is None
             ):
                 raise error from None
-            await async_sleep(delay_within_deadline(delay))
+            await async_sleep(delay_within_deadline(delay, deadline))
         raise timeout_error()
 
     async def aclose(self) -> None:

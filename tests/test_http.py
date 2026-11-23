@@ -275,9 +275,7 @@ async def test_async_callback_can_finish_after_deadline_before_wait_times_out(
 
     with Server(lambda request, index: Reply(body=review("PENDING"))) as server:
         async with AsyncProoflineClient(TOKEN, base_url=server.url) as client:
-            result = await client.wait_for_review(
-                ORG, REVIEW, timeout=5, on_update=slow_callback
-            )
+            result = await client.wait_for_review(ORG, REVIEW, timeout=5, on_update=slow_callback)
         assert result.status == "TIMED_OUT"
         assert completed == ["finished"]
         assert len(server.requests) == 1
@@ -1088,6 +1086,25 @@ async def test_retry_after_waits_for_server_then_returns_typed_success(
             assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
         assert clock.delays == [2.0, 2.0]
         assert len(server.requests) == 2
+
+
+@MODES
+async def test_http_timeout_covers_retry_attempts_and_waits(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(
+        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "2"})
+    ) as server:
+        async with session(mode, server.url, timeout=5) as client:
+            with pytest.raises(ProoflineError) as raised:
+                if mode == "sync":
+                    client._http.get("/")
+                else:
+                    await client._http.get("/")
+            assert raised.value.type == "urn:proofline:sdk:timeout"
+        assert len(server.requests) == 3
+    assert clock.delays == [2.0, 2.0, 1.0]
 
 
 @MODES
