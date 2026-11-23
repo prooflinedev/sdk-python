@@ -2961,7 +2961,7 @@ async def main() -> None:
                     await waiter_task_3
                 assert not waiter_task_3.done()
                 clock.advance(1.0)
-                res_3 = await waiter_task_3
+                res_3 = await asyncio.wait_for(asyncio.shield(waiter_task_3), timeout=1.0)
                 assert res_3.status == "TIMED_OUT"
                 assert callback_running.is_set()
                 assert not callback_finished.is_set()
@@ -2994,20 +2994,20 @@ async def main() -> None:
                 except (asyncio.CancelledError, BaseException):
                     pass
         finally:
+            release_callback.set()
             if not waiter_task_3.done():
                 waiter_task_3.cancel()
             try:
-                await waiter_task_3
+                await asyncio.wait_for(waiter_task_3, timeout=1.0)
             except (asyncio.CancelledError, BaseException):
                 pass
             client_module.async_create_task = orig_create_task_3
             sleep_forbidden = False
-            release_callback.set()
             if cb_task_3 is not None:
                 if not cb_task_3.done():
                     cb_task_3.cancel()
                 try:
-                    await cb_task_3
+                    await asyncio.wait_for(cb_task_3, timeout=1.0)
                 except (asyncio.CancelledError, BaseException):
                     pass
 
@@ -5177,6 +5177,23 @@ asyncio.run(main())
 
     assert client_module._is_immutable(curr_obj) is False
 
+    # Explicit reference to instance __dict__ points to the exact same cloned dictionary
+    class SharedDictOwner:
+        def __init__(self) -> None:
+            self.x = 42
+
+    owner = SharedDictOwner()
+    detail_dict_ref = CustomerReviewDetail.from_dict(responses[1])
+    detail_dict_ref.additional_properties["owner"] = owner
+    detail_dict_ref.additional_properties["owner_dict"] = owner.__dict__
+    snap_dict_ref = _snapshot_review(detail_dict_ref)
+    assert snap_dict_ref is not None
+    copied_owner = snap_dict_ref.additional_properties["owner"]
+    copied_dict = snap_dict_ref.additional_properties["owner_dict"]
+    assert copied_dict is copied_owner.__dict__
+    copied_dict["x"] = 99
+    assert copied_owner.x == 99
+
     # Non-callable object with immutable __self__ is not classified as immutable
     class NonCallableWithSelf:
         __self__ = 42
@@ -5574,6 +5591,7 @@ async def test_wait_for_review_pending_futures_and_clock(
             assert t_task is not None
             assert id(t_task) in client_module._DETACHED_TASKS
             assert getattr(t_loop, "_proofline_detached_tasks", {}).get(id(t_task)) is t_task
+            t_fut.set_exception(RuntimeError("failed before close"))
         finally:
             if t_task is not None:
                 setattr(t_task, "_log_destroy_pending", False)

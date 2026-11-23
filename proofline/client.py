@@ -472,11 +472,43 @@ def _get_obj_attrs(obj: Any) -> list[tuple[Any, bool, Any]]:
                 except AttributeError:
                     pass
 
-    if hasattr(obj, "__dict__") and isinstance(obj.__dict__, dict):
-        for k, v in obj.__dict__.items():
-            items.append((k, False, v))
-
     return items
+
+
+def _install_cloned_dict(
+    val: Any,
+    new_obj: Any,
+    memo: dict[int, Any],
+    stack: list[Any],
+) -> None:
+    if hasattr(val, "__dict__"):
+        try:
+            inst_dict = val.__dict__
+            if isinstance(inst_dict, dict):
+                dict_id = id(inst_dict)
+                if dict_id in memo:
+                    cloned_dict = memo[dict_id]
+                else:
+                    try:
+                        cloned_dict = dict.__new__(type(inst_dict))
+                        dict.clear(cloned_dict)
+                    except Exception:
+                        cloned_dict = {}
+                    memo[dict_id] = cloned_dict
+                    for k, v in inst_dict.items():
+                        if _is_immutable(k) and _is_immutable(v):
+                            if type(k) is bytes and len(k) > _MAX_SAFE_BUFFER_SIZE:
+                                continue
+                            if type(v) is bytes and len(v) > _MAX_SAFE_BUFFER_SIZE:
+                                continue
+                            cloned_dict[k] = v
+                    stack.append((_DICT_EXPAND, cloned_dict, iter(inst_dict.items())))
+                try:
+                    new_obj.__dict__ = cloned_dict
+                except AttributeError:
+                    pass
+        except Exception:
+            pass
 
 
 _ITEM_TASK = 1
@@ -563,6 +595,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         return members
 
     stack: list[Any] = [(_OBJ_EXPAND, root, iter(_get_obj_attrs(detail)))]
+    _install_cloned_dict(detail, root, memo, stack)
 
     while stack:
         if _deadline_expired():
@@ -626,6 +659,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             return None
                     memo[val_id] = res_empty
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                        _install_cloned_dict(val, res_empty, memo, stack)
                         stack.append((_OBJ_EXPAND, res_empty, iter(_get_obj_attrs(val))))
                     _assign_target(target, key, is_attr, res_empty)
                 else:
@@ -674,6 +708,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         )
                     )
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    _install_cloned_dict(val, new_dict, memo, stack)
                     stack.append((_OBJ_EXPAND, new_dict, iter(_get_obj_attrs(val))))
                 stack.append((_DICT_EXPAND, new_dict, iter(val.items())))
             elif isinstance(val, list):
@@ -696,6 +731,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 _assign_target(target, key, is_attr, new_list)
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    _install_cloned_dict(val, new_list, memo, stack)
                     stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
             elif isinstance(val, set):
                 if type(val) is not set and _has_mutable_class_attrs(type(val)):
@@ -737,6 +773,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 memo[val_id] = new_set
                 _assign_target(target, key, is_attr, new_set)
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    _install_cloned_dict(val, new_set, memo, stack)
                     stack.append((_OBJ_EXPAND, new_set, iter(_get_obj_attrs(val))))
                 if set_len > 0:
                     orig_set_members = _collect_set_members(val)
@@ -779,6 +816,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             )
                     memo[val_id] = res_empty_fs
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                        _install_cloned_dict(val, res_empty_fs, memo, stack)
                         stack.append((_OBJ_EXPAND, res_empty_fs, iter(_get_obj_attrs(val))))
                     _assign_target(target, key, is_attr, res_empty_fs)
                 else:
@@ -821,6 +859,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 _assign_target(target, key, is_attr, new_deque)
                 stack.append((_LIST_EXPAND, new_deque, deque.__iter__(val)))
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    _install_cloned_dict(val, new_deque, memo, stack)
                     stack.append((_OBJ_EXPAND, new_deque, iter(_get_obj_attrs(val))))
             elif isinstance(val, bytearray):
                 if type(val) is not bytearray and _has_mutable_class_attrs(type(val)):
@@ -839,6 +878,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 memo[val_id] = resolved
                 _assign_target(target, key, is_attr, resolved)
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    _install_cloned_dict(val, resolved, memo, stack)
                     stack.append((_OBJ_EXPAND, resolved, iter(_get_obj_attrs(val))))
             elif isinstance(val, array.array):
                 if type(val) is not array.array and _has_mutable_class_attrs(type(val)):
@@ -902,6 +942,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 memo[val_id] = resolved_arr
                 _assign_target(target, key, is_attr, resolved_arr)
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    _install_cloned_dict(val, resolved_arr, memo, stack)
                     stack.append((_OBJ_EXPAND, resolved_arr, iter(_get_obj_attrs(val))))
             elif isinstance(val, memoryview):
                 if val.nbytes > _MAX_SAFE_BUFFER_SIZE:
@@ -1013,6 +1054,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             ) from exc
                         memo[exp_id] = cloned_exporter
                         if hasattr(exporter, "__dict__") or hasattr(exporter, "__slots__"):
+                            _install_cloned_dict(exporter, cloned_exporter, memo, stack)
                             stack.append(
                                 (_OBJ_EXPAND, cloned_exporter, iter(_get_obj_attrs(exporter)))
                             )
@@ -1180,6 +1222,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             ) from exc
                         memo[id(tz)] = copied_tz
                         if hasattr(tz, "__dict__") or hasattr(tz, "__slots__"):
+                            _install_cloned_dict(tz, copied_tz, memo, stack)
                             stack.append((_OBJ_EXPAND, copied_tz, iter(_get_obj_attrs(tz))))
 
                 if type(val) is datetime.datetime:
@@ -1219,6 +1262,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     memo[val_id] = new_dt
                     _assign_target(target, key, is_attr, new_dt)
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                        _install_cloned_dict(val, new_dt, memo, stack)
                         stack.append((_OBJ_EXPAND, new_dt, iter(_get_obj_attrs(val))))
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                 if _has_mutable_class_attrs(type(val)):
@@ -1247,6 +1291,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     ) from exc
                 memo[val_id] = new_obj
                 _assign_target(target, key, is_attr, new_obj)
+                _install_cloned_dict(val, new_obj, memo, stack)
                 stack.append((_OBJ_EXPAND, new_obj, iter(_get_obj_attrs(val))))
             else:
                 raise TypeError(
@@ -1398,6 +1443,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         return None
                 memo[val_id] = res_tuple
             if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
+                _install_cloned_dict(orig_val, res_tuple, memo, stack)
                 stack.append((_OBJ_EXPAND, res_tuple, iter(_get_obj_attrs(orig_val))))
             _assign_target(target, key, is_attr, res_tuple)
 
@@ -1856,16 +1902,34 @@ def _ensure_loop_close_hooked(loop: Any) -> bool:
     try:
         orig_loop_close = loop.close
 
+        def _drain_exception(target: Any) -> None:
+            try:
+                is_done = target.done() if hasattr(target, "done") else AsyncFuture.done(target)
+                is_canc = (
+                    target.cancelled()
+                    if hasattr(target, "cancelled")
+                    else AsyncFuture.cancelled(target)
+                )
+                if is_done and not is_canc:
+                    if hasattr(target, "exception"):
+                        target.exception()
+                    else:
+                        AsyncFuture.exception(target)
+            except BaseException:
+                pass
+
         def _hooked_loop_close(*args: Any, **kwargs: Any) -> Any:
             close_res = orig_loop_close(*args, **kwargs)
             l_futs = getattr(loop, "_proofline_detached_futures", None)
             if l_futs is not None:
-                for fid in list(l_futs.keys()):
+                for fid, f in list(l_futs.items()):
+                    _drain_exception(f)
                     _DETACHED_FUTURES.pop(fid, None)
                 l_futs.clear()
             l_tasks = getattr(loop, "_proofline_detached_tasks", None)
             if l_tasks is not None:
-                for tid in list(l_tasks.keys()):
+                for tid, t in list(l_tasks.items()):
+                    _drain_exception(t)
                     _DETACHED_TASKS.pop(tid, None)
                 l_tasks.clear()
             for fid, f in list(_DETACHED_FUTURES.items()):
@@ -1875,6 +1939,7 @@ def _ensure_loop_close_hooked(loop: Any) -> bool:
                 except BaseException:
                     f_loop = getattr(f, "_loop", None)
                 if f_loop is loop:
+                    _drain_exception(f)
                     _DETACHED_FUTURES.pop(fid, None)
             for tid, t in list(_DETACHED_TASKS.items()):
                 t_loop = None
@@ -1883,6 +1948,7 @@ def _ensure_loop_close_hooked(loop: Any) -> bool:
                 except BaseException:
                     t_loop = getattr(t, "_loop", None)
                 if t_loop is loop:
+                    _drain_exception(t)
                     _DETACHED_TASKS.pop(tid, None)
             return close_res
 
@@ -2524,10 +2590,10 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery. Tuples with more than 1,000 items, mutable buffers or memoryviews with
-        more than 65,536 bytes (or backed by a buffer larger than 65,536 bytes), sets,
-        frozensets, or deques with more than 65,536 items in review extension data skip
-        on_poll snapshot delivery even with time remaining, and snapshot copy errors on
+        delivery. Tuples with more than 1,000 items, immutable bytes, mutable buffers
+        or memoryviews with more than 65,536 bytes (or backed by a buffer larger than 65,536
+        bytes), sets, frozensets, or deques with more than 65,536 items in review extension
+        data skip on_poll snapshot delivery even with time remaining, and snapshot copy errors on
         unsupported mutable values propagate before on_poll runs.
         on_poll exceptions and return-validation errors propagate even when a
         terminal outcome has already been determined and can prevent the waiter
@@ -2977,21 +3043,22 @@ class AsyncProoflineClient(AsyncOperations):
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
         is reached are delivered; deadline expiry can suppress delivery. Tuples
-        with more than 1,000 items, mutable buffers or memoryviews with more than 65,536 bytes
-        (or backed by a buffer larger than 65,536 bytes), sets, frozensets, or deques with
-        more than 65,536 items in review extension data skip on_poll snapshot delivery even
-        with time remaining, and snapshot copy errors on unsupported mutable values propagate
-        before on_poll runs. Callback
+        with more than 1,000 items, immutable bytes, mutable buffers or memoryviews
+        with more than 65,536 bytes (or backed by a buffer larger than 65,536 bytes),
+        sets, frozensets, or deques with more than 65,536 items in review extension data
+        skip on_poll snapshot delivery even with time remaining, and snapshot copy errors
+        on unsupported mutable values propagate before on_poll runs. Callback
         return-validation errors and inline exceptions propagate unconditionally, even when a
         terminal outcome has already been determined (cancellation requested during callback
         invocation takes precedence over return validation), preventing the waiter from
         returning a classified outcome.
-        Separately, awaitable failures occurring before the deadline propagate, but the
-        deadline suppresses failures of awaitables that finish or return after expiry:
+        Failure propagation depends on the awaitable type and the polling deadline:
         already-done futures must be returned before the deadline to propagate (failures of
         already-done futures returned after expiry are detached and suppressed), coroutine
         failures are timed at wrapper completion rather than when the waiter retrieves
-        them, and pending future failures are cut off at their done-callback execution.
+        them, and pending future failures propagate only if their done callback executes before
+        the deadline expires (cutting off at done-callback execution and allowing any
+        classified outcome to be returned).
         This allows any classified outcome to be returned when a callback finishes or returns
         after the deadline. When the deadline expires or when the wait is
         cancelled, unstarted coroutines returned by on_poll are closed without entering
@@ -3169,6 +3236,16 @@ class AsyncProoflineClient(AsyncOperations):
                                     except BaseException:
                                         _detach_overdue_future(res)
                                         raise
+                                    finally:
+                                        try:
+                                            if hasattr(res, "remove_done_callback"):
+                                                res.remove_done_callback(_on_future_done)
+                                            else:
+                                                AsyncFuture.remove_done_callback(
+                                                    res, _on_future_done
+                                                )
+                                        except BaseException:
+                                            pass
                                     deadline_val = _transport.DEADLINE.get()
                                     cb_finished_in_budget = bool(completed_at) and (
                                         deadline_val is None or completed_at[0] <= deadline_val
