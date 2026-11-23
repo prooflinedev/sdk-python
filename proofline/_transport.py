@@ -192,6 +192,8 @@ def limit_timeout(request: httpx2.Request) -> None:
     if budget is None:
         return
     if budget <= 0:
+        # Only the caller's budget is spent here, so DEADLINE ends this attempt.
+        DEADLINE_BOUND.set(True)
         raise timeout_error()
     configured = request.extensions.get("timeout", {})
     request.extensions["timeout"] = {

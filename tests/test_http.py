@@ -1500,6 +1500,32 @@ async def test_a_request_the_wait_deadline_ends_is_timed_out_while_the_clock_lag
 
 
 @MODES
+async def test_a_wait_budget_spent_before_the_attempt_starts_is_timed_out(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The attempt's own 30 s deadline comes before the wait's 40 s one, so the wait
+    # deadline does not bound it, but the wait budget runs out before limit_timeout.
+    clock = Clock(monkeypatch)
+    attempt_deadline = _transport.attempt_deadline
+
+    def set_up_then_expire(timeout: float) -> float:
+        deadline = attempt_deadline(timeout)
+        assert not _transport.DEADLINE_BOUND.get()
+        caller = _transport.DEADLINE.get()
+        assert caller is not None
+        clock.now = caller + 1
+        return deadline
+
+    monkeypatch.setattr(_transport, "attempt_deadline", set_up_then_expire)
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=40)
+            assert result.status == "TIMED_OUT"
+            assert result.review is None
+        assert server.requests == []
+
+
+@MODES
 async def test_an_http_problem_named_like_the_sdk_timeout_is_not_timed_out(mode: str) -> None:
     # The problem type comes from the server's document, so only a status-0 error is
     # the SDK's own timeout, even while the wait deadline bounds the attempt.
