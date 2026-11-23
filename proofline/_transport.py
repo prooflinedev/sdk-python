@@ -455,8 +455,8 @@ class RetryTransport(httpx2.BaseTransport):
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
-            deadline = attempt_deadline(self._timeout)
             limit_timeout(request)
+            deadline = attempt_deadline(self._timeout)
             marker = IO_DEADLINE.set(io_deadline(deadline))
             try:
                 response = self._inner.handle_request(request)
@@ -506,8 +506,8 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
-            deadline = attempt_deadline(self._timeout)
             limit_timeout(request)
+            deadline = attempt_deadline(self._timeout)
             try:
                 with anyio.fail_after(io_budget(deadline)):
                     response = await self._inner.handle_async_request(request)

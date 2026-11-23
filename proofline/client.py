@@ -566,6 +566,8 @@ class ProoflineClient(Operations):
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
+                # Only this poll's own attempts can show that the wait deadline ended it.
+                _transport.DEADLINE_BOUND.set(False)
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
@@ -960,6 +962,8 @@ class AsyncProoflineClient(AsyncOperations):
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
+                # Only this poll's own attempts can show that the wait deadline ended it.
+                _transport.DEADLINE_BOUND.set(False)
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
