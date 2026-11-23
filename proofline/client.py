@@ -317,6 +317,12 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
         return True
     if isinstance(val, type):
         return val in _SAFE_BUILTIN_CLASSES
+    if seen is None:
+        seen = set()
+    val_id = id(val)
+    if val_id in seen:
+        return False
+    seen.add(val_id)
     if hasattr(val, "__self__") and not _is_immutable(val.__self__, seen):
         return False
     t = type(val)
@@ -862,12 +868,6 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 _py_release_buffer(ctypes.byref(b_exp_check))
                     except BaseException:
                         pass
-                    if hasattr(exporter, "__len__"):
-                        try:
-                            if len(exporter) > _MAX_SAFE_BUFFER_SIZE:
-                                return None
-                        except BaseException:
-                            pass
                 resolved_mv: Any
                 if isinstance(exporter, (bytearray, array.array, bytes)):
                     if type(exporter) not in (
@@ -883,13 +883,30 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if exp_id in memo:
                         cloned_exporter = memo[exp_id]
                     else:
-                        exp_bytes_len = (
-                            len(exporter)
-                            if isinstance(exporter, (bytes, bytearray))
-                            else exporter.buffer_info()[1] * exporter.itemsize
-                        )
-                        if exp_bytes_len > _MAX_SAFE_BUFFER_SIZE:
-                            return None
+                        exp_native_len: int | None = None
+                        try:
+                            b_chk2 = _Py_buffer()
+                            if _py_get_buffer(exporter, ctypes.byref(b_chk2), 0x0118) == 0:
+                                try:
+                                    exp_native_len = b_chk2.len
+                                finally:
+                                    _py_release_buffer(ctypes.byref(b_chk2))
+                        except BaseException:
+                            pass
+                        if exp_native_len is not None:
+                            if exp_native_len > _MAX_SAFE_BUFFER_SIZE:
+                                return None
+                        else:
+                            if isinstance(exporter, bytearray):
+                                exp_bytes_len = bytearray.__len__(exporter)
+                            elif isinstance(exporter, bytes):
+                                exp_bytes_len = bytes.__len__(exporter)
+                            else:
+                                exp_bytes_len = array.array.buffer_info(exporter)[
+                                    1
+                                ] * array.array.itemsize.__get__(exporter)
+                            if exp_bytes_len > _MAX_SAFE_BUFFER_SIZE:
+                                return None
                         try:
                             if isinstance(exporter, bytes):
                                 if type(exporter) is bytes:
@@ -1127,6 +1144,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if isinstance(val, str):
                         new_obj = str.__new__(type(val), val)
                     elif isinstance(val, bytes):
+                        if bytes.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
+                            return None
                         new_obj = bytes.__new__(type(val), val)
                     elif isinstance(val, int):
                         new_obj = int.__new__(type(val), val)
@@ -1748,34 +1767,39 @@ def _detach_overdue_future(fut: Any) -> None:
         if loop_futures is not None:
             loop_futures[fut_id] = fut
 
-        try:
-            _DETACHED_FUTURES[fut_id] = fut
-        except (TypeError, BaseException):
-            pass
-
-        if not getattr(loop, "_proofline_close_hooked", False):
-            orig_loop_close = loop.close
-
-            def _hooked_loop_close(*args: Any, **kwargs: Any) -> Any:
-                l_futs = getattr(loop, "_proofline_detached_futures", None)
-                if l_futs is not None:
-                    for fid in list(l_futs.keys()):
-                        _DETACHED_FUTURES.pop(fid, None)
-                    l_futs.clear()
-                for fid, f in list(_DETACHED_FUTURES.items()):
-                    f_loop = None
-                    try:
-                        f_loop = f.get_loop() if hasattr(f, "get_loop") else AsyncFuture.get_loop(f)
-                    except BaseException:
-                        f_loop = getattr(f, "_loop", None)
-                    if f_loop is loop:
-                        _DETACHED_FUTURES.pop(fid, None)
-                return orig_loop_close(*args, **kwargs)
-
+        hook_installed = getattr(loop, "_proofline_close_hooked", False)
+        if not hook_installed:
             try:
+                orig_loop_close = loop.close
+
+                def _hooked_loop_close(*args: Any, **kwargs: Any) -> Any:
+                    l_futs = getattr(loop, "_proofline_detached_futures", None)
+                    if l_futs is not None:
+                        for fid in list(l_futs.keys()):
+                            _DETACHED_FUTURES.pop(fid, None)
+                        l_futs.clear()
+                    for fid, f in list(_DETACHED_FUTURES.items()):
+                        f_loop = None
+                        try:
+                            f_loop = (
+                                f.get_loop() if hasattr(f, "get_loop") else AsyncFuture.get_loop(f)
+                            )
+                        except BaseException:
+                            f_loop = getattr(f, "_loop", None)
+                        if f_loop is loop:
+                            _DETACHED_FUTURES.pop(fid, None)
+                    return orig_loop_close(*args, **kwargs)
+
                 loop.close = _hooked_loop_close  # type: ignore[method-assign]
                 setattr(loop, "_proofline_close_hooked", True)
+                hook_installed = True
             except BaseException:
+                hook_installed = False
+
+        if hook_installed:
+            try:
+                _DETACHED_FUTURES[fut_id] = fut
+            except (TypeError, BaseException):
                 pass
 
         def _on_detached_fut_done(t: Any) -> None:
@@ -2831,7 +2855,8 @@ class AsyncProoflineClient(AsyncOperations):
         cancelled, unstarted coroutines returned by on_poll are closed without entering
         their body (a wrapper task may already have been scheduled), while already-running
         callback tasks and futures are detached without cancellation and may continue
-        running. Synchronous callbacks must return before a terminal result can be
+        running (late SystemExit and KeyboardInterrupt from already-scheduled tasks are not
+        suppressed). Synchronous callbacks must return before a terminal result can be
         delivered and the polling deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
@@ -2871,13 +2896,25 @@ class AsyncProoflineClient(AsyncOperations):
                             _transport.DEADLINE.reset(deadline_token)
                         cb_return_time = monotonic()
                         if waiter_task is not None:
-                            current_cancelling = 0
+                            is_task_cancelled = False
                             try:
-                                if hasattr(waiter_task, "cancelling"):
-                                    current_cancelling = waiter_task.cancelling()
+                                if (
+                                    hasattr(waiter_task, "cancelling")
+                                    and waiter_task.cancelling() > initial_cancelling
+                                ):
+                                    is_task_cancelled = True
+                                elif (
+                                    hasattr(waiter_task, "cancelling")
+                                    and waiter_task.cancelling() > 0
+                                ):
+                                    is_task_cancelled = True
+                                elif hasattr(waiter_task, "cancelled") and waiter_task.cancelled():
+                                    is_task_cancelled = True
+                                elif getattr(waiter_task, "_must_cancel", False):
+                                    is_task_cancelled = True
                             except BaseException:
                                 pass
-                            if current_cancelling > initial_cancelling:
+                            if is_task_cancelled:
                                 try:
                                     if isawaitable(res):
                                         _cleanup_discarded_awaitable(res, waiter_task=waiter_task)

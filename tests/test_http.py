@@ -1317,11 +1317,19 @@ async def test_wait_ends_on_the_read_that_names_another_head(
     # Mismatch with on_poll also ends on the read that names another head (2 requests)
     with Server(lambda request, index: Reply(body=responses[index])) as server:
         polled_reviews: list[tuple[Any, int]] = []
-        cb = (
-            (lambda r: polled_reviews.append((r, len(server.requests))))
-            if mode == "sync"
-            else (lambda r: polled_reviews.append((r, len(server.requests))))
-        )
+        if mode == "async":
+
+            async def async_mismatch_cb(r: Any) -> None:
+                await asyncio.sleep(0.01)
+                polled_reviews.append((r, len(server.requests)))
+
+            cb: Any = async_mismatch_cb
+        else:
+
+            def sync_mismatch_cb(r: Any) -> None:
+                polled_reviews.append((r, len(server.requests)))
+
+            cb = sync_mismatch_cb
         async with session(mode, server.url) as client:
             result = await call(
                 client,
@@ -5346,6 +5354,65 @@ async def test_wait_for_review_pending_futures_and_clock(
             elif not late_fut.cancelled():
                 try:
                     late_fut.exception()
+                except BaseException:
+                    pass
+        loop.set_exception_handler(old_h)
+
+    # Overdue pending future failure where failure occurs after deadline
+    late_failing_fut: TrackedFuture | None = TrackedFuture(loop=asyncio.get_running_loop())
+    late_failing_fut_ref = weakref.ref(late_failing_fut)
+    late_failing_producer: asyncio.Task[None] | None = None
+
+    async def fail_after_deadline() -> None:
+        await asyncio.sleep(0)
+        clock.now += 200.0
+        if late_failing_fut is not None:
+            late_failing_fut.set_exception(ValueError("failure after deadline"))
+
+    def late_failing_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal late_failing_producer
+        late_failing_producer = asyncio.create_task(fail_after_deadline())
+        assert late_failing_fut is not None
+        return late_failing_fut
+
+    unhandled_after_reports: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, ctx: unhandled_after_reports.append(ctx))
+    try:
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_after = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=late_failing_cb,
+                )
+                assert res_after.status == "COMPLETED"
+                assert late_failing_fut is not None
+                assert late_failing_fut.done()
+                assert clock.now >= 200.0
+                if late_failing_producer is not None:
+                    await late_failing_producer
+                await asyncio.sleep(0)
+                assert late_failing_fut.exception_retrieved is True
+                assert id(late_failing_fut) not in client_module._DETACHED_FUTURES
+                late_failing_fut = None
+                gc.collect()
+                assert late_failing_fut_ref() is None
+                assert unhandled_after_reports == []
+    finally:
+        if late_failing_producer is not None:
+            if not late_failing_producer.done():
+                late_failing_producer.cancel()
+            try:
+                await late_failing_producer
+            except (asyncio.CancelledError, BaseException):
+                pass
+        if late_failing_fut is not None:
+            if not late_failing_fut.done():
+                late_failing_fut.cancel()
+            elif not late_failing_fut.cancelled():
+                try:
+                    late_failing_fut.exception()
                 except BaseException:
                     pass
         loop.set_exception_handler(old_h)
