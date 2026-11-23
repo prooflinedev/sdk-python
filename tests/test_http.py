@@ -1430,6 +1430,209 @@ async def test_retry_after_is_bounded_by_wait_deadline(
         assert clock.delays == [10]
 
 
+# A wait outlives one request's retry budget: a rate limit or an unavailable
+# service is polled again within the wait's deadline, never earlier than the
+# service asked, and only the deadline turns it into TIMED_OUT.
+@MODES
+@pytest.mark.parametrize("status", [429, 503])
+async def test_wait_keeps_polling_after_one_request_exhausts_its_retries(
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+
+    def respond(request: Request, index: int) -> Reply:
+        if index < 5:
+            return Reply(status, {"detail": "Unavailable."}, {"Retry-After": "0"})
+        return Reply(body=review())
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=300)
+            assert result.status == "COMPLETED"
+        # Four attempts in the first read, then the wait's own five-second poll.
+        assert len(server.requests) == 6
+        assert clock.delays == [0, 0, 0, 5, 0]
+
+
+@MODES
+@pytest.mark.parametrize("status", [429, 503])
+async def test_wait_honors_a_retry_after_longer_than_one_request_retries(
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    seen: list[float] = []
+
+    def respond(request: Request, index: int) -> Reply:
+        seen.append(clock.now)
+        # Completion is only offered once the asked-for 90 seconds have passed.
+        if clock.now < seen[0] + 90:
+            return Reply(status, {"detail": "Unavailable."}, {"Retry-After": "90"})
+        return Reply(body=review())
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=300)
+            assert result.status == "COMPLETED"
+        assert seen == [seen[0], seen[0] + 90]
+        # Slept in steps of at most a minute.
+        assert clock.delays == [60, 30]
+
+
+@MODES
+async def test_wait_holds_a_retry_after_too_long_for_a_float_until_its_deadline(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(
+        lambda request, index: Reply(503, {"detail": "Unavailable."}, {"Retry-After": "9" * 400})
+    ) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=150)
+            assert result.status == "TIMED_OUT"
+        assert len(server.requests) == 1
+        assert clock.delays == [60, 60, 30]
+
+
+@MODES
+async def test_wait_retries_a_rate_limit_without_a_problem_document(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+
+    def respond(request: Request, index: int) -> Reply:
+        if index < 4:
+            return Reply(503, b"<html>Service Unavailable</html>", {"Content-Type": "text/html"})
+        return Reply(body=review())
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=300)
+            assert result.status == "COMPLETED"
+        assert len(server.requests) == 5
+        # The transport's own backoff (1, 2, 4), then the wait's hold (5) before read five.
+        assert clock.delays == [1, 2, 4, 5]
+
+
+@MODES
+async def test_wait_sleeps_a_very_long_retry_after_in_bounded_steps(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+
+    def respond(request: Request, index: int) -> Reply:
+        if index == 0:
+            return Reply(503, {"detail": "Unavailable."}, {"Retry-After": "100000"})
+        return Reply(body=review())
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=1e12)
+            assert result.status == "COMPLETED"
+        assert len(server.requests) == 2
+        # time.sleep overflows near 1e10 seconds, so no single sleep may grow with the header.
+        assert max(clock.delays) == 60
+        assert sum(clock.delays) == 100000
+
+
+@MODES
+@pytest.mark.parametrize("status", [429, 503])
+async def test_wait_raises_an_encoded_rate_limit_it_cannot_read(
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    body = gzip.compress(json.dumps({"detail": "Unavailable."}).encode())
+    with Server(
+        lambda request, index: Reply(status, body, {"Content-Encoding": "gzip", "Retry-After": "0"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_review", ORG, REVIEW, timeout=300)
+            assert raised.value.status == status
+            assert raised.value.type == "urn:proofline:sdk:invalid-response"
+            assert not raised.value.retryable
+        assert len(server.requests) == 1
+        assert clock.delays == []
+
+
+@MODES
+@pytest.mark.parametrize("status", [429, 503])
+async def test_a_rate_limit_problem_carries_its_retry_after(mode: str, status: int) -> None:
+    with Server(
+        lambda request, index: Reply(status, {"detail": "Later."}, {"Retry-After": "75"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "rerun_review", ORG, REVIEW)
+            assert raised.value.retryable
+            assert raised.value.retry_after == 75
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "get_finding", ORG, FINDING)
+            assert raised.value.retryable
+            assert raised.value.retry_after == 75
+    with Server(lambda request, index: Reply(403, {"detail": "No."})) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "get_finding", ORG, FINDING)
+            assert not raised.value.retryable
+            assert raised.value.retry_after is None
+
+
+@MODES
+@pytest.mark.parametrize("status", [429, 503])
+async def test_wait_times_out_when_retry_after_outlasts_its_deadline(
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(
+        lambda request, index: Reply(status, {"detail": "Unavailable."}, {"Retry-After": "90"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=60)
+            assert result.status == "TIMED_OUT"
+            assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+        assert len(server.requests) == 1
+        assert clock.delays == [60]
+
+
+@MODES
+async def test_wait_keeps_the_last_review_read_before_the_service_was_unavailable(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+
+    def respond(request: Request, index: int) -> Reply:
+        if index == 0:
+            return Reply(body=review("RUNNING"))
+        return Reply(503, {"detail": "Unavailable."}, {"Retry-After": "90"})
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(client, "wait_for_review", ORG, REVIEW, timeout=100)
+            assert result.status == "TIMED_OUT"
+            assert result.review is not None
+            assert result.review.status == "RUNNING"
+        # A poll, a 90-second hold, a second unavailable read, then the deadline.
+        assert len(server.requests) == 3
+        assert clock.delays == [5, 60, 30, 5]
+
+
+@MODES
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 502])
+async def test_wait_still_raises_problems_that_are_not_retryable(
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(
+        lambda request, index: Reply(status, {"detail": "No."}, {"Retry-After": "0"})
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_review", ORG, REVIEW, timeout=300)
+            assert raised.value.status == status
+        assert len(server.requests) == 1
+        assert clock.delays == []
+
+
 @MODES
 @pytest.mark.parametrize("status", [429, 503, 403])
 async def test_deadline_expiring_with_a_received_problem_chunk_keeps_retry_policy(
