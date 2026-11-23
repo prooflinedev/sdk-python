@@ -83,23 +83,28 @@ Inspect deployment verification records for a specific commit SHA using `get_com
 ```python
 verifications = client.get_commit_deploy_verifications(organization_id, repository_id, commit_sha)
 for deploy in verifications.deploys:
-    print(deploy.environment_id, deploy.status)
+    print(deploy.environment_id, deploy.state)
 ```
 
 To request an ad-hoc scan on a repository, use `request_scan`:
 
 ```python
+from uuid import uuid4
 from proofline import ScanRequestBody
 
 response = client.request_scan(
     organization_id,
     repository_id,
-    body=ScanRequestBody(budget_credits=100),
+    body=ScanRequestBody(
+        budget_credits=100,
+        commit_sha=commit_sha,
+        request_id=uuid4(),
+    ),
 )
 print(response.outcome, response.resolution_id)
 ```
 
-Both methods accept canonical `organization_id` / `repository_id` or `org_id` / `repo_id` aliases, and validate that `commit_sha` is a full 40- or 64-character hexadecimal SHA.
+Both methods accept canonical `organization_id` / `repository_id` or `org_id` / `repo_id` aliases. `get_commit_deploy_verifications` validates that `commit_sha` is a full 40- or 64-character hexadecimal SHA before sending the request.
 
 ## Review exports
 
