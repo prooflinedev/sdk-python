@@ -535,6 +535,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     pending_assignments: dict[int, list[tuple[Any, Any, bool]]] = {}
     fallback_built_frozensets: list[tuple[Any, list[Any]]] = []
     deferred_attr_assignments: list[tuple[Any, tuple[Any, bool], Any]] = []
+    populated_mutable_sets: list[tuple[Any, list[Any]]] = []
 
     def _collect_set_members(val: Any) -> list[Any] | None:
         if isinstance(val, set):
@@ -867,11 +868,37 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if arr_byte_count > _MAX_SAFE_BUFFER_SIZE:
                         return None
                 try:
-                    resolved_arr = cast(Any, array.array).__new__(type(val), val.typecode, val)
+                    try:
+                        native_tc = array.array.typecode.__get__(val)
+                    except BaseException:
+                        native_tc = val.typecode
+                    resolved_arr = cast(Any, array.array).__new__(type(val), native_tc, val)
                 except Exception as exc:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     ) from exc
+                clone_len: int | None = None
+                try:
+                    b_chk = _Py_buffer()
+                    if _py_get_buffer(resolved_arr, ctypes.byref(b_chk), 0x0118) == 0:
+                        try:
+                            clone_len = b_chk.len
+                        finally:
+                            _py_release_buffer(ctypes.byref(b_chk))
+                except BaseException:
+                    pass
+                if clone_len is not None:
+                    if clone_len > _MAX_SAFE_BUFFER_SIZE:
+                        return None
+                else:
+                    try:
+                        arr_clone_bytes = array.array.buffer_info(resolved_arr)[
+                            1
+                        ] * array.array.itemsize.__get__(resolved_arr)
+                    except BaseException:
+                        arr_clone_bytes = resolved_arr.buffer_info()[1] * resolved_arr.itemsize
+                    if arr_clone_bytes > _MAX_SAFE_BUFFER_SIZE:
+                        return None
                 memo[val_id] = resolved_arr
                 _assign_target(target, key, is_attr, resolved_arr)
                 if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
@@ -935,17 +962,50 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 if type(exporter) is bytes:
                                     cloned_exporter = bytes(exporter)
                                 else:
-                                    raw_exp = bytes(memoryview(exporter))
-                                    if len(raw_exp) > _MAX_SAFE_BUFFER_SIZE:
+                                    mv_exp = memoryview(exporter)
+                                    if mv_exp.nbytes > _MAX_SAFE_BUFFER_SIZE:
                                         return None
+                                    raw_exp = bytes(mv_exp)
                                     cloned_exporter = bytes.__new__(type(exporter), raw_exp)
                             elif isinstance(exporter, bytearray):
                                 cloned_exporter = bytearray.__new__(type(exporter))
                                 bytearray.__init__(cloned_exporter, exporter)
                             else:
+                                try:
+                                    native_exp_tc = array.array.typecode.__get__(exporter)
+                                except BaseException:
+                                    native_exp_tc = exporter.typecode
                                 cloned_exporter = cast(Any, array.array).__new__(
-                                    type(exporter), exporter.typecode, exporter
+                                    type(exporter), native_exp_tc, exporter
                                 )
+                                clone_exp_len: int | None = None
+                                try:
+                                    b_chk = _Py_buffer()
+                                    if (
+                                        _py_get_buffer(cloned_exporter, ctypes.byref(b_chk), 0x0118)
+                                        == 0
+                                    ):
+                                        try:
+                                            clone_exp_len = b_chk.len
+                                        finally:
+                                            _py_release_buffer(ctypes.byref(b_chk))
+                                except BaseException:
+                                    pass
+                                if clone_exp_len is not None:
+                                    if clone_exp_len > _MAX_SAFE_BUFFER_SIZE:
+                                        return None
+                                else:
+                                    try:
+                                        arr_exp_bytes = array.array.buffer_info(cloned_exporter)[
+                                            1
+                                        ] * array.array.itemsize.__get__(cloned_exporter)
+                                    except BaseException:
+                                        arr_exp_bytes = (
+                                            cloned_exporter.buffer_info()[1]
+                                            * cloned_exporter.itemsize
+                                        )
+                                    if arr_exp_bytes > _MAX_SAFE_BUFFER_SIZE:
+                                        return None
                         except Exception as exc:
                             raise TypeError(
                                 "Unsupported mutable value in review extension data: "
@@ -1170,9 +1230,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if isinstance(val, str):
                         new_obj = str.__new__(type(val), val)
                     elif isinstance(val, bytes):
-                        raw_bytes = bytes(memoryview(val))
-                        if len(raw_bytes) > _MAX_SAFE_BUFFER_SIZE:
+                        mv_bytes = memoryview(val)
+                        if mv_bytes.nbytes > _MAX_SAFE_BUFFER_SIZE:
                             return None
+                        raw_bytes = bytes(mv_bytes)
                         new_obj = bytes.__new__(type(val), raw_bytes)
                     elif isinstance(val, int):
                         new_obj = int.__new__(type(val), val)
@@ -1557,6 +1618,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             "Unsupported mutable value in review extension data: "
                             f"{type(orig_val).__name__}"
                         )
+                    populated_mutable_sets.append((s, resolved_members))
                     changed = True
                 deferred_set_insertions = still_sets
 
@@ -1757,6 +1819,15 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             k = orig_k if _is_immutable(orig_k) else memo.get(id(orig_k), orig_k)
             try:
                 if k not in target_dict:
+                    return None
+            except Exception:
+                return None
+    for s, members in populated_mutable_sets:
+        for rm in members:
+            if _deadline_expired():
+                return None
+            try:
+                if rm not in s:
                     return None
             except Exception:
                 return None
@@ -2969,13 +3040,14 @@ class AsyncProoflineClient(AsyncOperations):
                         if waiter_task is not None:
                             is_task_cancelled = False
                             try:
-                                if hasattr(waiter_task, "cancelling"):
-                                    is_task_cancelled = (
-                                        waiter_task.cancelling() > initial_cancelling
-                                    )
-                                elif hasattr(waiter_task, "cancelled") and waiter_task.cancelled():
+                                if (
+                                    hasattr(waiter_task, "cancelling")
+                                    and waiter_task.cancelling() > initial_cancelling
+                                ):
                                     is_task_cancelled = True
-                                elif getattr(waiter_task, "_must_cancel", False):
+                                if hasattr(waiter_task, "cancelled") and waiter_task.cancelled():
+                                    is_task_cancelled = True
+                                if getattr(waiter_task, "_must_cancel", False):
                                     is_task_cancelled = True
                             except BaseException:
                                 pass

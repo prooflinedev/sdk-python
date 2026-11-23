@@ -3137,6 +3137,10 @@ async def main() -> None:
                     pass
             assert not waiter_task_4.done()
             clock.advance(1.0)
+            res_4 = await asyncio.wait_for(waiter_task_4, timeout=1.0)
+            assert res_4.status == "COMPLETED"
+            assert not callback_finished_term.is_set()
+
             release_callback_term.set()
             assert len(captured_case4_wrappers) == 1
             wrapper_4 = captured_case4_wrappers[0]
@@ -3159,8 +3163,6 @@ async def main() -> None:
                     await finish_waiter_4
                 except (asyncio.CancelledError, BaseException):
                     pass
-            res_4 = await waiter_task_4
-            assert res_4.status == "COMPLETED"
             assert callback_running_term.is_set()
             assert callback_finished_term.is_set()
             await asyncio.sleep(0.01)
@@ -3864,82 +3866,114 @@ asyncio.run(main())
 
         # Cancel the waiter while an UnhashableFuture is pending, then fail and release
         # the future and assert that the loop reports no unhandled exception.
-        from proofline.client import _DETACHED_FUTURES
+        # Run in a subprocess with a hard timeout, settling the callback future
+        # before joining the waiter.
+        unhashable_code = f"""
+import asyncio
+import sys
+import weakref
+from pathlib import Path
+from uuid import UUID
 
-        unhash_cancel_reports: list[dict[str, Any]] = []
-        loop = asyncio.get_running_loop()
-        old_h_unhash = loop.get_exception_handler()
-        loop.set_exception_handler(lambda _loop, ctx: unhash_cancel_reports.append(ctx))
-        try:
-            with Server(lambda request, index: Reply(body=responses[0])) as server:
-                async with session("async", server.url) as client:
-                    unhash_box: list[Any] = [UnhashableFuture(loop=loop)]
-                    cb_started = asyncio.Event()
+from tests.test_http import Server, Reply, session, review
+from proofline.client import _DETACHED_FUTURES
 
-                    def unhash_failing_cb(r: Any) -> Any:
-                        cb_started.set()
-                        return unhash_box[0]
+ORG = UUID("{ORG}")
+REVIEW = UUID("{REVIEW}")
 
-                    waiter_task = asyncio.create_task(
-                        client.wait_for_review(
-                            ORG,
-                            REVIEW,
-                            timeout=10,
-                            on_poll=unhash_failing_cb,
-                        )
-                    )
-                    cb_wait_task = asyncio.create_task(cb_started.wait())
-                    try:
-                        done_set, _ = await asyncio.wait(
-                            {cb_wait_task, waiter_task},
-                            timeout=5.0,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if waiter_task in done_set and not cb_started.is_set():
-                            cb_wait_task.cancel()
-                            await waiter_task
-                        assert cb_wait_task in done_set, "Callback startup timed out"
-                        waiter_task.cancel()
-                        cancelled = False
+class UnhashableFuture(asyncio.Future):
+    __hash__ = None  # type: ignore
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.exception_calls = 0
+
+    def exception(self):
+        self.exception_calls += 1
+        return super().exception()
+
+async def main():
+    unhash_cancel_reports = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, ctx: unhash_cancel_reports.append(ctx))
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session("async", server.url) as client:
+            unhash_box = [UnhashableFuture(loop=loop)]
+            cb_started = asyncio.Event()
+
+            def unhash_failing_cb(r):
+                cb_started.set()
+                return unhash_box[0]
+
+            waiter_task = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=unhash_failing_cb,
+                )
+            )
+            cb_wait_task = asyncio.create_task(cb_started.wait())
+            try:
+                done_set, _ = await asyncio.wait(
+                    {{cb_wait_task, waiter_task}},
+                    timeout=5.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter_task in done_set and not cb_started.is_set():
+                    cb_wait_task.cancel()
+                    await asyncio.wait_for(waiter_task, timeout=5.0)
+                assert cb_wait_task in done_set, "Callback startup timed out"
+                waiter_task.cancel()
+                cancelled = False
+                try:
+                    await asyncio.wait_for(waiter_task, timeout=5.0)
+                except asyncio.CancelledError:
+                    cancelled = True
+                assert cancelled
+                target_fut = unhash_box[0]
+                fut_weakref = weakref.ref(target_fut)
+                assert id(target_fut) in _DETACHED_FUTURES
+                target_fut.set_exception(RuntimeError("unhashable late failure"))
+                await asyncio.sleep(0)
+                assert id(target_fut) not in _DETACHED_FUTURES
+                assert target_fut.exception_calls > 0
+                del target_fut
+                unhash_box.clear()
+                import gc
+                gc.collect()
+                assert fut_weakref() is None
+                assert unhash_cancel_reports == []
+            finally:
+                if unhash_box:
+                    f = unhash_box[0]
+                    if not f.done():
+                        f.set_result(None)
+                    elif not f.cancelled():
                         try:
-                            await waiter_task
-                        except asyncio.CancelledError:
-                            cancelled = True
-                        assert cancelled
-                        target_fut = unhash_box[0]
-                        fut_weakref = weakref.ref(target_fut)
-                        assert id(target_fut) in _DETACHED_FUTURES
-                        target_fut.set_exception(RuntimeError("unhashable late failure"))
-                        await asyncio.sleep(0)
-                        assert id(target_fut) not in _DETACHED_FUTURES
-                        assert target_fut.exception_calls > 0
-                        del target_fut
-                        unhash_box.clear()
-                        import gc
+                            f.exception()
+                        except BaseException:
+                            pass
+                for t in (cb_wait_task, waiter_task):
+                    if not t.done():
+                        t.cancel()
+                    try:
+                        await asyncio.wait_for(t, timeout=5.0)
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                await asyncio.sleep(0)
 
-                        gc.collect()
-                        assert fut_weakref() is None
-                        assert unhash_cancel_reports == []
-                    finally:
-                        for t in (cb_wait_task, waiter_task):
-                            if not t.done():
-                                t.cancel()
-                            try:
-                                await t
-                            except (asyncio.CancelledError, BaseException):
-                                pass
-                        if unhash_box:
-                            f = unhash_box[0]
-                            if not f.done():
-                                f.set_result(None)
-                            elif not f.cancelled():
-                                try:
-                                    f.exception()
-                                except BaseException:
-                                    pass
-                        await asyncio.sleep(0)
-        finally:
-            loop.set_exception_handler(old_h_unhash)
+asyncio.run(main())
+"""
+        checkout_root = Path(__file__).resolve().parent.parent
+        subprocess.run(
+            [sys.executable, "-"],
+            input=unhashable_code,
+            text=True,
+            cwd=str(checkout_root),
+            check=True,
+            timeout=15,
+        )
 
         # Case detaching an overdue callback Future without calling its cancel():
         # the waiter returns TIMED_OUT without calling cancel() or reporting an unhandled exception
@@ -3995,13 +4029,13 @@ asyncio.run(main())
                         assert res_sync_cancel.status == "TIMED_OUT"
                         await asyncio.sleep(0)
                         assert fut_sync_cancel.cancel_called is False
-                        assert id(fut_sync_cancel) in _DETACHED_FUTURES
+                        assert id(fut_sync_cancel) in client_module._DETACHED_FUTURES
                         assert cancel_reports == []
 
                         # Late-exception and release checks in test body after detachment verified
                         fut_sync_cancel.set_exception(RuntimeError("sync cancel late error"))
                         await asyncio.sleep(0)
-                        assert id(fut_sync_cancel) not in _DETACHED_FUTURES
+                        assert id(fut_sync_cancel) not in client_module._DETACHED_FUTURES
                         assert fut_sync_cancel.exception_calls > 0
                         # import weakref (already imported at module level)
 
@@ -5517,24 +5551,46 @@ async def test_wait_for_review_pending_futures_and_clock(
                 )
             assert exc_info.value.code == 42
 
-    # Closing loop releases strong retention from _DETACHED_FUTURES
+    # Closing loop releases strong retention from _DETACHED_FUTURES and _DETACHED_TASKS
     def test_loop_close_in_thread() -> None:
         t_loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(t_loop)
             t_fut = t_loop.create_future()
+            t_task: asyncio.Task[Any] | None = None
+
+            async def sleep_forever() -> None:
+                await asyncio.sleep(3600)
 
             async def run_in_t() -> None:
+                nonlocal t_task
+                t_task = t_loop.create_task(sleep_forever())
                 client_module._detach_overdue_future(t_fut)
+                client_module._detach_overdue_task(t_task)
 
             t_loop.run_until_complete(run_in_t())
             assert id(t_fut) in client_module._DETACHED_FUTURES
             assert getattr(t_loop, "_proofline_detached_futures", {}).get(id(t_fut)) is t_fut
+            assert t_task is not None
+            assert id(t_task) in client_module._DETACHED_TASKS
+            assert getattr(t_loop, "_proofline_detached_tasks", {}).get(id(t_task)) is t_task
         finally:
+            if t_task is not None:
+                setattr(t_task, "_log_destroy_pending", False)
+                try:
+                    if hasattr(t_task, "get_coro"):
+                        coro = t_task.get_coro()
+                        if coro is not None:
+                            coro.close()
+                except BaseException:
+                    pass
             t_loop.close()
             asyncio.set_event_loop(None)
         assert id(t_fut) not in client_module._DETACHED_FUTURES
         assert not getattr(t_loop, "_proofline_detached_futures", {})
+        assert t_task is not None
+        assert id(t_task) not in client_module._DETACHED_TASKS
+        assert not getattr(t_loop, "_proofline_detached_tasks", {})
 
         # Loop that rejects assignment to close: assert future never enters _DETACHED_FUTURES
         u_loop = asyncio.new_event_loop()
