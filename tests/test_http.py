@@ -15,6 +15,7 @@ import time
 import tomllib
 import traceback
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -125,6 +126,266 @@ class Clock:
     async def async_sleep(self, delay: float) -> None:
         self.sleep(delay)
         await asyncio.sleep(0)
+
+
+@MODES
+async def test_wait_on_update_receives_pending_reviews_in_poll_order(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    updates: list[CustomerReviewDetail] = []
+    previous_deadline = 10_000.0
+    marker = _transport.DEADLINE.set(previous_deadline)
+    responses = [review("PENDING"), review("RUNNING"), review("COMPLETED")]
+    try:
+        with Server(lambda request, index: Reply(body=responses[index])) as server:
+            async with session(mode, server.url) as client:
+                result = await call(
+                    client, "wait_for_review", ORG, REVIEW, timeout=100, on_update=updates.append
+                )
+            assert result.status == "COMPLETED"
+            assert [update.status for update in updates] == ["PENDING", "RUNNING"]
+            assert all(isinstance(update, CustomerReviewDetail) for update in updates)
+            assert all(update.id == REVIEW for update in updates)
+            assert len(server.requests) == 3
+            assert _transport.DEADLINE.get() == previous_deadline
+    finally:
+        _transport.DEADLINE.reset(marker)
+    assert clock.delays == [5, 10]
+
+
+@MODES
+async def test_wait_on_update_is_not_called_when_timeout_has_expired(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    updates: list[CustomerReviewDetail] = []
+    with Server(lambda request, index: Reply(body=review("PENDING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=0, on_update=updates.append
+            )
+        assert result.status == "TIMED_OUT"
+        assert server.requests == []
+    assert updates == []
+
+
+@MODES
+async def test_wait_on_update_exception_propagates_and_resets_deadline(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    previous_deadline = 10_000.0
+    marker = _transport.DEADLINE.set(previous_deadline)
+
+    def fail(update: CustomerReviewDetail) -> None:
+        assert update.id == REVIEW
+        raise RuntimeError("callback failed")
+
+    try:
+        with Server(lambda request, index: Reply(body=review("PENDING"))) as server:
+            async with session(mode, server.url) as client:
+                with pytest.raises(RuntimeError, match="callback failed"):
+                    await call(client, "wait_for_review", ORG, REVIEW, on_update=fail)
+                assert _transport.DEADLINE.get() == previous_deadline
+    finally:
+        _transport.DEADLINE.reset(marker)
+
+
+@pytest.mark.asyncio
+async def test_async_wait_on_update_awaits_async_callback() -> None:
+    events: list[tuple[str, str]] = []
+
+    async def on_update(update: CustomerReviewDetail) -> None:
+        events.append(("started", update.status))
+        await asyncio.sleep(0)
+        events.append(("finished", update.status))
+
+    responses = [review("PENDING"), review("COMPLETED")]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with AsyncProoflineClient(TOKEN, base_url=server.url) as client:
+            result = await client.wait_for_review(ORG, REVIEW, timeout=100, on_update=on_update)
+    assert result.status == "COMPLETED"
+    assert events == [("started", "PENDING"), ("finished", "PENDING")]
+
+
+@pytest.mark.asyncio
+async def test_async_wait_on_update_exception_propagates_and_resets_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Clock(monkeypatch)
+    previous_deadline = 10_000.0
+    marker = _transport.DEADLINE.set(previous_deadline)
+
+    async def fail(update: CustomerReviewDetail) -> None:
+        assert update.id == REVIEW
+        await asyncio.sleep(0)
+        raise RuntimeError("async callback failed")
+
+    try:
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+            async with AsyncProoflineClient(TOKEN, base_url=server.url) as client:
+                with pytest.raises(RuntimeError, match="async callback failed"):
+                    await client.wait_for_review(ORG, REVIEW, on_update=fail)
+                assert _transport.DEADLINE.get() == previous_deadline
+    finally:
+        _transport.DEADLINE.reset(marker)
+
+
+@MODES
+async def test_wait_on_update_that_passes_deadline_finishes_then_times_out(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    completed: list[str] = []
+
+    def slow_callback(update: CustomerReviewDetail) -> None:
+        assert update.status == "PENDING"
+        clock.now += 6
+        completed.append("finished")
+
+    with Server(lambda request, index: Reply(body=review("PENDING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=5,
+                on_update=slow_callback,
+            )
+        assert result.status == "TIMED_OUT"
+        assert completed == ["finished"]
+        assert len(server.requests) == 1
+    assert clock.delays == [0]
+
+
+@pytest.mark.asyncio
+async def test_async_callback_can_finish_after_deadline_before_wait_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    completed: list[str] = []
+
+    async def slow_callback(update: CustomerReviewDetail) -> None:
+        assert update.status == "PENDING"
+        clock.now += 6
+        await asyncio.sleep(0)
+        completed.append("finished")
+
+    with Server(lambda request, index: Reply(body=review("PENDING"))) as server:
+        async with AsyncProoflineClient(TOKEN, base_url=server.url) as client:
+            result = await client.wait_for_review(
+                ORG, REVIEW, timeout=5, on_update=slow_callback
+            )
+        assert result.status == "TIMED_OUT"
+        assert completed == ["finished"]
+        assert len(server.requests) == 1
+    assert clock.delays == [0]
+
+
+@MODES
+async def test_rate_limit_paces_concurrent_shared_http_requests(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body={"ok": True})) as server:
+        async with session(mode, server.url, rate_limit=2.0) as client:
+            if mode == "sync":
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    await asyncio.gather(
+                        asyncio.to_thread(lambda: pool.submit(client._http.get, "/").result()),
+                        asyncio.to_thread(lambda: pool.submit(client._http.get, "/").result()),
+                    )
+            else:
+                await asyncio.gather(client._http.get("/"), client._http.get("/"))
+    assert clock.delays == [0.5]
+
+
+@MODES
+async def test_rate_limit_none_does_not_wait(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body={"ok": True})) as server:
+        async with session(mode, server.url) as client:
+            if mode == "sync":
+                client._http.get("/")
+            else:
+                await client._http.get("/")
+    assert clock.delays == []
+
+
+@MODES
+async def test_retry_attempt_obeys_rate_limit(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Clock(monkeypatch)
+
+    def respond(request: Request, index: int) -> Reply:
+        if index == 0:
+            return Reply(429, {"detail": "Rate limited."}, {"Retry-After": "0"})
+        return Reply(body={"ok": True})
+
+    with Server(respond) as server:
+        async with session(mode, server.url, rate_limit=2.0) as client:
+            if mode == "sync":
+                response = client._http.get("/")
+            else:
+                response = await client._http.get("/")
+            assert response.status_code == 200
+        assert len(server.requests) == 2
+    assert clock.delays == [0.0, 0.5]
+
+
+@MODES
+async def test_rate_limit_wait_counts_against_http_timeout(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body={"ok": True})) as server:
+        async with session(mode, server.url, timeout=0.1, rate_limit=1.0) as client:
+            if mode == "sync":
+                client._http.get("/")
+                with pytest.raises(ProoflineError) as raised:
+                    client._http.get("/")
+            else:
+                await client._http.get("/")
+                with pytest.raises(ProoflineError) as raised:
+                    await client._http.get("/")
+            assert raised.value.type == "urn:proofline:sdk:timeout"
+        assert len(server.requests) == 1
+    assert clock.delays == []
+
+
+@MODES
+@pytest.mark.parametrize("value", [True, 0, -1, float("nan"), float("inf"), -float("inf")])
+async def test_rate_limit_rejects_invalid_values(value: object, mode: str) -> None:
+    with pytest.raises(ValueError, match="rate_limit"):
+        if mode == "sync":
+            ProoflineClient(TOKEN, rate_limit=value)  # type: ignore[arg-type]
+        else:
+            AsyncProoflineClient(TOKEN, rate_limit=value)  # type: ignore[arg-type]
+
+
+@MODES
+async def test_rate_limit_wait_respects_caller_deadline(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body={"ok": True})) as server:
+        async with session(mode, server.url, rate_limit=1.0) as client:
+            if mode == "sync":
+                client._http.get("/")
+            else:
+                await client._http.get("/")
+            marker = _transport.DEADLINE.set(clock.now + 0.5)
+            try:
+                with pytest.raises(ProoflineError) as raised:
+                    if mode == "sync":
+                        client._http.get("/")
+                    else:
+                        await client._http.get("/")
+                assert raised.value.type == "urn:proofline:sdk:timeout"
+            finally:
+                _transport.DEADLINE.reset(marker)
+    assert clock.delays == []
 
 
 @MODES

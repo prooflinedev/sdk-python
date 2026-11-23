@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -147,7 +148,17 @@ def _review_url(base_url: str, organization_id: UUID, review_id: UUID) -> str:
 
 
 def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
-    if not 1 <= page_size <= 100 or not 1 <= max_pages <= 1_000 or not 1 <= max_items <= 100_000:
+    if (
+        isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or isinstance(max_pages, bool)
+        or not isinstance(max_pages, int)
+        or isinstance(max_items, bool)
+        or not isinstance(max_items, int)
+        or not 1 <= page_size <= 100
+        or not 1 <= max_pages <= 1_000
+        or not 1 <= max_items <= 100_000
+    ):
         raise ValueError(
             "Pagination requires page_size 1..100, max_pages 1..1000, max_items 1..100000."
         )
@@ -221,7 +232,15 @@ class ProoflineClient(Operations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        rate_limit: float | None = None,
     ) -> None:
+        """Create a synchronous client.
+
+        ``rate_limit`` optionally caps average HTTP request attempts per second
+        for this client instance. The limit is not shared across processes or
+        separate clients.
+        """
+        rate_limit = _transport.validate_rate_limit(rate_limit)
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
         self._http = httpx2.Client(
@@ -234,7 +253,7 @@ class ProoflineClient(Operations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(self._api.token, timeout, rate_limit),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
@@ -546,6 +565,7 @@ class ProoflineClient(Operations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        on_update: Callable[[CustomerReviewDetail], None] | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
@@ -554,6 +574,10 @@ class ProoflineClient(Operations):
 
         head_commit_sha holds the outcome to that commit. A review pinned to
         another head ends the wait on that read and is never COMPLETED.
+
+        on_update is called with the current review after each poll while the
+        review is still pending. It is not called on a terminal or timed-out
+        result; inspect the returned ReviewOutcome for those.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -576,6 +600,8 @@ class ProoflineClient(Operations):
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
+                if on_update is not None:
+                    on_update(last)
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
@@ -591,7 +617,15 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        rate_limit: float | None = None,
     ) -> None:
+        """Create an asynchronous client.
+
+        ``rate_limit`` optionally caps average HTTP request attempts per second
+        for this client instance. The limit is not shared across processes or
+        separate clients.
+        """
+        rate_limit = _transport.validate_rate_limit(rate_limit)
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
         self._http = httpx2.AsyncClient(
@@ -604,7 +638,7 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(self._api.token, timeout, rate_limit),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)
@@ -941,6 +975,7 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        on_update: Callable[[CustomerReviewDetail], Awaitable[None] | None] | None = None,
     ) -> ReviewOutcome:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -962,6 +997,10 @@ class AsyncProoflineClient(AsyncOperations):
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
+                if on_update is not None:
+                    update = on_update(last)
+                    if inspect.isawaitable(update):
+                        await update
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)

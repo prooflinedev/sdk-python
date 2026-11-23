@@ -6,6 +6,7 @@ import ipaddress
 import math
 import os
 import re
+import threading
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from contextlib import contextmanager
@@ -65,6 +66,62 @@ RunNowRefusal: TypeAlias = (
     | RunNowRefusalViewType9
 )
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
+
+
+def validate_rate_limit(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("rate_limit must be a finite positive number of requests per second.")
+    try:
+        rate = float(value)
+    except OverflowError:
+        raise ValueError(
+            "rate_limit must be a finite positive number of requests per second."
+        ) from None
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("rate_limit must be a finite positive number of requests per second.")
+    return rate
+
+
+class RequestPacer:
+    """Thread-safe per-instance schedule for request attempt start times."""
+
+    def __init__(self, rate_limit: float | None) -> None:
+        self._interval = 0.0 if rate_limit is None else 1.0 / rate_limit
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def _reserve(self) -> float:
+        with self._lock:
+            now = monotonic()
+            scheduled = max(now, self._next)
+            self._next = scheduled + self._interval
+            return scheduled
+
+    def wait_sync(self, deadline: float) -> None:
+        if self._interval == 0:
+            return
+        scheduled = self._reserve()
+        delay = scheduled - monotonic()
+        if delay > 0:
+            if delay >= deadline - monotonic():
+                raise timeout_error()
+            sleep(delay)
+        if monotonic() >= deadline:
+            raise timeout_error()
+
+    async def wait_async(self, deadline: float) -> None:
+        if self._interval == 0:
+            return
+        scheduled = self._reserve()
+        delay = scheduled - monotonic()
+        if delay > 0:
+            if delay >= deadline - monotonic():
+                raise timeout_error()
+            await async_sleep(delay)
+        if monotonic() >= deadline:
+            raise timeout_error()
 
 
 class BearerAuth(httpx2.Auth):
@@ -182,8 +239,11 @@ def remaining() -> float | None:
     return None if deadline is None else max(0.0, deadline - monotonic())
 
 
-def limit_timeout(request: httpx2.Request) -> None:
+def limit_timeout(request: httpx2.Request, deadline: float | None = None) -> None:
     budget = remaining()
+    attempt_budget = None if deadline is None else max(0.0, deadline - monotonic())
+    if attempt_budget is not None:
+        budget = attempt_budget if budget is None else min(budget, attempt_budget)
     if budget is None:
         return
     if budget <= 0:
@@ -433,15 +493,20 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
 
 
 class RetryTransport(httpx2.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: SecretStr, timeout: float, rate_limit: float | None = None) -> None:
         self._token = token
         self._timeout = timeout
+        self._pacer = RequestPacer(rate_limit)
         self._inner = SyncHTTPTransport()
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
-            limit_timeout(request)
             deadline = monotonic() + self._timeout
+            caller_deadline = DEADLINE.get()
+            if caller_deadline is not None:
+                deadline = min(deadline, caller_deadline)
+            self._pacer.wait_sync(deadline)
+            limit_timeout(request, deadline)
             marker = IO_DEADLINE.set(io_deadline(deadline))
             try:
                 response = self._inner.handle_request(request)
@@ -484,15 +549,20 @@ class RetryTransport(httpx2.BaseTransport):
 
 
 class AsyncRetryTransport(httpx2.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: SecretStr, timeout: float, rate_limit: float | None = None) -> None:
         self._token = token
         self._timeout = timeout
+        self._pacer = RequestPacer(rate_limit)
         self._inner = httpx2.AsyncHTTPTransport()
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
-            limit_timeout(request)
             deadline = monotonic() + self._timeout
+            caller_deadline = DEADLINE.get()
+            if caller_deadline is not None:
+                deadline = min(deadline, caller_deadline)
+            await self._pacer.wait_async(deadline)
+            limit_timeout(request, deadline)
             try:
                 with anyio.fail_after(io_budget(deadline)):
                     response = await self._inner.handle_async_request(request)
