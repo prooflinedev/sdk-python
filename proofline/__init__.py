@@ -6,6 +6,7 @@ from ._generated import models
 from ._generated.models import (
     AgentSession,
     AgentVendor,
+    CommitDeployVerifications,
     CommitReviewRequest,
     CommitReviewResponse,
     CoverageUploadRequest,
@@ -44,6 +45,7 @@ __all__ = [
     "AssessmentGap",
     "AsyncProoflineClient",
     "CheckGap",
+    "CommitDeployVerifications",
     "CommitReviewRequest",
     "CommitReviewResponse",
     "CoverageUploadRequest",

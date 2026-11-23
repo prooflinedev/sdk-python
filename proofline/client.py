@@ -20,6 +20,7 @@ from ._generated.api.default import (
     get_agent_session,
     get_agent_session_prompt,
     get_assessment,
+    get_commit_deploy_verifications,
     get_deployment_review,
     get_finding,
     get_finding_fix_prompt,
@@ -34,6 +35,7 @@ from ._generated.api.default import (
     request_file_review,
     request_patch_review,
     request_review,
+    request_scan,
     rerun_review,
     start_agent_session,
     stop_review,
@@ -44,6 +46,7 @@ from ._generated.client import AuthenticatedClient
 from ._generated.models.agent_session import AgentSession
 from ._generated.models.agent_session_prompt_type_0 import AgentSessionPromptType0
 from ._generated.models.agent_session_prompt_type_1 import AgentSessionPromptType1
+from ._generated.models.commit_deploy_verifications import CommitDeployVerifications
 from ._generated.models.commit_review_request import CommitReviewRequest
 from ._generated.models.commit_review_response import CommitReviewResponse
 from ._generated.models.coverage_upload_request import CoverageUploadRequest
@@ -67,6 +70,8 @@ from ._generated.models.review_routing_view_type_2 import ReviewRoutingViewType2
 from ._generated.models.review_summary import ReviewSummary
 from ._generated.models.run_now_request import RunNowRequest
 from ._generated.models.run_now_response import RunNowResponse
+from ._generated.models.scan_request_body import ScanRequestBody
+from ._generated.models.scan_response import ScanResponse
 from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
@@ -151,6 +156,23 @@ def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
         raise ValueError(
             "Pagination requires page_size 1..100, max_pages 1..1000, max_items 1..100000."
         )
+
+
+def _resolve_id(
+    canonical: UUID | None,
+    alias: UUID | None,
+    name: str,
+    alias_name: str,
+) -> UUID:
+    if canonical is not None and alias is not None:
+        if canonical != alias:
+            raise ValueError(f"Conflicting arguments for {name} and {alias_name}.")
+        return canonical
+    if canonical is not None:
+        return canonical
+    if alias is not None:
+        return alias
+    raise TypeError(f"Missing required argument: {name!r} (or {alias_name!r}).")
 
 
 def _head_commit(value: str | None) -> None:
@@ -506,6 +528,49 @@ class ProoflineClient(Operations):
 
     def rerun_review(self, organization_id: UUID, review_id: UUID) -> RerunResponse:
         return self._call(rerun_review.sync_detailed, RerunResponse, organization_id, review_id)
+
+    def get_commit_deploy_verifications(
+        self,
+        organization_id: UUID | None = None,
+        repository_id: UUID | None = None,
+        commit_sha: str | None = None,
+        *,
+        org_id: UUID | None = None,
+        repo_id: UUID | None = None,
+    ) -> CommitDeployVerifications:
+        """Read deployment verifications for a specific commit SHA."""
+        resolved_org_id = _resolve_id(organization_id, org_id, "organization_id", "org_id")
+        resolved_repo_id = _resolve_id(repository_id, repo_id, "repository_id", "repo_id")
+        if commit_sha is None:
+            raise TypeError("Missing required argument: 'commit_sha'.")
+        _head_commit(commit_sha)
+        return self._call(
+            get_commit_deploy_verifications.sync_detailed,
+            CommitDeployVerifications,
+            resolved_org_id,
+            resolved_repo_id,
+            commit_sha,
+        )
+
+    def request_scan(
+        self,
+        organization_id: UUID | None = None,
+        repository_id: UUID | None = None,
+        *,
+        body: ScanRequestBody,
+        org_id: UUID | None = None,
+        repo_id: UUID | None = None,
+    ) -> ScanResponse:
+        """Request an asynchronous security or configuration scan for a repository."""
+        resolved_org_id = _resolve_id(organization_id, org_id, "organization_id", "org_id")
+        resolved_repo_id = _resolve_id(repository_id, repo_id, "repository_id", "repo_id")
+        return self._call(
+            request_scan.sync_detailed,
+            ScanResponse,
+            resolved_org_id,
+            resolved_repo_id,
+            body=body,
+        )
 
     def iter_reviews(
         self,
@@ -900,6 +965,49 @@ class AsyncProoflineClient(AsyncOperations):
     async def rerun_review(self, organization_id: UUID, review_id: UUID) -> RerunResponse:
         return await self._call(
             rerun_review.asyncio_detailed, RerunResponse, organization_id, review_id
+        )
+
+    async def get_commit_deploy_verifications(
+        self,
+        organization_id: UUID | None = None,
+        repository_id: UUID | None = None,
+        commit_sha: str | None = None,
+        *,
+        org_id: UUID | None = None,
+        repo_id: UUID | None = None,
+    ) -> CommitDeployVerifications:
+        """Read deployment verifications for a specific commit SHA."""
+        resolved_org_id = _resolve_id(organization_id, org_id, "organization_id", "org_id")
+        resolved_repo_id = _resolve_id(repository_id, repo_id, "repository_id", "repo_id")
+        if commit_sha is None:
+            raise TypeError("Missing required argument: 'commit_sha'.")
+        _head_commit(commit_sha)
+        return await self._call(
+            get_commit_deploy_verifications.asyncio_detailed,
+            CommitDeployVerifications,
+            resolved_org_id,
+            resolved_repo_id,
+            commit_sha,
+        )
+
+    async def request_scan(
+        self,
+        organization_id: UUID | None = None,
+        repository_id: UUID | None = None,
+        *,
+        body: ScanRequestBody,
+        org_id: UUID | None = None,
+        repo_id: UUID | None = None,
+    ) -> ScanResponse:
+        """Request an asynchronous security or configuration scan for a repository."""
+        resolved_org_id = _resolve_id(organization_id, org_id, "organization_id", "org_id")
+        resolved_repo_id = _resolve_id(repository_id, repo_id, "repository_id", "repo_id")
+        return await self._call(
+            request_scan.asyncio_detailed,
+            ScanResponse,
+            resolved_org_id,
+            resolved_repo_id,
+            body=body,
         )
 
     async def iter_reviews(
