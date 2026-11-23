@@ -225,9 +225,14 @@ def generate_json(destination: Path, document: Path) -> None:
     )
 
 
+def text(content: bytes) -> bytes:
+    # .gitattributes stores text with LF, so a CRLF working copy is the same file.
+    return content if b"\0" in content else content.replace(b"\r\n", b"\n")
+
+
 def files(directory: Path) -> dict[Path, bytes]:
     return {
-        path.relative_to(directory): path.read_bytes()
+        path.relative_to(directory): text(path.read_bytes())
         for path in directory.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
     }

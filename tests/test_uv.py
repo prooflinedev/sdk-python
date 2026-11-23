@@ -1,5 +1,6 @@
 """The gate can bootstrap its pinned uv on Windows as well as macOS and Linux."""
 
+import hashlib
 import importlib.util
 import io
 import tarfile
@@ -35,6 +36,37 @@ def test_windows_archive_yields_its_uv_executable() -> None:
         package.writestr("uv.exe", b"uv")
         package.writestr("uvx.exe", b"uvx")
     assert uv.unpack(archive.getvalue(), "x86_64-pc-windows-msvc") == b"uv"
+
+
+@pytest.mark.parametrize(
+    ("machine", "target"),
+    [("AMD64", "x86_64-pc-windows-msvc"), ("ARM64", "aarch64-pc-windows-msvc")],
+)
+def test_windows_bootstrap_downloads_the_zip_and_saves_an_exe(
+    machine: str, target: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("uv.exe", b"uv")
+    content = archive.getvalue()
+    requested = []
+
+    def download(url: str, timeout: int) -> io.BytesIO:
+        requested.append(url)
+        return io.BytesIO(content)
+
+    monkeypatch.setattr(uv.shutil, "which", lambda name: None)
+    monkeypatch.setattr(uv.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(uv.platform, "machine", lambda: machine)
+    monkeypatch.setattr(uv, "urlopen", download)
+    monkeypatch.setitem(uv.CHECKSUMS, target, hashlib.sha256(content).hexdigest())
+    monkeypatch.setattr(uv, "matching", lambda executable: True)
+    binary = uv.executable(tmp_path)
+    assert requested == [
+        f"https://github.com/astral-sh/uv/releases/download/{uv.VERSION}/uv-{target}.zip"
+    ]
+    assert binary == tmp_path / f"uv-{uv.VERSION}-{target}.exe"
+    assert binary.read_bytes() == b"uv"
 
 
 def test_unix_archive_still_yields_its_uv_executable() -> None:
