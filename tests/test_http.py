@@ -1318,6 +1318,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
     # Mismatch with on_poll also ends on the read that names another head (2 requests)
     with Server(lambda request, index: Reply(body=responses[index])) as server:
         polled_reviews: list[tuple[Any, int]] = []
+        captured_mismatch_fields: list[tuple[str, Any, int]] = []
         if mode == "async":
             first_cb_event = asyncio.Event()
             second_cb_reached = asyncio.Event()
@@ -1330,6 +1331,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                     assert not waiter_task.done()
                     second_cb_reached.set()
                     await cb_gate.wait()
+                captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
                 polled_reviews.append((r, len(server.requests)))
                 r.status = "MUTATED"
                 r.head_commit_sha = "mutated_sha"
@@ -1340,6 +1342,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         else:
 
             def sync_mismatch_cb(r: Any) -> None:
+                captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
                 polled_reviews.append((r, len(server.requests)))
                 r.status = "MUTATED"
                 r.head_commit_sha = "mutated_sha"
@@ -1390,11 +1393,12 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                     cb_gate.set()
                     result = await asyncio.wait_for(waiter_task, timeout=5.0)
                 finally:
+                    cb_gate.set()
                     if waiter_task is not None and not waiter_task.done():
                         waiter_task.cancel()
                     if waiter_task is not None:
                         try:
-                            await waiter_task
+                            await asyncio.wait({waiter_task}, timeout=1.0)
                         except (asyncio.CancelledError, BaseException):
                             pass
             else:
@@ -1407,6 +1411,10 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                     head_commit_sha=OTHER_HEAD,
                     on_poll=cb,
                 )
+            assert captured_mismatch_fields == [
+                ("PENDING", UNSET, 1),
+                ("RUNNING", HEAD, 2),
+            ]
             assert [p[0].status for p in polled_reviews] == ["MUTATED", "MUTATED"]
             assert [p[1] for p in polled_reviews] == [1, 2]
             assert polled_reviews[0][0].head_commit_sha == "mutated_sha"
@@ -2812,6 +2820,36 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 except BaseException:
                     pass
 
+        # Assert already-failed future returned at deadline is detached and returns outcome
+        failed_at_deadline_futs: list[asyncio.Future[None]] = []
+        call_start = clock.now
+
+        def failed_future_at_deadline_callback(r: Any) -> asyncio.Future[None]:
+            clock.now = call_start + 10.0
+            loop = asyncio.get_running_loop()
+            fut: asyncio.Future[None] = loop.create_future()
+            fut.set_exception(ValueError("inline future error exactly at deadline"))
+            failed_at_deadline_futs.append(fut)
+            return fut
+
+        try:
+            with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+                async with session("async", server.url) as client:
+                    outcome_at_dl = await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=failed_future_at_deadline_callback,
+                    )
+                    assert outcome_at_dl.status == "TIMED_OUT"
+        finally:
+            for ff in failed_at_deadline_futs:
+                try:
+                    if not ff.cancelled():
+                        ff.exception()
+                except BaseException:
+                    pass
+
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
         # tasks cannot stall teardown.
         watchdog_code = """
@@ -3297,6 +3335,7 @@ async def main() -> None:
         captured_case6_wrappers: list[asyncio.Task[Any]] = []
         try:
             waiter_fut_task: asyncio.Task[Any] | None = None
+            case6a_cancelled = False
             try:
                 # 6a: Future callback cancelled after startup
                 failing_fut = loop.create_future()
@@ -3332,22 +3371,34 @@ async def main() -> None:
                     except (asyncio.CancelledError, BaseException):
                         pass
                 waiter_fut_task.cancel()
-                cancelled_fut = False
+                done_6a_c, _ = await asyncio.wait({waiter_fut_task}, timeout=1.0)
+                assert waiter_fut_task in done_6a_c
+                assert waiter_fut_task.cancelled()
                 try:
                     await waiter_fut_task
-                except asyncio.CancelledError:
-                    cancelled_fut = True
-                assert cancelled_fut
+                except (asyncio.CancelledError, BaseException):
+                    pass
+                case6a_cancelled = True
             finally:
-                if waiter_fut_task is not None and not waiter_fut_task.done():
-                    waiter_fut_task.cancel()
-                if waiter_fut_task is not None:
-                    try:
-                        await waiter_fut_task
-                    except (asyncio.CancelledError, BaseException):
-                        pass
+                if not case6a_cancelled:
+                    if failing_fut is not None and not failing_fut.done():
+                        failing_fut.cancel()
+                    if waiter_fut_task is not None and not waiter_fut_task.done():
+                        waiter_fut_task.cancel()
+                    if waiter_fut_task is not None:
+                        try:
+                            await asyncio.wait({waiter_fut_task}, timeout=1.0)
+                        except BaseException:
+                            pass
 
             assert id(failing_fut) in client_module._DETACHED_FUTURES
+            failing_fut_cbs = [
+                cb[0] if isinstance(cb, tuple) else cb
+                for cb in (getattr(failing_fut, "_callbacks", None) or [])
+            ]
+            assert not any(
+                getattr(cb, "__name__", "") == "_on_future_done" for cb in failing_fut_cbs
+            )
             failing_fut.set_exception(RuntimeError("error in cancelled future callback"))
             await asyncio.sleep(0)
             assert id(failing_fut) not in client_module._DETACHED_FUTURES
@@ -3579,6 +3630,13 @@ async def main() -> None:
                         failing_fut.exception()
                     except BaseException:
                         pass
+            if waiter_fut_task is not None:
+                if not waiter_fut_task.done():
+                    waiter_fut_task.cancel()
+                try:
+                    await asyncio.wait({waiter_fut_task}, timeout=1.0)
+                except (asyncio.CancelledError, BaseException):
+                    pass
             if coro_trigger is not None:
                 coro_trigger.set()
             if waiter_coro_task is not None:
@@ -4026,6 +4084,13 @@ async def main():
                 target_fut = unhash_box[0]
                 fut_weakref = weakref.ref(target_fut)
                 assert id(target_fut) in _DETACHED_FUTURES
+                target_fut_cbs = [
+                    cb[0] if isinstance(cb, tuple) else cb
+                    for cb in (getattr(target_fut, "_callbacks", None) or [])
+                ]
+                assert not any(
+                    getattr(cb, "__name__", "") == "_on_future_done" for cb in target_fut_cbs
+                )
                 target_fut.set_exception(RuntimeError("unhashable late failure"))
                 await asyncio.sleep(0)
                 assert id(target_fut) not in _DETACHED_FUTURES
@@ -4541,17 +4606,32 @@ asyncio.run(main())
     c_arr = (ctypes.c_int32 * 4)(1, 2, 3, 4)
     mv_ctypes = memoryview(c_arr)
     mv_ctypes_bytes = memoryview(c_arr).cast("B")
+    mv_ctypes_slice = memoryview(c_arr)[1::-2]
     detail_ctypes_mv = CustomerReviewDetail.from_dict(responses[1])
+    detail_ctypes_mv.additional_properties["ctypes_arr"] = c_arr
     detail_ctypes_mv.additional_properties["ctypes_mv"] = mv_ctypes
     detail_ctypes_mv.additional_properties["ctypes_bytes"] = mv_ctypes_bytes
+    detail_ctypes_mv.additional_properties["ctypes_slice"] = mv_ctypes_slice
     snap_ctypes = _snapshot_review(detail_ctypes_mv)
     assert snap_ctypes is not None
+    copied_arr = snap_ctypes.additional_properties["ctypes_arr"]
     copied_mv = snap_ctypes.additional_properties["ctypes_mv"]
     copied_bytes = snap_ctypes.additional_properties["ctypes_bytes"]
+    copied_slice = snap_ctypes.additional_properties["ctypes_slice"]
     assert bytes(copied_mv) == bytes(mv_ctypes)
     assert bytes(copied_bytes) == bytes(mv_ctypes_bytes)
+    assert bytes(copied_slice) == bytes(mv_ctypes_slice)
+    assert copied_arr is not c_arr
     assert copied_mv.obj is not c_arr
     assert copied_bytes.obj is not c_arr
+    # Write through cloned byte view and verify sibling view and cloned array see the change
+    # while source bytes stay unchanged:
+    copied_bytes[0] = 99
+    assert copied_arr[0] != 1
+    assert bytes(copied_mv)[0] == 99
+    assert c_arr[0] == 1
+    assert bytes(mv_ctypes)[0] == 1
+    assert mv_ctypes_bytes[0] == 1
 
     class MutableArray(ctypes.c_int32 * 4):
         pass

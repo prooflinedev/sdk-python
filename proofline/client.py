@@ -1054,7 +1054,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 ]
                             else:
                                 last = item_offset + (shape - 1) * elem_stride
-                                stop = None if last == 0 else (last + elem_stride)
+                                stop = None if (last + elem_stride < 0) else (last + elem_stride)
                                 resolved_mv = full_mv[item_offset:stop:elem_stride]
                         elif val.c_contiguous:
                             count = val.nbytes // val.itemsize if val.itemsize > 0 else 0
@@ -1074,7 +1074,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 resolved_mv = full_bytes[offset : offset + shape * stride : stride]
                             else:
                                 last = offset + (shape - 1) * stride
-                                stop = None if last == 0 else (last + stride)
+                                stop = None if (last + stride < 0) else (last + stride)
                                 resolved_mv = full_bytes[offset:stop:stride]
                         elif val.c_contiguous:
                             resolved_mv = full_bytes[offset : offset + val.nbytes]
@@ -3414,7 +3414,7 @@ class AsyncProoflineClient(AsyncOperations):
                                             deadline_val = _transport.DEADLINE.get()
                                             cb_finished_in_budget = bool(completed_at) and (
                                                 deadline_val is None
-                                                or completed_at[0] <= deadline_val
+                                                or completed_at[0] < deadline_val
                                             )
                                             if cb_finished_in_budget:
                                                 if hasattr(res, "result"):
@@ -3452,7 +3452,7 @@ class AsyncProoflineClient(AsyncOperations):
                                             pass
                                     deadline_val = _transport.DEADLINE.get()
                                     cb_finished_in_budget = bool(completed_at) and (
-                                        deadline_val is None or completed_at[0] <= deadline_val
+                                        deadline_val is None or completed_at[0] < deadline_val
                                     )
                                     if cb_finished_in_budget and completion_fut in done:
                                         if hasattr(res, "result"):
@@ -3605,7 +3605,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 try:
                                     deadline_val = _transport.DEADLINE.get()
                                     cb_finished_in_budget = bool(completed_at) and (
-                                        deadline_val is None or completed_at[0] <= deadline_val
+                                        deadline_val is None or completed_at[0] < deadline_val
                                     )
                                     try:
                                         task_is_done = (
@@ -3657,7 +3657,7 @@ class AsyncProoflineClient(AsyncOperations):
                                         pass
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
-                                    deadline_val is None or completed_at[0] <= deadline_val
+                                    deadline_val is None or completed_at[0] < deadline_val
                                 )
                                 try:
                                     task_is_done = task.done() if hasattr(task, "done") else False
