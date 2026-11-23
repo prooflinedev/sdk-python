@@ -312,28 +312,42 @@ def _is_identity_hashed(obj: Any) -> bool:
         return False
 
 
+def _deadline_expired() -> bool:
+    budget = _transport.remaining()
+    return budget is not None and budget <= 0
+
+
 def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
-    if val is None or val is UNSET:
+    curr = val
+    local_seen = seen if seen is not None else set()
+    while hasattr(curr, "__self__"):
+        curr_id = id(curr)
+        if curr_id in local_seen:
+            return False
+        local_seen.add(curr_id)
+        if _deadline_expired():
+            return False
+        try:
+            curr = curr.__self__
+        except BaseException:
+            return False
+
+    if curr is None or curr is UNSET:
         return True
-    if isinstance(val, type):
-        return val in _SAFE_BUILTIN_CLASSES
-    if seen is None:
-        seen = set()
-    val_id = id(val)
-    if val_id in seen:
+    if isinstance(curr, type):
+        return curr in _SAFE_BUILTIN_CLASSES
+    curr_id = id(curr)
+    if curr_id in local_seen:
         return False
-    seen.add(val_id)
-    if hasattr(val, "__self__") and not _is_immutable(val.__self__, seen):
-        return False
-    t = type(val)
+    t = type(curr)
     if t in _IMMUTABLE_TYPES:
         return True
-    if isinstance(val, BuiltinFunctionType):
-        return not bool(getattr(val, "__dict__", None))
-    if isinstance(val, (FunctionType, MethodType)):
+    if isinstance(curr, BuiltinFunctionType):
+        return not bool(getattr(curr, "__dict__", None))
+    if isinstance(curr, (FunctionType, MethodType)):
         return False
     if t is datetime.datetime:
-        tz = val.tzinfo
+        tz = curr.tzinfo
         return tz is None or type(tz) is datetime.timezone
     return False
 
@@ -493,11 +507,6 @@ _py_release_buffer.restype = None
 _py_release_buffer.argtypes = [ctypes.POINTER(_Py_buffer)]
 
 
-def _deadline_expired() -> bool:
-    budget = _transport.remaining()
-    return budget is not None and budget <= 0
-
-
 def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | None:
     if _deadline_expired():
         return None
@@ -564,6 +573,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     f"Unsupported mutable value in review extension data: {type(val).__name__}"
                 )
             if _is_immutable(val):
+                if type(val) is bytes and len(val) > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 _assign_target(target, key, is_attr, val)
                 continue
             val_id = id(val)
@@ -1144,9 +1155,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if isinstance(val, str):
                         new_obj = str.__new__(type(val), val)
                     elif isinstance(val, bytes):
-                        if bytes.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
+                        raw_bytes = bytes(memoryview(val))
+                        if len(raw_bytes) > _MAX_SAFE_BUFFER_SIZE:
                             return None
-                        new_obj = bytes.__new__(type(val), val)
+                        new_obj = bytes.__new__(type(val), raw_bytes)
                     elif isinstance(val, int):
                         new_obj = int.__new__(type(val), val)
                     elif isinstance(val, float):
@@ -1172,6 +1184,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     k, v = next(it)
                 except StopIteration:
                     break
+                if (type(k) is bytes and len(k) > _MAX_SAFE_BUFFER_SIZE) or (
+                    type(v) is bytes and len(v) > _MAX_SAFE_BUFFER_SIZE
+                ):
+                    return None
                 deferred_dict_insertions.append((target_dict, k, v))
                 k_needed = not _is_immutable(k) and id(k) not in memo
                 v_needed = not _is_immutable(v) and id(v) not in memo
@@ -1192,6 +1208,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     m = next(it)
                 except StopIteration:
                     break
+                if type(m) is bytes and len(m) > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 if not _is_immutable(m) and id(m) not in memo:
                     stack.append((_SET_EXPAND, None, it))
                     stack.append((_ITEM_TASK, None, 0, False, m))
@@ -1209,6 +1227,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     v = next(it)
                 except StopIteration:
                     break
+                if type(v) is bytes and len(v) > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 if _is_immutable(v):
                     app_fn(target_list, v)
                 elif id(v) in memo:
@@ -1229,6 +1249,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     slot_or_name, is_desc, attr_val = next(it)
                 except StopIteration:
                     break
+                if type(attr_val) is bytes and len(attr_val) > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 if _is_immutable(attr_val):
                     _assign_target(new_obj, (slot_or_name, is_desc), True, attr_val)
                 elif id(attr_val) in memo:
@@ -1773,6 +1795,7 @@ def _detach_overdue_future(fut: Any) -> None:
                 orig_loop_close = loop.close
 
                 def _hooked_loop_close(*args: Any, **kwargs: Any) -> Any:
+                    close_res = orig_loop_close(*args, **kwargs)
                     l_futs = getattr(loop, "_proofline_detached_futures", None)
                     if l_futs is not None:
                         for fid in list(l_futs.keys()):
@@ -1788,7 +1811,7 @@ def _detach_overdue_future(fut: Any) -> None:
                             f_loop = getattr(f, "_loop", None)
                         if f_loop is loop:
                             _DETACHED_FUTURES.pop(fid, None)
-                    return orig_loop_close(*args, **kwargs)
+                    return close_res
 
                 loop.close = _hooked_loop_close  # type: ignore[method-assign]
                 setattr(loop, "_proofline_close_hooked", True)
@@ -2383,11 +2406,11 @@ class ProoflineClient(Operations):
         When on_poll is provided, it is called on each review poll with the
         latest CustomerReviewDetail. Only reviews fetched and validated before
         the callback is reached are delivered; deadline expiry can suppress
-        delivery. Oversized tuples, buffers, memoryviews with more than 65,536 bytes (or
-        backed by a buffer larger than 65,536 bytes), sets, frozensets, or deques with
-        more than 65,536 items in review extension data skip on_poll snapshot delivery even
-        with time remaining, and snapshot copy errors on unsupported mutable values propagate
-        before on_poll runs.
+        delivery. Tuples with more than 1,000 items, mutable buffers or memoryviews with
+        more than 65,536 bytes (or backed by a buffer larger than 65,536 bytes), sets,
+        frozensets, or deques with more than 65,536 items in review extension data skip
+        on_poll snapshot delivery even with time remaining, and snapshot copy errors on
+        unsupported mutable values propagate before on_poll runs.
         on_poll exceptions and return-validation errors propagate even when a
         terminal outcome has already been determined and can prevent the waiter
         from returning a classified outcome. Synchronous callbacks must return
@@ -2835,11 +2858,12 @@ class AsyncProoflineClient(AsyncOperations):
         ValueError). Callbacks must return promptly even when they return
         an awaitable, because the polling deadline cannot interrupt the
         invocation. Only reviews fetched and validated before the callback
-        is reached are delivered; deadline expiry can suppress delivery. Oversized
-        tuples, buffers, memoryviews with more than 65,536 bytes (or backed by a buffer
-        larger than 65,536 bytes), sets, frozensets, or deques with more than 65,536 items
-        in review extension data skip on_poll snapshot delivery even with time remaining, and
-        snapshot copy errors on unsupported mutable values propagate before on_poll runs. Callback
+        is reached are delivered; deadline expiry can suppress delivery. Tuples
+        with more than 1,000 items, mutable buffers or memoryviews with more than 65,536 bytes
+        (or backed by a buffer larger than 65,536 bytes), sets, frozensets, or deques with
+        more than 65,536 items in review extension data skip on_poll snapshot delivery even
+        with time remaining, and snapshot copy errors on unsupported mutable values propagate
+        before on_poll runs. Callback
         return-validation errors and inline exceptions propagate unconditionally, even when a
         terminal outcome has already been determined (cancellation requested during callback
         invocation takes precedence over return validation), preventing the waiter from
@@ -2898,16 +2922,10 @@ class AsyncProoflineClient(AsyncOperations):
                         if waiter_task is not None:
                             is_task_cancelled = False
                             try:
-                                if (
-                                    hasattr(waiter_task, "cancelling")
-                                    and waiter_task.cancelling() > initial_cancelling
-                                ):
-                                    is_task_cancelled = True
-                                elif (
-                                    hasattr(waiter_task, "cancelling")
-                                    and waiter_task.cancelling() > 0
-                                ):
-                                    is_task_cancelled = True
+                                if hasattr(waiter_task, "cancelling"):
+                                    is_task_cancelled = (
+                                        waiter_task.cancelling() > initial_cancelling
+                                    )
                                 elif hasattr(waiter_task, "cancelled") and waiter_task.cancelled():
                                     is_task_cancelled = True
                                 elif getattr(waiter_task, "_must_cancel", False):

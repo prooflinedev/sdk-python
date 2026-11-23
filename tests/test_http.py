@@ -5108,6 +5108,40 @@ asyncio.run(main())
     assert copied_ro[0] == ord(b"Z")
     assert shared_exp[0] == ord(b"0")
 
+    # Exact bytes over 65,536 bytes skips delivery (returns None)
+    detail_big_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_big_bytes.additional_properties["big_bytes"] = b"A" * 65537
+    assert _snapshot_review(detail_big_bytes) is None
+
+    # Bytes subclass whose __bytes__ tries to expand payload beyond native buffer
+    class CustomBytesWithExpansion(bytes):
+        def __bytes__(self) -> bytes:
+            return b"Z" * 70000
+
+    small_sub_bytes = CustomBytesWithExpansion(b"small_sub")
+    small_sub_bytes.custom_tag = "tag"  # type: ignore[attr-defined]
+    detail_sub_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_sub_bytes.additional_properties["sub_bytes"] = small_sub_bytes
+    snap_sub_bytes = _snapshot_review(detail_sub_bytes)
+    assert snap_sub_bytes is not None
+    copied_sub_bytes = snap_sub_bytes.additional_properties["sub_bytes"]
+    assert type(copied_sub_bytes) is CustomBytesWithExpansion
+    assert len(copied_sub_bytes) == len(b"small_sub")
+    assert memoryview(copied_sub_bytes).tobytes() == b"small_sub"
+    assert copied_sub_bytes.custom_tag == "tag"
+
+    # Deep __self__ chain (exceeding standard recursion limit) walks iteratively
+    class DeepSelfChain:
+        pass
+
+    curr_obj = DeepSelfChain()
+    for _ in range(1500):
+        prev = curr_obj
+        curr_obj = DeepSelfChain()
+        curr_obj.__self__ = prev  # type: ignore[attr-defined]
+
+    assert client_module._is_immutable(curr_obj) is False
+
     # Invalid callback return raising property on close
     class RaisingCloseReturn:
         @property
@@ -5463,5 +5497,30 @@ async def test_wait_for_review_pending_futures_and_clock(
             t_loop.close()
             asyncio.set_event_loop(None)
         assert id(t_fut) not in client_module._DETACHED_FUTURES
+
+        # Loop that rejects assignment to close: assert future never enters _DETACHED_FUTURES
+        u_loop = asyncio.new_event_loop()
+
+        class UnhookableLoopType(type(u_loop)):  # type: ignore[misc]
+            @property
+            def close(self) -> Any:
+                return super().close
+
+        u_loop.__class__ = UnhookableLoopType
+        try:
+            asyncio.set_event_loop(u_loop)
+            u_fut = u_loop.create_future()
+
+            async def run_in_u() -> None:
+                client_module._detach_overdue_future(u_fut)
+
+            u_loop.run_until_complete(run_in_u())
+            assert id(u_fut) not in client_module._DETACHED_FUTURES
+            loop_futs = getattr(u_loop, "_proofline_detached_futures", {})
+            assert loop_futs.get(id(u_fut)) is u_fut
+        finally:
+            UnhookableLoopType.close.fget(u_loop)()  # type: ignore[attr-defined]
+            asyncio.set_event_loop(None)
+        assert id(u_fut) not in client_module._DETACHED_FUTURES
 
     await asyncio.to_thread(test_loop_close_in_thread)
