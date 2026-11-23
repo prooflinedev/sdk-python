@@ -45,9 +45,15 @@ def windows_zip() -> bytes:
     return archive.getvalue()
 
 
-def fake_windows(monkeypatch: pytest.MonkeyPatch, machine: str, content: bytes) -> list[str]:
-    """Pretend to be Windows with no matching uv installed; serve `content` as the release."""
+def fake_windows(
+    monkeypatch: pytest.MonkeyPatch, machine: str, content: bytes
+) -> tuple[list[str], list[Path]]:
+    """Pretend to be Windows with no matching uv installed; serve `content` as the release.
+
+    Returns the requested URLs and the executables whose version was checked.
+    """
     requested: list[str] = []
+    checked: list[Path] = []
 
     def download(url: str, timeout: int) -> io.BytesIO:
         requested.append(url)
@@ -57,8 +63,13 @@ def fake_windows(monkeypatch: pytest.MonkeyPatch, machine: str, content: bytes) 
     monkeypatch.setattr(uv.platform, "system", lambda: "Windows")
     monkeypatch.setattr(uv.platform, "machine", lambda: machine)
     monkeypatch.setattr(uv, "urlopen", download)
-    monkeypatch.setattr(uv, "matching", lambda executable: True)
-    return requested
+
+    def matching(executable: Path) -> bool:
+        checked.append(executable)
+        return True
+
+    monkeypatch.setattr(uv, "matching", matching)
+    return requested, checked
 
 
 @pytest.mark.parametrize(
@@ -69,7 +80,7 @@ def test_windows_bootstrap_downloads_the_zip_and_saves_an_exe(
     machine: str, target: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     content = windows_zip()
-    requested = fake_windows(monkeypatch, machine, content)
+    requested, checked = fake_windows(monkeypatch, machine, content)
     monkeypatch.setitem(uv.CHECKSUMS, target, hashlib.sha256(content).hexdigest())
     binary = uv.executable(tmp_path)
     assert requested == [
@@ -77,6 +88,7 @@ def test_windows_bootstrap_downloads_the_zip_and_saves_an_exe(
     ]
     assert binary == tmp_path / f"uv-{uv.VERSION}-{target}.exe"
     assert binary.read_bytes() == b"uv"
+    assert checked == [binary]
 
 
 @pytest.mark.parametrize(
@@ -90,6 +102,11 @@ def test_windows_zip_with_a_wrong_checksum_is_refused(
     fake_windows(monkeypatch, "AMD64", content)
     target = "x86_64-pc-windows-msvc"
     monkeypatch.setitem(uv.CHECKSUMS, target, "0" * 64)
+
+    def unpack(content: bytes, target: str) -> bytes:
+        raise AssertionError("an unverified archive was unpacked")
+
+    monkeypatch.setattr(uv, "unpack", unpack)
     archive = tmp_path / f"uv-{uv.VERSION}-{target}.zip"
     if cached:
         archive.write_bytes(content)
