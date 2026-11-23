@@ -84,11 +84,12 @@ class ProoflineError(Exception):
 
     title names the server's problem class. A refused review request also
     carries the typed refusal, whose reason names the setting to change, and
-    the repository_name it refers to. A 429 or 503 whose body was received in
-    full is retryable, even without a problem document, and retry_after holds
-    the seconds its valid Retry-After asked for (inf for more seconds than a
-    float holds), or None. A 429 or 503 refused before its body is read, such
-    as an encoded one, is not retryable.
+    the repository_name it refers to. A 429 or 503 read in full within the
+    deadline is retryable, even without a problem document, and retry_after
+    holds the seconds its valid Retry-After asked for (inf for more seconds
+    than a float holds), or None. A 429 or 503 refused before its body is
+    read, such as an encoded one, is not retryable, and a deadline that
+    passes first raises the timeout instead.
     """
 
     retryable: bool = False
