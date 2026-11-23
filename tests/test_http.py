@@ -1331,6 +1331,8 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                     second_cb_reached.set()
                     await cb_gate.wait()
                 polled_reviews.append((r, len(server.requests)))
+                r.status = "MUTATED"
+                r.head_commit_sha = "mutated_sha"
                 if len(polled_reviews) == 1:
                     first_cb_event.set()
 
@@ -1339,6 +1341,8 @@ async def test_wait_ends_on_the_read_that_names_another_head(
 
             def sync_mismatch_cb(r: Any) -> None:
                 polled_reviews.append((r, len(server.requests)))
+                r.status = "MUTATED"
+                r.head_commit_sha = "mutated_sha"
 
             cb = sync_mismatch_cb
         async with session(mode, server.url) as client:
@@ -1403,13 +1407,14 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                     head_commit_sha=OTHER_HEAD,
                     on_poll=cb,
                 )
-            assert [p[0].status for p in polled_reviews] == ["PENDING", "RUNNING"]
+            assert [p[0].status for p in polled_reviews] == ["MUTATED", "MUTATED"]
             assert [p[1] for p in polled_reviews] == [1, 2]
-            assert polled_reviews[0][0].head_commit_sha is UNSET
-            assert polled_reviews[1][0].head_commit_sha == HEAD
+            assert polled_reviews[0][0].head_commit_sha == "mutated_sha"
+            assert polled_reviews[1][0].head_commit_sha == "mutated_sha"
         assert result.status == "INCOMPLETE"
         assert result.review.status == "RUNNING"
         assert result.review.head_commit_sha == HEAD
+        assert result.review is not polled_reviews[-1][0]
         assert gap_facts(result) == [PINNED_ELSEWHERE]
         assert result.reason == "The review is pinned to another head commit."
         # The second read names the head, so the review that would complete is never read.
@@ -3464,6 +3469,7 @@ async def main() -> None:
                         pass
 
             waiter_coro_task: asyncio.Task[Any] | None = None
+            case6c_cancelled = False
             try:
                 # Coroutine callback cancelled after startup
                 coro_started = asyncio.Event()
@@ -3517,20 +3523,25 @@ async def main() -> None:
                     except (asyncio.CancelledError, BaseException):
                         pass
                 waiter_coro_task.cancel()
-                cancelled_coro = False
+                done_c, _ = await asyncio.wait({waiter_coro_task}, timeout=1.0)
+                assert waiter_coro_task in done_c
+                assert waiter_coro_task.cancelled()
                 try:
                     await waiter_coro_task
-                except asyncio.CancelledError:
-                    cancelled_coro = True
-                assert cancelled_coro
+                except (asyncio.CancelledError, BaseException):
+                    pass
+                case6c_cancelled = True
             finally:
-                if waiter_coro_task is not None and not waiter_coro_task.done():
-                    waiter_coro_task.cancel()
-                if waiter_coro_task is not None:
-                    try:
-                        await waiter_coro_task
-                    except (asyncio.CancelledError, BaseException):
-                        pass
+                if not case6c_cancelled:
+                    if coro_trigger is not None:
+                        coro_trigger.set()
+                    if waiter_coro_task is not None and not waiter_coro_task.done():
+                        waiter_coro_task.cancel()
+                    if waiter_coro_task is not None:
+                        try:
+                            await asyncio.wait({waiter_coro_task}, timeout=1.0)
+                        except BaseException:
+                            pass
 
             assert len(client_module._DETACHED_TASKS) == 1
             detached_task_id = next(iter(client_module._DETACHED_TASKS.keys()))
@@ -3574,7 +3585,7 @@ async def main() -> None:
                 if not waiter_coro_task.done():
                     waiter_coro_task.cancel()
                 try:
-                    await waiter_coro_task
+                    await asyncio.wait({waiter_coro_task}, timeout=1.0)
                 except (asyncio.CancelledError, BaseException):
                     pass
             for t in captured_case6_wrappers:
@@ -4524,15 +4535,33 @@ asyncio.run(main())
     with pytest.raises(TypeError, match="Unsupported mutable value"):
         _snapshot_review(detail_self_copy)
 
-    # Memoryview with invalid destination format for cast raises TypeError
+    # Ctypes array and memoryview snapshots are preserved
     import ctypes
 
-    c_arr = (ctypes.c_int32 * 4)()
+    c_arr = (ctypes.c_int32 * 4)(1, 2, 3, 4)
     mv_ctypes = memoryview(c_arr)
+    mv_ctypes_bytes = memoryview(c_arr).cast("B")
     detail_ctypes_mv = CustomerReviewDetail.from_dict(responses[1])
     detail_ctypes_mv.additional_properties["ctypes_mv"] = mv_ctypes
+    detail_ctypes_mv.additional_properties["ctypes_bytes"] = mv_ctypes_bytes
+    snap_ctypes = _snapshot_review(detail_ctypes_mv)
+    assert snap_ctypes is not None
+    copied_mv = snap_ctypes.additional_properties["ctypes_mv"]
+    copied_bytes = snap_ctypes.additional_properties["ctypes_bytes"]
+    assert bytes(copied_mv) == bytes(mv_ctypes)
+    assert bytes(copied_bytes) == bytes(mv_ctypes_bytes)
+    assert copied_mv.obj is not c_arr
+    assert copied_bytes.obj is not c_arr
+
+    class MutableArray(ctypes.c_int32 * 4):
+        pass
+
+    MutableArray.mutable_attr = [1, 2, 3]  # application-defined mutable attribute
+    mut_arr = MutableArray(1, 2, 3, 4)
+    detail_mut_arr = CustomerReviewDetail.from_dict(responses[1])
+    detail_mut_arr.additional_properties["mut_arr"] = memoryview(mut_arr)
     with pytest.raises(TypeError, match="Unsupported mutable value"):
-        _snapshot_review(detail_ctypes_mv)
+        _snapshot_review(detail_mut_arr)
 
     # Empty set subclass copies attributes
     class CustomSet(set[Any]):
