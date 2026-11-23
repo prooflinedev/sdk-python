@@ -28,6 +28,7 @@ from pydantic import SecretStr
 
 from proofline import (
     AsyncProoflineClient,
+    CommitDeployVerifications,
     CommitReviewRequest,
     CommitReviewResponse,
     CoverageUploadRequest,
@@ -48,6 +49,8 @@ from proofline import (
     RunNowMode,
     RunNowRequest,
     RunNowResponse,
+    ScanRequestBody,
+    ScanResponse,
     StopResponse,
     UploadedReport,
     _sync_http,
@@ -2586,3 +2589,283 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+async def test_get_commit_deploy_verifications_first_class(mode: str) -> None:
+    valid_sha = "a" * 40
+    deploy_data = {"deploys": [], "recorded": True}
+    expected_path = (
+        f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}"
+        f"/commits/{valid_sha}/deploy-verifications"
+    )
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.method == "GET"
+        assert request.path == expected_path
+        return Reply(body=deploy_data)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            # 1. Canonical keyword arguments
+            result = await call(
+                client,
+                "get_commit_deploy_verifications",
+                organization_id=ORG,
+                repository_id=REPOSITORY,
+                commit_sha=valid_sha,
+            )
+            assert isinstance(result, CommitDeployVerifications)
+            assert result.recorded is True
+            assert result.deploys == []
+
+            # 2. Backward-compatible alias keyword arguments
+            result_alias = await call(
+                client,
+                "get_commit_deploy_verifications",
+                org_id=ORG,
+                repo_id=REPOSITORY,
+                commit_sha=valid_sha,
+            )
+            assert isinstance(result_alias, CommitDeployVerifications)
+            assert result_alias.recorded is True
+
+            # 3. Positional arguments
+            result_pos = await call(
+                client,
+                "get_commit_deploy_verifications",
+                ORG,
+                REPOSITORY,
+                valid_sha,
+            )
+            assert isinstance(result_pos, CommitDeployVerifications)
+            assert result_pos.recorded is True
+
+            # 4. Both canonical and alias provided with matching values
+            result_both = await call(
+                client,
+                "get_commit_deploy_verifications",
+                organization_id=ORG,
+                repository_id=REPOSITORY,
+                commit_sha=valid_sha,
+                org_id=ORG,
+                repo_id=REPOSITORY,
+            )
+            assert isinstance(result_both, CommitDeployVerifications)
+
+
+@MODES
+async def test_get_commit_deploy_verifications_validations(mode: str) -> None:
+    other_uuid = UUID("00000000-0000-7000-8000-000000000099")
+    valid_sha = "b" * 40
+
+    with Server(lambda r, i: Reply(body={"deploys": [], "recorded": True})) as server:
+        async with session(mode, server.url) as client:
+            # Conflicting organization_id and org_id
+            with pytest.raises(
+                ValueError, match="Conflicting arguments for organization_id and org_id."
+            ):
+                await call(
+                    client,
+                    "get_commit_deploy_verifications",
+                    organization_id=ORG,
+                    org_id=other_uuid,
+                    repository_id=REPOSITORY,
+                    commit_sha=valid_sha,
+                )
+
+            # Conflicting repository_id and repo_id
+            with pytest.raises(
+                ValueError, match="Conflicting arguments for repository_id and repo_id."
+            ):
+                await call(
+                    client,
+                    "get_commit_deploy_verifications",
+                    organization_id=ORG,
+                    repository_id=REPOSITORY,
+                    repo_id=other_uuid,
+                    commit_sha=valid_sha,
+                )
+
+            # Missing organization_id / org_id
+            with pytest.raises(TypeError, match="Missing required argument: 'organization_id'"):
+                await call(
+                    client,
+                    "get_commit_deploy_verifications",
+                    repository_id=REPOSITORY,
+                    commit_sha=valid_sha,
+                )
+
+            # Missing repository_id / repo_id
+            with pytest.raises(TypeError, match="Missing required argument: 'repository_id'"):
+                await call(
+                    client,
+                    "get_commit_deploy_verifications",
+                    organization_id=ORG,
+                    commit_sha=valid_sha,
+                )
+
+            # Missing commit_sha
+            with pytest.raises(TypeError, match="Missing required argument: 'commit_sha'"):
+                await call(
+                    client,
+                    "get_commit_deploy_verifications",
+                    organization_id=ORG,
+                    repository_id=REPOSITORY,
+                )
+
+            # Invalid commit_sha: too short
+            with pytest.raises(
+                ValueError,
+                match="The head commit must be a full 40 or 64 character hexadecimal SHA.",
+            ):
+                await call(
+                    client,
+                    "get_commit_deploy_verifications",
+                    organization_id=ORG,
+                    repository_id=REPOSITORY,
+                    commit_sha="not-a-40-char-sha",
+                )
+
+            # Invalid commit_sha: non-hex
+            with pytest.raises(
+                ValueError,
+                match="The head commit must be a full 40 or 64 character hexadecimal SHA.",
+            ):
+                await call(
+                    client,
+                    "get_commit_deploy_verifications",
+                    organization_id=ORG,
+                    repository_id=REPOSITORY,
+                    commit_sha="g" * 40,
+                )
+
+
+@MODES
+async def test_request_scan_first_class(mode: str) -> None:
+    scan_body = ScanRequestBody(
+        budget_credits=100,
+        request_id=UUID("00000000-0000-7000-8000-000000000042"),
+        commit_sha="c" * 40,
+    )
+    scan_data = {
+        "outcome": "CREATED",
+        "resolution_id": "00000000-0000-7000-8000-000000000042",
+        "review_id": "00000000-0000-7000-8000-000000000043",
+    }
+    expected_path = f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}/scans"
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.method == "POST"
+        assert request.path == expected_path
+        assert request.headers.get("Content-Type") == "application/json"
+        body = json.loads(request.body)
+        assert body["budget_credits"] == 100
+        assert body["commit_sha"] == "c" * 40
+        return Reply(body=scan_data)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            # 1. Canonical keyword arguments
+            result = await call(
+                client,
+                "request_scan",
+                organization_id=ORG,
+                repository_id=REPOSITORY,
+                body=scan_body,
+            )
+            assert isinstance(result, ScanResponse)
+            assert result.outcome == "CREATED"
+            assert str(result.resolution_id) == "00000000-0000-7000-8000-000000000042"
+
+            # 2. Backward-compatible alias keyword arguments
+            result_alias = await call(
+                client,
+                "request_scan",
+                org_id=ORG,
+                repo_id=REPOSITORY,
+                body=scan_body,
+            )
+            assert isinstance(result_alias, ScanResponse)
+            assert result_alias.outcome == "CREATED"
+
+            # 3. Positional arguments
+            result_pos = await call(
+                client,
+                "request_scan",
+                ORG,
+                REPOSITORY,
+                body=scan_body,
+            )
+            assert isinstance(result_pos, ScanResponse)
+            assert result_pos.outcome == "CREATED"
+
+            # 4. Both canonical and alias provided with matching values
+            result_both = await call(
+                client,
+                "request_scan",
+                organization_id=ORG,
+                repository_id=REPOSITORY,
+                org_id=ORG,
+                repo_id=REPOSITORY,
+                body=scan_body,
+            )
+            assert isinstance(result_both, ScanResponse)
+
+
+@MODES
+async def test_request_scan_validations(mode: str) -> None:
+    other_uuid = UUID("00000000-0000-7000-8000-000000000099")
+    scan_body = ScanRequestBody(
+        budget_credits=50,
+        request_id=UUID("00000000-0000-7000-8000-000000000042"),
+        ref="main",
+    )
+
+    with Server(
+        lambda r, i: Reply(body={"outcome": "CREATED", "resolution_id": str(ORG)})
+    ) as server:
+        async with session(mode, server.url) as client:
+            # Conflicting organization_id and org_id
+            with pytest.raises(
+                ValueError, match="Conflicting arguments for organization_id and org_id."
+            ):
+                await call(
+                    client,
+                    "request_scan",
+                    organization_id=ORG,
+                    org_id=other_uuid,
+                    repository_id=REPOSITORY,
+                    body=scan_body,
+                )
+
+            # Conflicting repository_id and repo_id
+            with pytest.raises(
+                ValueError, match="Conflicting arguments for repository_id and repo_id."
+            ):
+                await call(
+                    client,
+                    "request_scan",
+                    organization_id=ORG,
+                    repository_id=REPOSITORY,
+                    repo_id=other_uuid,
+                    body=scan_body,
+                )
+
+            # Missing organization_id / org_id
+            with pytest.raises(TypeError, match="Missing required argument: 'organization_id'"):
+                await call(
+                    client,
+                    "request_scan",
+                    repository_id=REPOSITORY,
+                    body=scan_body,
+                )
+
+            # Missing repository_id / repo_id
+            with pytest.raises(TypeError, match="Missing required argument: 'repository_id'"):
+                await call(
+                    client,
+                    "request_scan",
+                    organization_id=ORG,
+                    body=scan_body,
+                )
