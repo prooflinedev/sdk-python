@@ -2940,16 +2940,24 @@ async def main() -> None:
                         on_poll=sync_cb_returning_task,
                     )
                 )
-                await task_worker_started.wait()
-                assert cb_task_3b is not None
-                assert not cb_task_3b.done()
-                clock.advance(1.0)
-                res_3b = await waiter_task_3b
-                assert res_3b.status == "TIMED_OUT"
-                assert not cb_task_3b.done()
-                task_release_3b.set()
-                await asyncio.wait_for(task_success_3b.wait(), timeout=1.0)
-                await cb_task_3b
+                try:
+                    await task_worker_started.wait()
+                    assert cb_task_3b is not None
+                    assert not cb_task_3b.done()
+                    clock.advance(1.0)
+                    res_3b = await waiter_task_3b
+                    assert res_3b.status == "TIMED_OUT"
+                    assert not cb_task_3b.done()
+                    task_release_3b.set()
+                    await asyncio.wait_for(asyncio.shield(cb_task_3b), timeout=1.0)
+                finally:
+                    if cb_task_3b is not None:
+                        if not cb_task_3b.done():
+                            cb_task_3b.cancel()
+                        try:
+                            await cb_task_3b
+                        except (asyncio.CancelledError, BaseException):
+                            pass
 
         # Case 4: Overdue callback continues running without cancellation on terminal review
         orig_create_task_4 = client_module.async_create_task
@@ -3008,6 +3016,13 @@ async def main() -> None:
             assert getattr(wrapper_4, "exception_calls", 0) > 0
         finally:
             client_module.async_create_task = orig_create_task_4
+            for w in captured_case4_wrappers:
+                if not w.done():
+                    w.cancel()
+                try:
+                    await w
+                except (asyncio.CancelledError, BaseException):
+                    pass
 
         # Case 5: Suspending callback that succeeds within budget
         resumed_within_budget = False
@@ -3085,10 +3100,14 @@ async def main() -> None:
             wrapper_tasks: list[asyncio.Task[Any]] = []
             orig_create_task = client_module.async_create_task
 
+            runner_executed = False
+
             def holding_create_task(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
                 async def held_wrapper() -> Any:
+                    nonlocal runner_executed
                     try:
                         await hold_wrapper.wait()
+                        runner_executed = True
                         return await coro_arg
                     except asyncio.CancelledError:
                         if hasattr(coro_arg, "close"):
@@ -3129,12 +3148,12 @@ async def main() -> None:
                 assert len(wrapper_tasks) == 1
                 assert not wrapper_tasks[0].done()
 
-                # Cancel waiter with budget remaining
-                pre_waiter_task.cancel()
-
-                # Run the queued runner after cancellation and before waiter cleanup
+                # Queue the wrapper before cancelling the waiter in the same loop turn:
                 hold_wrapper.set()
+                pre_waiter_task.cancel()
                 await asyncio.sleep(0)
+
+                assert runner_executed is True
 
                 assert not cb_body_started
                 assert len(user_coro_created) == 1
@@ -3247,8 +3266,9 @@ async def main() -> None:
                         pass
             if coro_trigger is not None:
                 coro_trigger.set()
-            if waiter_coro_task is not None and not waiter_coro_task.done():
-                waiter_coro_task.cancel()
+            if waiter_coro_task is not None:
+                if not waiter_coro_task.done():
+                    waiter_coro_task.cancel()
                 try:
                     await waiter_coro_task
                 except (asyncio.CancelledError, BaseException):
@@ -4723,6 +4743,101 @@ asyncio.run(main())
     assert c_arr_exp[3] == 999
     assert sub_arr[3] == 40
     assert arr_v1[2] == 40
+
+    # Class-state rejection for set subclass and views over bytearray and array.array subclasses
+    class SetWithClassList(set[Any]):
+        __shared_list__ = [1, 2]
+
+    detail_set_class_list = CustomerReviewDetail.from_dict(responses[1])
+    detail_set_class_list.additional_properties["set_sub"] = SetWithClassList([1, 2])
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_set_class_list)
+
+    class ByteArrayWithClassList(bytearray):
+        __shared_list__ = [1, 2]
+
+    ba_sub_shared = ByteArrayWithClassList(b"hello")
+    detail_ba_view = CustomerReviewDetail.from_dict(responses[1])
+    detail_ba_view.additional_properties["ba_view"] = memoryview(ba_sub_shared)
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_ba_view)
+
+    class ArrayWithClassList(array.array):
+        __shared_list__ = [1, 2]
+
+    arr_sub_shared = ArrayWithClassList("i", [1, 2, 3])
+    detail_arr_view = CustomerReviewDetail.from_dict(responses[1])
+    detail_arr_view.additional_properties["arr_view"] = memoryview(arr_sub_shared)
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_arr_view)
+
+    # Key whose custom hash reads a deferred dictionary through a frozenset member
+    class DictHolder:
+        def __init__(self, d: dict[str, Any]) -> None:
+            self.d = d
+
+    class CustomHashWithFrozenset:
+        def __init__(self, f_set: frozenset[Any]) -> None:
+            self.f_set = f_set
+
+        def __hash__(self) -> int:
+            for item in self.f_set:
+                if hasattr(item, "d"):
+                    return hash(tuple(sorted(item.d.items())))
+            return 0
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, CustomHashWithFrozenset) and self.f_set == other.f_set
+
+    deferred_dict = {"ready_key": "ready_val"}
+    f_set = frozenset([DictHolder(deferred_dict)])
+    custom_fs_obj = CustomHashWithFrozenset(f_set)
+    set_with_fs_custom = {custom_fs_obj}
+    detail_fs_custom = CustomerReviewDetail.from_dict(responses[1])
+    detail_fs_custom.additional_properties["fs_custom"] = set_with_fs_custom
+    snap_fsc = _snapshot_review(detail_fs_custom)
+    assert snap_fsc is not None
+    copied_fsc_set = snap_fsc.additional_properties["fs_custom"]
+    copied_obj = next(iter(copied_fsc_set))
+    copied_holder = next(iter(copied_obj.f_set))
+    assert copied_holder.d == {"ready_key": "ready_val"}
+    assert copied_holder.d is not deferred_dict
+
+    # Strided memoryview over immutable bytes preserves strides and c_contiguous
+    b_data = b"0123456789abcdef"
+    mv_strided = memoryview(b_data)[::2]
+    detail_strided = CustomerReviewDetail.from_dict(responses[1])
+    detail_strided.additional_properties["strided"] = mv_strided
+    snap_strided = _snapshot_review(detail_strided)
+    assert snap_strided is not None
+    c_strided = snap_strided.additional_properties["strided"]
+    assert c_strided.strides == mv_strided.strides
+    assert c_strided.c_contiguous == mv_strided.c_contiguous
+    assert bytes(c_strided) == bytes(mv_strided)
+
+    # 1-byte view over backing buffer > 65,536 bytes skips delivery (returns None)
+    big_backing = b"A" * 65537
+    mv_1byte = memoryview(big_backing)[0:1]
+    detail_1byte = CustomerReviewDetail.from_dict(responses[1])
+    detail_1byte.additional_properties["mv_1b"] = mv_1byte
+    assert _snapshot_review(detail_1byte) is None
+
+    # Invalid callback return raising property on close
+    class RaisingCloseReturn:
+        @property
+        def close(self) -> Any:
+            raise RuntimeError("close property lookup failed")
+
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as client_sync:
+            with pytest.raises(TypeError, match="Callbacks must return None"):
+                await call(
+                    client_sync,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    on_poll=lambda r: RaisingCloseReturn(),
+                )
 
 
 async def test_wait_for_review_pending_futures_and_clock(
