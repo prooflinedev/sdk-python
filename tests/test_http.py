@@ -2586,3 +2586,16 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+def test_runtime_anyio_dependency_excludes_cve_2026_63374() -> None:
+    from packaging.requirements import Requirement
+
+    metadata = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    dependencies = tomllib.loads(metadata.read_text())["project"]["dependencies"]
+    requirements = {Requirement(entry).name: Requirement(entry) for entry in dependencies}
+    specifier = requirements["anyio"].specifier
+    for vulnerable in ("4.0.0", "4.10.0", "4.14.0", "4.14.1"):
+        assert not specifier.contains(vulnerable, prereleases=True)
+    for patched in ("4.14.2", "4.15.1"):
+        assert specifier.contains(patched)
