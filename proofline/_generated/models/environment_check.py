@@ -23,7 +23,18 @@ class EnvironmentCheck:
            reason (Literal['ENDED'] | Literal['FORK_PULL_REQUEST'] | Literal['NO_CLOUD_ACCOUNT'] | Literal['NOT_COVERED'] |
                Literal['PULL_REQUEST_REVIEWS_OFF'] | Literal['READS_REFUSED'] | Literal['UNFINISHED'] | None | Unset): Why the
                environment was not checked or does not apply. Null when it
-                was checked or its check is still running.
+                was checked, its check is still running, or
+                `reason_unrecorded` is true.
+           reason_unrecorded (bool | Unset): True when the review checked nothing in the environment but predates
+                Proofline's record of the links its repository had when it was
+                created: its repository links the environment by a link made before
+                the review, and whether that link then asked for pull request reviews
+                is unknown. Absent otherwise.
+           unfinished_inventory_incomplete (bool | Unset): True when `reason` is `UNFINISHED` because the assessment's Kian
+               pin
+                lacked required inventory evidence, so the environment was not
+                checked. Absent otherwise, including when the assessment recorded no
+                cause.
     """
 
     environment_display_name: str
@@ -45,6 +56,8 @@ class EnvironmentCheck:
         | None
         | Unset
     ) = UNSET
+    reason_unrecorded: bool | Unset = UNSET
+    unfinished_inventory_incomplete: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,6 +89,10 @@ class EnvironmentCheck:
         else:
             reason = self.reason
 
+        reason_unrecorded = self.reason_unrecorded
+
+        unfinished_inventory_incomplete = self.unfinished_inventory_incomplete
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -87,6 +104,10 @@ class EnvironmentCheck:
         )
         if reason is not UNSET:
             field_dict["reason"] = reason
+        if reason_unrecorded is not UNSET:
+            field_dict["reason_unrecorded"] = reason_unrecorded
+        if unfinished_inventory_incomplete is not UNSET:
+            field_dict["unfinished_inventory_incomplete"] = unfinished_inventory_incomplete
 
         return field_dict
 
@@ -272,11 +293,17 @@ class EnvironmentCheck:
 
         reason = _parse_reason(d.pop("reason", UNSET))
 
+        reason_unrecorded = d.pop("reason_unrecorded", UNSET)
+
+        unfinished_inventory_incomplete = d.pop("unfinished_inventory_incomplete", UNSET)
+
         environment_check = cls(
             environment_display_name=environment_display_name,
             environment_external_key=environment_external_key,
             state=state,
             reason=reason,
+            reason_unrecorded=reason_unrecorded,
+            unfinished_inventory_incomplete=unfinished_inventory_incomplete,
         )
 
         environment_check.additional_properties = d

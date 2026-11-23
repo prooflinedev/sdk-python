@@ -18,7 +18,28 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
     ...
 ```
 
-When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
+When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output.
+
+With `AsyncProoflineClient`, use `await` for a single result, such as `await client.list_reviews(organization_id)` for one page. Use `async for` with `iter_reviews` to read individual reviews across pages, or with `iter_export_pages` to read export pages.
+
+```python
+import asyncio
+import os
+from uuid import UUID
+from proofline import AsyncProoflineClient
+
+
+async def main():
+    organization_id = UUID(os.environ["PROOFLINE_ORGANIZATION_ID"])
+    async with AsyncProoflineClient() as client:
+        async for review in client.iter_reviews(organization_id):
+            print(review.id)
+
+
+asyncio.run(main())
+```
+
+The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
 ## Errors and refusals
 
