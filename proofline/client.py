@@ -360,6 +360,9 @@ _SAFE_SPECIAL_ATTRS: set[str] = {
     "__static_attributes__",
     "__subclasshook__",
     "__weakref__",
+    "_fields",
+    "_field_defaults",
+    "_field_types",
 }
 
 
@@ -377,6 +380,7 @@ def _has_mutable_class_attrs(cls: type) -> bool:
                 "method_descriptor",
                 "slotwrapper",
                 "classmethod_descriptor",
+                "_tuplegetter",
             ):
                 continue
             if isinstance(
@@ -455,6 +459,7 @@ _EXPAND_BATCH_SIZE = 64
 _MAX_SAFE_TUPLE_SIZE = 1000
 _MAX_SAFE_BUFFER_SIZE = 65_536
 _UNRESOLVED_SLOT = object()
+_MISSING = object()
 
 
 class _Py_buffer(ctypes.Structure):
@@ -499,6 +504,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     deferred_frozenset_insertions: list[tuple[Any, Any, bool, int, Any, list[Any]]] = []
     deferred_tuple_finalizations: list[tuple[Any, Any, bool, int, Any, list[Any]]] = []
     deferred_set_insertions: list[tuple[Any, Any, list[Any]]] = []
+    pending_frozenset_ids: set[int] = set()
+    pending_assignments: dict[int, list[tuple[Any, Any, bool]]] = {}
+    fallback_built_frozensets: list[tuple[Any, list[Any]]] = []
 
     def _collect_set_members(val: Any) -> list[Any] | None:
         if hasattr(val, "__len__") and len(val) > _MAX_SAFE_BUFFER_SIZE:
@@ -547,6 +555,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             if val_id in memo:
                 _assign_target(target, key, is_attr, memo[val_id])
                 continue
+            if val_id in pending_frozenset_ids:
+                if target is not None:
+                    pending_assignments.setdefault(val_id, []).append((target, key, is_attr))
+                continue
             if type(val) is dict:
                 new_dict: dict[Any, Any] = {}
                 memo[val_id] = new_dict
@@ -558,6 +570,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 _assign_target(target, key, is_attr, new_list)
                 stack.append((_LIST_EXPAND, new_list, iter(val)))
             elif isinstance(val, tuple):
+                if type(val) is not tuple and _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 if tuple.__len__(val) > _MAX_SAFE_TUPLE_SIZE:
                     return None
                 if tuple.__len__(val) == 0:
@@ -730,12 +746,17 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     orig_fs_members = _collect_set_members(val)
                     if orig_fs_members is None:
                         return None
+                    pending_frozenset_ids.add(val_id)
                     deferred_frozenset_insertions.append(
                         (target, key, is_attr, val_id, val, orig_fs_members)
                     )
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         for slot_or_name, is_desc, attr_val in _get_obj_attrs(val):
-                            if not _is_immutable(attr_val) and id(attr_val) not in memo:
+                            if (
+                                not _is_immutable(attr_val)
+                                and id(attr_val) not in memo
+                                and id(attr_val) not in pending_frozenset_ids
+                            ):
                                 stack.append((_ITEM_TASK, None, None, False, attr_val))
                     stack.append((_SET_EXPAND, None, iter(val)))
             elif isinstance(val, deque):
@@ -1149,6 +1170,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if type(orig_val) is tuple:
                     res_tuple = tuple(temp_list)
                 else:
+                    if _has_mutable_class_attrs(type(orig_val)):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(orig_val).__name__}"
+                        )
                     try:
                         orig_cls: Any = type(orig_val)
                         res_tuple = tuple.__new__(orig_cls, temp_list)
@@ -1314,6 +1340,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             if type(orig_val) is tuple:
                                 res_tuple = tuple(temp_list)
                             else:
+                                if _has_mutable_class_attrs(type(orig_val)):
+                                    raise TypeError(
+                                        "Unsupported mutable value in review extension data: "
+                                        f"{type(orig_val).__name__}"
+                                    )
                                 try:
                                     orig_tuple_cls: Any = type(orig_val)
                                     res_tuple = tuple.__new__(orig_tuple_cls, temp_list)
@@ -1388,7 +1419,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if k_ready and v_ready:
                         k = orig_k if _is_immutable(orig_k) else memo[id(orig_k)]
                         v = orig_v if _is_immutable(orig_v) else memo[id(orig_v)]
-                        if not _is_member_state_populated(k):
+                        if not _is_member_state_populated(k, current_target_id=td_id):
                             break
                         target_dict[k] = v
                         idx += 1
@@ -1422,7 +1453,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             attrs_ready = True
             if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                 for _, _, attr_val in _get_obj_attrs(orig_val):
-                    if not _is_immutable(attr_val) and id(attr_val) not in memo:
+                    if (
+                        not _is_immutable(attr_val)
+                        and id(attr_val) not in memo
+                        and id(attr_val) != val_id
+                    ):
                         attrs_ready = False
                         break
             if members_ready and attrs_ready:
@@ -1456,11 +1491,18 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             f"{type(orig_val).__name__}"
                         )
                 memo[val_id] = res_set
+                pending_frozenset_ids.discard(val_id)
                 if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                     for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
-                        val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
+                        val_to_set = (
+                            attr_val
+                            if _is_immutable(attr_val)
+                            else memo.get(id(attr_val), attr_val)
+                        )
                         _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
                 _assign_target(target, key, is_attr, res_set)
+                for p_target, p_key, p_is_attr in pending_assignments.pop(val_id, []):
+                    _assign_target(p_target, p_key, p_is_attr, res_set)
                 progress = True
                 _flush_pending_structures()
             else:
@@ -1475,10 +1517,13 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 can_resolve = True
                 resolved_members = []
                 for m in orig_members:
-                    rm = m if _is_immutable(m) else memo.get(id(m))
-                    if rm is None:
-                        can_resolve = False
-                        break
+                    if _is_immutable(m):
+                        rm = m
+                    else:
+                        rm = memo.get(id(m), _MISSING)
+                        if rm is _MISSING:
+                            can_resolve = False
+                            break
                     try:
                         hash(rm)
                         _ = rm == rm
@@ -1492,11 +1537,19 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     else:
                         res_set = frozenset.__new__(type(orig_val), resolved_members)
                     memo[val_id] = res_set
+                    pending_frozenset_ids.discard(val_id)
+                    fallback_built_frozensets.append((res_set, resolved_members))
                     if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                         for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
-                            val_to_set = attr_val if _is_immutable(attr_val) else memo[id(attr_val)]
+                            val_to_set = (
+                                attr_val
+                                if _is_immutable(attr_val)
+                                else memo.get(id(attr_val), attr_val)
+                            )
                             _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
                     _assign_target(target, key, is_attr, res_set)
+                    for p_target, p_key, p_is_attr in pending_assignments.pop(val_id, []):
+                        _assign_target(p_target, p_key, p_is_attr, res_set)
                     resolved_any = True
                 else:
                     still_pending.append((target, key, is_attr, val_id, orig_val, orig_members))
@@ -1509,6 +1562,15 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     _flush_pending_structures()
     if _deadline_expired():
         return None
+    for fb_set, fb_members in fallback_built_frozensets:
+        try:
+            for rm in fb_members:
+                if rm not in fb_set:
+                    raise TypeError("Member lookup failed in fallback frozenset")
+        except TypeError:
+            raise
+        except Exception as exc:
+            raise TypeError("Member lookup failed in fallback frozenset") from exc
     if deferred_set_insertions:
         raise TypeError("Unsupported cyclic reference in set")
     for td_id, entries in dict_ordered_entries.items():
@@ -1636,10 +1698,11 @@ def _cleanup_discarded_awaitable(res: Any, waiter_task: Any = None) -> None:
                 res.close()
         except BaseException:
             pass
+    elif async_isfuture(res):
+        if waiter_task is None or res is not waiter_task:
+            _detach_overdue_future(res)
     else:
         _safe_close(res)
-        if async_isfuture(res) and (waiter_task is None or res is not waiter_task):
-            _detach_overdue_future(res)
 
 
 def _detach_overdue_task(
@@ -2718,77 +2781,82 @@ class AsyncProoflineClient(AsyncOperations):
                                             "to the running event loop."
                                         )
 
-                            remaining_budget = _transport.remaining()
-                            if remaining_budget is not None and remaining_budget <= 0:
-                                _cleanup_discarded_awaitable(res)
-                                if result is not None:
-                                    return result
-                                break
+                                    remaining_budget = _transport.remaining()
+                                    if remaining_budget is not None and remaining_budget <= 0:
+                                        _detach_overdue_future(res)
+                                        if result is not None:
+                                            return result
+                                        break
 
-                            if async_isfuture(res):
-                                try:
-                                    completion_fut = async_get_running_loop().create_future()
-                                except BaseException:
-                                    _detach_overdue_future(res)
-                                    raise
-                                completed_at: list[float] = []
-
-                                def _on_future_done(_: Any) -> None:
-                                    completed_at.append(monotonic())
-                                    if not completion_fut.done():
-                                        completion_fut.set_result(None)
-
-                                fut_registered = False
-                                if hasattr(res, "add_done_callback"):
                                     try:
-                                        res.add_done_callback(_on_future_done)
-                                        fut_registered = True
-                                    except BaseException:
-                                        pass
-                                if not fut_registered:
-                                    try:
-                                        AsyncFuture.add_done_callback(res, _on_future_done)
-                                        fut_registered = True
+                                        completion_fut = async_get_running_loop().create_future()
                                     except BaseException:
                                         _detach_overdue_future(res)
                                         raise
-                                deadline_val = _transport.DEADLINE.get()
-                                cb_finished_in_budget = bool(completed_at) and (
-                                    deadline_val is None or completed_at[0] <= deadline_val
-                                )
-                                if cb_finished_in_budget:
-                                    if hasattr(res, "result"):
-                                        res.result()
+                                    completed_at: list[float] = []
+
+                                    def _on_future_done(_: Any) -> None:
+                                        completed_at.append(monotonic())
+                                        if not completion_fut.done():
+                                            completion_fut.set_result(None)
+
+                                    fut_registered = False
+                                    if hasattr(res, "add_done_callback"):
+                                        try:
+                                            res.add_done_callback(_on_future_done)
+                                            fut_registered = True
+                                        except BaseException:
+                                            pass
+                                    if not fut_registered:
+                                        try:
+                                            AsyncFuture.add_done_callback(res, _on_future_done)
+                                            fut_registered = True
+                                        except BaseException:
+                                            _detach_overdue_future(res)
+                                            raise
+                                    deadline_val = _transport.DEADLINE.get()
+                                    cb_finished_in_budget = bool(completed_at) and (
+                                        deadline_val is None or completed_at[0] <= deadline_val
+                                    )
+                                    if cb_finished_in_budget:
+                                        if hasattr(res, "result"):
+                                            res.result()
+                                        else:
+                                            AsyncFuture.result(res)
+                                    remaining_budget = _transport.remaining()
+                                    if remaining_budget is not None and remaining_budget <= 0:
+                                        _detach_overdue_future(res)
+                                        if result is not None:
+                                            return result
+                                        break
+                                    try:
+                                        done, _ = await async_wait(
+                                            {completion_fut}, timeout=remaining_budget
+                                        )
+                                    except BaseException:
+                                        _detach_overdue_future(res)
+                                        raise
+                                    deadline_val = _transport.DEADLINE.get()
+                                    cb_finished_in_budget = bool(completed_at) and (
+                                        deadline_val is None or completed_at[0] <= deadline_val
+                                    )
+                                    if cb_finished_in_budget and completion_fut in done:
+                                        if hasattr(res, "result"):
+                                            res.result()
+                                        else:
+                                            AsyncFuture.result(res)
                                     else:
-                                        AsyncFuture.result(res)
+                                        _detach_overdue_future(res)
+                                        if result is not None:
+                                            return result
+                                        break
+                            else:
                                 remaining_budget = _transport.remaining()
                                 if remaining_budget is not None and remaining_budget <= 0:
-                                    _detach_overdue_future(res)
+                                    _cleanup_discarded_awaitable(res)
                                     if result is not None:
                                         return result
                                     break
-                                try:
-                                    done, _ = await async_wait(
-                                        {completion_fut}, timeout=remaining_budget
-                                    )
-                                except BaseException:
-                                    _detach_overdue_future(res)
-                                    raise
-                                deadline_val = _transport.DEADLINE.get()
-                                cb_finished_in_budget = bool(completed_at) and (
-                                    deadline_val is None or completed_at[0] <= deadline_val
-                                )
-                                if cb_finished_in_budget and completion_fut in done:
-                                    if hasattr(res, "result"):
-                                        res.result()
-                                    else:
-                                        AsyncFuture.result(res)
-                                else:
-                                    _detach_overdue_future(res)
-                                    if result is not None:
-                                        return result
-                                    break
-                            else:
                                 coro = res
                                 completed_at = []
                                 wrapper_started = False
@@ -2843,16 +2911,7 @@ class AsyncProoflineClient(AsyncOperations):
                                             runner_coro.close()
                                         except BaseException:
                                             pass
-                                    if iscoroutine(res) and getcoroutinestate(res) == CORO_CREATED:
-                                        try:
-                                            res.close()
-                                        except BaseException:
-                                            pass
-                                    elif isgenerator(res) and getgeneratorstate(res) == GEN_CREATED:
-                                        try:
-                                            res.close()
-                                        except BaseException:
-                                            pass
+                                    _cleanup_discarded_awaitable(res)
                                     raise
                                 finally:
                                     _transport.DEADLINE.reset(deadline_token_task)

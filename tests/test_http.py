@@ -2819,20 +2819,56 @@ async def main() -> None:
                 on_poll=pending_future_callback,
             )
         )
-        await cb_1_started.wait()
-        assert pending_fut is not None
-        await pending_fut.wait_entered.wait()
-        assert not waiter_task_1.done()
-        assert id(pending_fut) not in client_module._DETACHED_FUTURES
-        clock.advance(1.0)
-        res_1 = await waiter_task_1
-        assert res_1.status == "TIMED_OUT"
-        assert not pending_fut.cancelled()
-        assert not pending_fut.done()
-        assert id(pending_fut) in client_module._DETACHED_FUTURES
-        pending_fut.set_result(None)
-        await asyncio.sleep(0)
-        assert id(pending_fut) not in client_module._DETACHED_FUTURES
+        startup_waiter_1 = asyncio.create_task(cb_1_started.wait())
+        try:
+            done_1, _ = await asyncio.wait(
+                {startup_waiter_1, waiter_task_1},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if waiter_task_1 in done_1:
+                await waiter_task_1
+            assert pending_fut is not None
+            wait_entered_task_1 = asyncio.create_task(pending_fut.wait_entered.wait())
+            try:
+                done_entered, _ = await asyncio.wait(
+                    {wait_entered_task_1, waiter_task_1},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter_task_1 in done_entered:
+                    await waiter_task_1
+                assert not waiter_task_1.done()
+                assert id(pending_fut) not in client_module._DETACHED_FUTURES
+                clock.advance(1.0)
+                res_1 = await waiter_task_1
+                assert res_1.status == "TIMED_OUT"
+                assert not pending_fut.cancelled()
+                assert not pending_fut.done()
+                assert id(pending_fut) in client_module._DETACHED_FUTURES
+                pending_fut.set_result(None)
+                await asyncio.sleep(0)
+                assert id(pending_fut) not in client_module._DETACHED_FUTURES
+            finally:
+                if not wait_entered_task_1.done():
+                    wait_entered_task_1.cancel()
+                try:
+                    await wait_entered_task_1
+                except (asyncio.CancelledError, BaseException):
+                    pass
+        finally:
+            if not startup_waiter_1.done():
+                startup_waiter_1.cancel()
+            try:
+                await startup_waiter_1
+            except (asyncio.CancelledError, BaseException):
+                pass
+            if not waiter_task_1.done():
+                waiter_task_1.cancel()
+            try:
+                await waiter_task_1
+            except (asyncio.CancelledError, BaseException):
+                pass
+            if pending_fut is not None and not pending_fut.done():
+                pending_fut.set_result(None)
 
         # Case 2: Pending same-loop Future that completes within budget without cancellation
         completed_fut = asyncio.get_running_loop().create_future()
@@ -3139,8 +3175,11 @@ async def main() -> None:
             orig_create_task = client_module.async_create_task
 
             runner_executed = False
+            captured_runners: list[Any] = []
 
             def holding_create_task(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
+                captured_runners.append(coro_arg)
+
                 async def held_wrapper() -> Any:
                     nonlocal runner_executed
                     try:
@@ -3223,6 +3262,17 @@ async def main() -> None:
                             and inspect.getcoroutinestate(c) == inspect.CORO_CREATED
                         ):
                             c.close()
+                    except BaseException:
+                        pass
+                for cr in captured_runners:
+                    try:
+                        if (
+                            inspect.iscoroutine(cr)
+                            and inspect.getcoroutinestate(cr) == inspect.CORO_CREATED
+                        ):
+                            cr.close()
+                        elif hasattr(cr, "close"):
+                            cr.close()
                     except BaseException:
                         pass
 
@@ -4822,14 +4872,15 @@ asyncio.run(main())
         def __hash__(self) -> int:
             for item in self.f_set:
                 if hasattr(item, "d"):
-                    return hash(tuple(sorted(item.d.items())))
+                    return hash(tuple(sorted((k, str(type(v))) for k, v in item.d.items())))
             return 0
 
         def __eq__(self, other: Any) -> bool:
             return isinstance(other, CustomHashWithFrozenset) and self.f_set == other.f_set
 
-    deferred_dict = {"ready_key": "ready_val"}
+    deferred_dict: dict[str, Any] = {"ready_key": "ready_val"}
     f_set = frozenset([DictHolder(deferred_dict)])
+    deferred_dict["pending_val"] = f_set
     custom_fs_obj = CustomHashWithFrozenset(f_set)
     set_with_fs_custom = {custom_fs_obj}
     detail_fs_custom = CustomerReviewDetail.from_dict(responses[1])
@@ -4837,9 +4888,12 @@ asyncio.run(main())
     snap_fsc = _snapshot_review(detail_fs_custom)
     assert snap_fsc is not None
     copied_fsc_set = snap_fsc.additional_properties["fs_custom"]
+    assert len(copied_fsc_set) == 1
     copied_obj = next(iter(copied_fsc_set))
+    assert copied_obj in copied_fsc_set
     copied_holder = next(iter(copied_obj.f_set))
-    assert copied_holder.d == {"ready_key": "ready_val"}
+    assert copied_holder.d["ready_key"] == "ready_val"
+    assert copied_holder.d["pending_val"] is copied_obj.f_set
     assert copied_holder.d is not deferred_dict
 
     # Strided memoryview over immutable bytes preserves strides and c_contiguous
