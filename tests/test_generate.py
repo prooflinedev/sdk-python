@@ -35,18 +35,20 @@ def load_generate() -> ModuleType:
     return generate
 
 
-def test_check_treats_a_crlf_working_copy_as_unchanged() -> None:
+def test_check_treats_a_crlf_working_copy_as_unchanged(tmp_path: Path) -> None:
     generate = load_generate()
-    assert generate.text(b"a = 1\r\nb = 2\r\n") == b"a = 1\nb = 2\n"
-    assert generate.text(b"\0binary\r\n") == b"\0binary\r\n"
+    for name, newline in (("lf", b"\n"), ("crlf", b"\r\n")):
+        (tmp_path / name / "models").mkdir(parents=True)
+        (tmp_path / name / "models" / "a.py").write_bytes(b"a = 1" + newline + b"b = 2" + newline)
+    assert generate.files(tmp_path / "lf") == generate.files(tmp_path / "crlf")
+    # A file with a NUL byte is binary and still compared byte for byte.
+    (tmp_path / "lf" / "data.bin").write_bytes(b"\0\n")
+    (tmp_path / "crlf" / "data.bin").write_bytes(b"\0\r\n")
+    assert generate.files(tmp_path / "lf") != generate.files(tmp_path / "crlf")
 
 
-def test_generated_files_use_lf_line_endings(tmp_path: Path) -> None:
-    # Windows text writes produce CRLF; the check compares with line endings
-    # normalized, so assert the generator's own output directly.
-    generate = load_generate()
-    destination = tmp_path / "generated"
-    generate.generate(destination)
-    files = [path for path in destination.rglob("*") if path.is_file()]
-    assert files
-    assert [path for path in files if b"\r\n" in path.read_bytes()] == []
+def test_generated_python_is_formatted_with_lf_line_endings(tmp_path: Path) -> None:
+    # Windows text writes produce CRLF; the formatting step must turn them into LF.
+    (tmp_path / "model.py").write_bytes(b"a = 1\r\nb = 2\r\n")
+    load_generate().format_python(tmp_path)
+    assert (tmp_path / "model.py").read_bytes() == b"a = 1\nb = 2\n"

@@ -209,6 +209,10 @@ def generate_json(destination: Path, document: Path) -> None:
         check=True,
         cwd=ROOT,
     )
+    format_python(destination)
+
+
+def format_python(destination: Path) -> None:
     # The generator writes CRLF on Windows; the committed files are LF on every OS.
     subprocess.run(
         [

@@ -38,18 +38,16 @@ def test_windows_archive_yields_its_uv_executable() -> None:
     assert uv.unpack(archive.getvalue(), "x86_64-pc-windows-msvc") == b"uv"
 
 
-@pytest.mark.parametrize(
-    ("machine", "target"),
-    [("AMD64", "x86_64-pc-windows-msvc"), ("ARM64", "aarch64-pc-windows-msvc")],
-)
-def test_windows_bootstrap_downloads_the_zip_and_saves_an_exe(
-    machine: str, target: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def windows_zip() -> bytes:
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr("uv.exe", b"uv")
-    content = archive.getvalue()
-    requested = []
+    return archive.getvalue()
+
+
+def fake_windows(monkeypatch: pytest.MonkeyPatch, machine: str, content: bytes) -> list[str]:
+    """Pretend to be Windows with no matching uv installed; serve `content` as the release."""
+    requested: list[str] = []
 
     def download(url: str, timeout: int) -> io.BytesIO:
         requested.append(url)
@@ -59,14 +57,47 @@ def test_windows_bootstrap_downloads_the_zip_and_saves_an_exe(
     monkeypatch.setattr(uv.platform, "system", lambda: "Windows")
     monkeypatch.setattr(uv.platform, "machine", lambda: machine)
     monkeypatch.setattr(uv, "urlopen", download)
-    monkeypatch.setitem(uv.CHECKSUMS, target, hashlib.sha256(content).hexdigest())
     monkeypatch.setattr(uv, "matching", lambda executable: True)
+    return requested
+
+
+@pytest.mark.parametrize(
+    ("machine", "target"),
+    [("AMD64", "x86_64-pc-windows-msvc"), ("ARM64", "aarch64-pc-windows-msvc")],
+)
+def test_windows_bootstrap_downloads_the_zip_and_saves_an_exe(
+    machine: str, target: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = windows_zip()
+    requested = fake_windows(monkeypatch, machine, content)
+    monkeypatch.setitem(uv.CHECKSUMS, target, hashlib.sha256(content).hexdigest())
     binary = uv.executable(tmp_path)
     assert requested == [
         f"https://github.com/astral-sh/uv/releases/download/{uv.VERSION}/uv-{target}.zip"
     ]
     assert binary == tmp_path / f"uv-{uv.VERSION}-{target}.exe"
     assert binary.read_bytes() == b"uv"
+
+
+@pytest.mark.parametrize(
+    ("cached", "message"),
+    [(False, "release archive does not match"), (True, "cached uv archive does not match")],
+)
+def test_windows_zip_with_a_wrong_checksum_is_refused(
+    cached: bool, message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = windows_zip()
+    fake_windows(monkeypatch, "AMD64", content)
+    target = "x86_64-pc-windows-msvc"
+    monkeypatch.setitem(uv.CHECKSUMS, target, "0" * 64)
+    archive = tmp_path / f"uv-{uv.VERSION}-{target}.zip"
+    if cached:
+        archive.write_bytes(content)
+    with pytest.raises(SystemExit, match=message):
+        uv.executable(tmp_path)
+    # A rejected download is never saved, and a rejected archive is never extracted.
+    assert archive.exists() == cached
+    assert not (tmp_path / f"uv-{uv.VERSION}-{target}.exe").exists()
 
 
 def test_unix_archive_still_yields_its_uv_executable() -> None:
