@@ -1318,9 +1318,15 @@ async def test_wait_ends_on_the_read_that_names_another_head(
     with Server(lambda request, index: Reply(body=responses[index])) as server:
         polled_reviews: list[tuple[Any, int]] = []
         if mode == "async":
+            cb_gate = asyncio.Event()
+            waiter_task: asyncio.Task[Any] | None = None
 
             async def async_mismatch_cb(r: Any) -> None:
-                await asyncio.sleep(0.01)
+                if len(polled_reviews) == 1:
+                    assert waiter_task is not None
+                    await asyncio.sleep(0.01)
+                    assert not waiter_task.done()
+                    await cb_gate.wait()
                 polled_reviews.append((r, len(server.requests)))
 
             cb: Any = async_mismatch_cb
@@ -1331,15 +1337,32 @@ async def test_wait_ends_on_the_read_that_names_another_head(
 
             cb = sync_mismatch_cb
         async with session(mode, server.url) as client:
-            result = await call(
-                client,
-                "wait_for_review",
-                ORG,
-                REVIEW,
-                timeout=100,
-                head_commit_sha=OTHER_HEAD,
-                on_poll=cb,
-            )
+            if mode == "async":
+                waiter_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100,
+                        head_commit_sha=OTHER_HEAD,
+                        on_poll=cb,
+                    )
+                )
+                while len(polled_reviews) < 1:
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
+                assert not waiter_task.done()
+                cb_gate.set()
+                result = await waiter_task
+            else:
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=100,
+                    head_commit_sha=OTHER_HEAD,
+                    on_poll=cb,
+                )
             assert [p[0].status for p in polled_reviews] == ["PENDING", "RUNNING"]
             assert [p[1] for p in polled_reviews] == [1, 2]
             assert polled_reviews[0][0].head_commit_sha is UNSET
@@ -2802,10 +2825,20 @@ async def main() -> None:
             def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
                 super().__init__(loop=loop)
                 self.wait_entered = asyncio.Event()
+                self.active_callbacks: list[Any] = []
+                self.removed_callbacks: list[Any] = []
 
             def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
                 super().add_done_callback(fn, context=context)
+                self.active_callbacks.append(fn)
                 self.wait_entered.set()
+
+            def remove_done_callback(self, fn: Any) -> int:
+                count = super().remove_done_callback(fn)
+                if count > 0:
+                    self.removed_callbacks.append(fn)
+                    self.active_callbacks = [cb for cb in self.active_callbacks if cb != fn]
+                return count
 
         pending_fut: SignallingFuture | None = None
         cb_1_started = asyncio.Event()
@@ -2852,6 +2885,11 @@ async def main() -> None:
                 assert not pending_fut.cancelled()
                 assert not pending_fut.done()
                 assert id(pending_fut) in client_module._DETACHED_FUTURES
+                assert len(pending_fut.removed_callbacks) > 0
+                assert any(
+                    "_on_future_done" in getattr(cb, "__name__", "")
+                    for cb in pending_fut.removed_callbacks
+                )
                 pending_fut.set_result(None)
                 await asyncio.sleep(0)
                 assert id(pending_fut) not in client_module._DETACHED_FUTURES
@@ -3054,29 +3092,30 @@ async def main() -> None:
                     assert cb_task_3b is not None
                     assert not cb_task_3b.done()
                     clock.advance(1.0)
-                    res_3b = await waiter_task_3b
+                    res_3b = await asyncio.wait_for(asyncio.shield(waiter_task_3b), timeout=1.0)
                     assert res_3b.status == "TIMED_OUT"
                     assert not cb_task_3b.done()
                     task_release_3b.set()
                     await asyncio.wait_for(asyncio.shield(cb_task_3b), timeout=1.0)
                 finally:
+                    task_release_3b.set()
                     if not startup_waiter.done():
                         startup_waiter.cancel()
                     try:
-                        await startup_waiter
+                        await asyncio.wait_for(startup_waiter, timeout=0.5)
                     except (asyncio.CancelledError, BaseException):
                         pass
                     if not waiter_task_3b.done():
                         waiter_task_3b.cancel()
                     try:
-                        await waiter_task_3b
+                        await asyncio.wait_for(waiter_task_3b, timeout=0.5)
                     except (asyncio.CancelledError, BaseException):
                         pass
                     if cb_task_3b is not None:
                         if not cb_task_3b.done():
                             cb_task_3b.cancel()
                         try:
-                            await cb_task_3b
+                            await asyncio.wait_for(cb_task_3b, timeout=0.5)
                         except (asyncio.CancelledError, BaseException):
                             pass
 
@@ -5088,6 +5127,25 @@ asyncio.run(main())
     assert copied_holder.d["pending_val"] is copied_obj.f_set
     assert copied_holder.d is not deferred_dict
 
+    # Dictionary fixture whose key hash changes during clone finalization: snapshot is rejected
+    class MutatingHashKey:
+        def __init__(self) -> None:
+            self.val = 1
+
+        def __hash__(self) -> int:
+            h = self.val
+            self.val += 1
+            return h
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, MutatingHashKey)
+
+    mutating_k = MutatingHashKey()
+    dict_with_mutating = {mutating_k: "val"}
+    detail_dict_mutating = CustomerReviewDetail.from_dict(responses[1])
+    detail_dict_mutating.additional_properties["mutating_dict"] = dict_with_mutating
+    assert _snapshot_review(detail_dict_mutating) is None
+
     # Strided memoryview over immutable bytes preserves strides and c_contiguous
     b_data = b"0123456789abcdef"
     mv_strided = memoryview(b_data)[::2]
@@ -5571,17 +5629,39 @@ async def test_wait_for_review_pending_futures_and_clock(
     # Closing loop releases strong retention from _DETACHED_FUTURES and _DETACHED_TASKS
     def test_loop_close_in_thread() -> None:
         t_loop = asyncio.new_event_loop()
+
+        class TrackingFuture(asyncio.Future[Any]):
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.exception_retrieved = False
+
+            def exception(self) -> Any:
+                self.exception_retrieved = True
+                return super().exception()
+
+        class TrackingTask(asyncio.Task[Any]):
+            def __init__(self, coro: Any, *, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(coro, loop=loop)
+                self.exception_retrieved = False
+
+            def exception(self) -> Any:
+                self.exception_retrieved = True
+                return super().exception()
+
         try:
             asyncio.set_event_loop(t_loop)
-            t_fut = t_loop.create_future()
-            t_task: asyncio.Task[Any] | None = None
+            t_fut = TrackingFuture(loop=t_loop)
+            t_task: TrackingTask | None = None
+            task_start = asyncio.Event()
 
-            async def sleep_forever() -> None:
-                await asyncio.sleep(3600)
+            async def fail_task() -> None:
+                await task_start.wait()
+                t_loop.stop()
+                raise RuntimeError("task failed")
 
             async def run_in_t() -> None:
                 nonlocal t_task
-                t_task = t_loop.create_task(sleep_forever())
+                t_task = TrackingTask(fail_task(), loop=t_loop)
                 client_module._detach_overdue_future(t_fut)
                 client_module._detach_overdue_task(t_task)
 
@@ -5591,22 +5671,26 @@ async def test_wait_for_review_pending_futures_and_clock(
             assert t_task is not None
             assert id(t_task) in client_module._DETACHED_TASKS
             assert getattr(t_loop, "_proofline_detached_tasks", {}).get(id(t_task)) is t_task
-            t_fut.set_exception(RuntimeError("failed before close"))
+
+            # Fail both targets before their done callbacks run:
+            task_start.set()
+            t_loop.run_forever()
+            t_fut.set_exception(RuntimeError("fut failed before close"))
+
+            assert t_fut.done()
+            assert t_task.done()
+            assert not t_fut.exception_retrieved
+            assert not t_task.exception_retrieved
+            assert id(t_fut) in client_module._DETACHED_FUTURES
+            assert id(t_task) in client_module._DETACHED_TASKS
         finally:
-            if t_task is not None:
-                setattr(t_task, "_log_destroy_pending", False)
-                try:
-                    if hasattr(t_task, "get_coro"):
-                        coro = t_task.get_coro()
-                        if coro is not None:
-                            coro.close()
-                except BaseException:
-                    pass
             t_loop.close()
             asyncio.set_event_loop(None)
+        assert t_fut.exception_retrieved
+        assert t_task is not None
+        assert t_task.exception_retrieved
         assert id(t_fut) not in client_module._DETACHED_FUTURES
         assert not getattr(t_loop, "_proofline_detached_futures", {})
-        assert t_task is not None
         assert id(t_task) not in client_module._DETACHED_TASKS
         assert not getattr(t_loop, "_proofline_detached_tasks", {})
 

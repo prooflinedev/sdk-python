@@ -338,7 +338,7 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
         if curr is None:
             return True
         if isinstance(curr, ModuleType):
-            return True
+            return False
         if isinstance(curr, type):
             return curr in _SAFE_BUILTIN_CLASSES or curr is object
         local_seen = seen if seen is not None else set()
@@ -357,7 +357,7 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
         if curr is None:
             return True
         if isinstance(curr, ModuleType):
-            return True
+            return False
         if isinstance(curr, type):
             return curr in _SAFE_BUILTIN_CLASSES or curr is object
         return _is_immutable(curr, local_seen)
@@ -503,10 +503,11 @@ def _install_cloned_dict(
                                 continue
                             cloned_dict[k] = v
                     stack.append((_DICT_EXPAND, cloned_dict, iter(inst_dict.items())))
-                try:
-                    new_obj.__dict__ = cloned_dict
-                except AttributeError:
-                    pass
+                if new_obj is not None:
+                    try:
+                        new_obj.__dict__ = cloned_dict
+                    except AttributeError:
+                        pass
         except Exception:
             pass
 
@@ -614,6 +615,9 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     weakref.ProxyType,
                     weakref.CallableProxyType,
                 ),
+            ) or (
+                isinstance(val, BuiltinFunctionType)
+                and isinstance(getattr(val, "__self__", None), ModuleType)
             ):
                 raise TypeError(
                     f"Unsupported mutable value in review extension data: {type(val).__name__}"
@@ -827,6 +831,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     deferred_frozenset_insertions.append(
                         (target, key, is_attr, val_id, val, orig_fs_members)
                     )
+                    if hasattr(val, "__dict__"):
+                        _install_cloned_dict(val, None, memo, stack)
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         for slot_or_name, is_desc, attr_val in _get_obj_attrs(val):
                             if (
@@ -1766,6 +1772,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         )
                 memo[val_id] = res_set
                 pending_frozenset_ids.discard(val_id)
+                if hasattr(orig_val, "__dict__"):
+                    _install_cloned_dict(orig_val, res_set, memo, stack)
                 if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                     for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
                         if _is_immutable(attr_val):
@@ -1817,6 +1825,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     memo[val_id] = res_set
                     pending_frozenset_ids.discard(val_id)
                     fallback_built_frozensets.append((res_set, resolved_members))
+                    if hasattr(orig_val, "__dict__"):
+                        _install_cloned_dict(orig_val, res_set, memo, stack)
                     if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                         for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
                             if _is_immutable(attr_val):
@@ -3055,17 +3065,18 @@ class AsyncProoflineClient(AsyncOperations):
         Failure propagation depends on the awaitable type and the polling deadline:
         already-done futures must be returned before the deadline to propagate (failures of
         already-done futures returned after expiry are detached and suppressed), coroutine
-        failures are timed at wrapper completion rather than when the waiter retrieves
-        them, and pending future failures propagate only if their done callback executes before
-        the deadline expires (cutting off at done-callback execution and allowing any
-        classified outcome to be returned).
+        failures are timed at wrapper completion rather than when the waiter retrieves them
+        (except for wrappers cancelled before their first step, which are timed when their done
+        callback runs), and pending future failures propagate only if their done callback
+        executes before the deadline expires (cutting off at done-callback execution and allowing
+        any classified outcome to be returned).
         This allows any classified outcome to be returned when a callback finishes or returns
-        after the deadline. When the deadline expires or when the wait is
-        cancelled, unstarted coroutines returned by on_poll are closed without entering
-        their body (a wrapper task may already have been scheduled), while already-running
-        callback tasks and futures are detached without cancellation and may continue
-        running (late SystemExit and KeyboardInterrupt from already-scheduled tasks are not
-        suppressed). Synchronous callbacks must return before a terminal result can be
+        after the deadline. When the deadline expires or when the wait is cancelled, unstarted
+        coroutines returned by on_poll are closed without entering their body (a wrapper task
+        may already have been scheduled), while already-running callback tasks and futures are
+        detached without cancellation and may continue running (detached callback coroutines
+        suppress late SystemExit and KeyboardInterrupt signals, which do not propagate once
+        detached). Synchronous callbacks must return before a terminal result can be
         delivered and the polling deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
@@ -3214,28 +3225,30 @@ class AsyncProoflineClient(AsyncOperations):
                                         except BaseException:
                                             _detach_overdue_future(res)
                                             raise
-                                    deadline_val = _transport.DEADLINE.get()
-                                    cb_finished_in_budget = bool(completed_at) and (
-                                        deadline_val is None or completed_at[0] <= deadline_val
-                                    )
-                                    if cb_finished_in_budget:
-                                        if hasattr(res, "result"):
-                                            res.result()
-                                        else:
-                                            AsyncFuture.result(res)
-                                    remaining_budget = _transport.remaining()
-                                    if remaining_budget is not None and remaining_budget <= 0:
-                                        _detach_overdue_future(res)
-                                        if result is not None:
-                                            return result
-                                        break
+                                    done: set[Any] = set()
                                     try:
-                                        done, _ = await async_wait(
-                                            {completion_fut}, timeout=remaining_budget
+                                        deadline_val = _transport.DEADLINE.get()
+                                        cb_finished_in_budget = bool(completed_at) and (
+                                            deadline_val is None or completed_at[0] <= deadline_val
                                         )
-                                    except BaseException:
-                                        _detach_overdue_future(res)
-                                        raise
+                                        if cb_finished_in_budget:
+                                            if hasattr(res, "result"):
+                                                res.result()
+                                            else:
+                                                AsyncFuture.result(res)
+                                        remaining_budget = _transport.remaining()
+                                        if remaining_budget is not None and remaining_budget <= 0:
+                                            _detach_overdue_future(res)
+                                            if result is not None:
+                                                return result
+                                            break
+                                        try:
+                                            done, _ = await async_wait(
+                                                {completion_fut}, timeout=remaining_budget
+                                            )
+                                        except BaseException:
+                                            _detach_overdue_future(res)
+                                            raise
                                     finally:
                                         try:
                                             if hasattr(res, "remove_done_callback"):
