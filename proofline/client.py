@@ -507,6 +507,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     pending_frozenset_ids: set[int] = set()
     pending_assignments: dict[int, list[tuple[Any, Any, bool]]] = {}
     fallback_built_frozensets: list[tuple[Any, list[Any]]] = []
+    deferred_attr_assignments: list[tuple[Any, tuple[Any, bool], Any]] = []
 
     def _collect_set_members(val: Any) -> list[Any] | None:
         if hasattr(val, "__len__") and len(val) > _MAX_SAFE_BUFFER_SIZE:
@@ -863,7 +864,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             return None
                         try:
                             if isinstance(exporter, bytes):
-                                cloned_exporter = bytes(exporter)
+                                if type(exporter) is bytes:
+                                    cloned_exporter = bytes(exporter)
+                                else:
+                                    cloned_exporter = bytes.__new__(type(exporter), exporter)
                             elif isinstance(exporter, bytearray):
                                 cloned_exporter = bytearray.__new__(type(exporter))
                                 bytearray.__init__(cloned_exporter, exporter)
@@ -909,7 +913,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         stride = val_strides[0]
                         elem_stride = stride // itemsize
                         if shape == 0:
-                            resolved_mv = cast(Any, base_bytes[0:0]).cast(val.format)
+                            casted = cast(Any, base_bytes[0:0]).cast(val.format)
+                            resolved_mv = casted[::elem_stride]
                         elif stride >= 0:
                             byte_len = (shape - 1) * stride + itemsize
                             byte_slice = base_bytes[offset : offset + byte_len]
@@ -960,9 +965,18 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 memo[val_id] = resolved_mv
                 _assign_target(target, key, is_attr, resolved_mv)
             elif isinstance(val, datetime.datetime):
+                if type(val) is not datetime.datetime and _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 tz = val.tzinfo
                 copied_tz = tz
                 if tz is not None and type(tz) is not datetime.timezone:
+                    if _has_mutable_class_attrs(type(tz)):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(tz).__name__}"
+                        )
                     if id(tz) in memo:
                         copied_tz = memo[id(tz)]
                     else:
@@ -1310,7 +1324,7 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         return True
 
     def _flush_pending_structures() -> None:
-        nonlocal deferred_tuple_finalizations, deferred_set_insertions
+        nonlocal deferred_tuple_finalizations, deferred_set_insertions, deferred_attr_assignments
         changed = True
         while changed:
             if _deadline_expired():
@@ -1428,6 +1442,17 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         break
                 dict_next_index[td_id] = idx
 
+            if deferred_attr_assignments:
+                still_attrs = []
+                for res_obj, key_desc, orig_attr in deferred_attr_assignments:
+                    if _is_immutable(orig_attr) or id(orig_attr) in memo:
+                        val_to_set = orig_attr if _is_immutable(orig_attr) else memo[id(orig_attr)]
+                        _assign_target(res_obj, key_desc, True, val_to_set)
+                        changed = True
+                    else:
+                        still_attrs.append((res_obj, key_desc, orig_attr))
+                deferred_attr_assignments = still_attrs
+
     _flush_pending_structures()
     if _deadline_expired():
         return None
@@ -1494,12 +1519,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 pending_frozenset_ids.discard(val_id)
                 if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                     for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
-                        val_to_set = (
-                            attr_val
-                            if _is_immutable(attr_val)
-                            else memo.get(id(attr_val), attr_val)
-                        )
-                        _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
+                        if _is_immutable(attr_val):
+                            _assign_target(res_set, (slot_or_name, is_desc), True, attr_val)
+                        elif id(attr_val) in memo:
+                            _assign_target(
+                                res_set, (slot_or_name, is_desc), True, memo[id(attr_val)]
+                            )
+                        else:
+                            deferred_attr_assignments.append(
+                                (res_set, (slot_or_name, is_desc), attr_val)
+                            )
                 _assign_target(target, key, is_attr, res_set)
                 for p_target, p_key, p_is_attr in pending_assignments.pop(val_id, []):
                     _assign_target(p_target, p_key, p_is_attr, res_set)
@@ -1541,12 +1570,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     fallback_built_frozensets.append((res_set, resolved_members))
                     if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                         for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
-                            val_to_set = (
-                                attr_val
-                                if _is_immutable(attr_val)
-                                else memo.get(id(attr_val), attr_val)
-                            )
-                            _assign_target(res_set, (slot_or_name, is_desc), True, val_to_set)
+                            if _is_immutable(attr_val):
+                                _assign_target(res_set, (slot_or_name, is_desc), True, attr_val)
+                            elif id(attr_val) in memo:
+                                _assign_target(
+                                    res_set, (slot_or_name, is_desc), True, memo[id(attr_val)]
+                                )
+                            else:
+                                deferred_attr_assignments.append(
+                                    (res_set, (slot_or_name, is_desc), attr_val)
+                                )
                     _assign_target(target, key, is_attr, res_set)
                     for p_target, p_key, p_is_attr in pending_assignments.pop(val_id, []):
                         _assign_target(p_target, p_key, p_is_attr, res_set)
@@ -1578,11 +1611,14 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             raise TypeError("Unsupported cyclic reference in dict")
     if deferred_tuple_finalizations:
         raise TypeError("Unsupported cyclic reference in tuple")
+    if deferred_attr_assignments:
+        raise TypeError("Unsupported cyclic reference in attributes")
     return root
 
 
 _DETACHED_TASKS: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
-_DETACHED_FUTURES: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
+_DETACHED_FUTURES: dict[int, Any] = {}
+_CLEANED_UP_AWAITABLES: set[int] = set()
 
 
 def _safe_cancel_target(target: Any) -> None:
@@ -1680,8 +1716,19 @@ def _safe_close(obj: Any) -> None:
 def _cleanup_discarded_awaitable(res: Any, waiter_task: Any = None) -> None:
     if res is None:
         return
-    if getattr(res, "_proofline_cleaned_up", False):
+    if async_isfuture(res):
+        if waiter_task is None or res is not waiter_task:
+            _detach_overdue_future(res)
         return
+    res_id = id(res)
+    if res_id in _CLEANED_UP_AWAITABLES:
+        return
+    try:
+        if getattr(res, "_proofline_cleaned_up", False):
+            return
+    except BaseException:
+        pass
+    _CLEANED_UP_AWAITABLES.add(res_id)
     try:
         setattr(res, "_proofline_cleaned_up", True)
     except BaseException:
@@ -1698,9 +1745,6 @@ def _cleanup_discarded_awaitable(res: Any, waiter_task: Any = None) -> None:
                 res.close()
         except BaseException:
             pass
-    elif async_isfuture(res):
-        if waiter_task is None or res is not waiter_task:
-            _detach_overdue_future(res)
     else:
         _safe_close(res)
 
@@ -2242,7 +2286,6 @@ class ProoflineClient(Operations):
                         try:
                             res_awaitable = isawaitable(res)
                         except Exception:
-                            _safe_close(res)
                             raise TypeError("Callbacks must return None.") from None
                         if res_awaitable:
                             if iscoroutine(res):
@@ -2264,7 +2307,6 @@ class ProoflineClient(Operations):
                                 "for async callbacks."
                             )
                         if res is not None:
-                            _safe_close(res)
                             raise TypeError("Callbacks must return None.")
                 if result is not None:
                     return result
@@ -2727,10 +2769,8 @@ class AsyncProoflineClient(AsyncOperations):
                         try:
                             res_awaitable = isawaitable(res)
                         except Exception:
-                            _safe_close(res)
                             raise TypeError("Callbacks must return None or an awaitable.") from None
                         if res is not None and not res_awaitable:
-                            _safe_close(res)
                             raise TypeError("Callbacks must return None or an awaitable.")
                         if res_awaitable:
                             if res is async_current_task():

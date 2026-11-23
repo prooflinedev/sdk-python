@@ -2943,15 +2943,29 @@ async def main() -> None:
                     on_poll=continuing_coro,
                 )
             )
-            await callback_running.wait()
-            assert not waiter_task_3.done()
-            clock.advance(1.0)
-            res_3 = await waiter_task_3
-            assert res_3.status == "TIMED_OUT"
-            assert callback_running.is_set()
-            assert not callback_finished.is_set()
-            release_callback.set()
-            await callback_finished.wait()
+            startup_waiter_3 = asyncio.create_task(callback_running.wait())
+            try:
+                done_3, _ = await asyncio.wait(
+                    {startup_waiter_3, waiter_task_3},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter_task_3 in done_3:
+                    await waiter_task_3
+                assert not waiter_task_3.done()
+                clock.advance(1.0)
+                res_3 = await waiter_task_3
+                assert res_3.status == "TIMED_OUT"
+                assert callback_running.is_set()
+                assert not callback_finished.is_set()
+                release_callback.set()
+                await callback_finished.wait()
+            finally:
+                if not startup_waiter_3.done():
+                    startup_waiter_3.cancel()
+                try:
+                    await startup_waiter_3
+                except (asyncio.CancelledError, BaseException):
+                    pass
         finally:
             client_module.async_create_task = orig_create_task_3
             sleep_forbidden = False
@@ -3073,15 +3087,29 @@ async def main() -> None:
                     on_poll=continuing_coro_term,
                 )
             )
-            await callback_running_term.wait()
+            startup_waiter_4 = asyncio.create_task(callback_running_term.wait())
+            try:
+                done_4, _ = await asyncio.wait(
+                    {startup_waiter_4, waiter_task_4},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter_task_4 in done_4:
+                    await waiter_task_4
+            finally:
+                if not startup_waiter_4.done():
+                    startup_waiter_4.cancel()
+                try:
+                    await startup_waiter_4
+                except (asyncio.CancelledError, BaseException):
+                    pass
             assert not waiter_task_4.done()
             clock.advance(1.0)
+            release_callback_term.set()
+            await callback_finished_term.wait()
             res_4 = await waiter_task_4
             assert res_4.status == "COMPLETED"
             assert callback_running_term.is_set()
-            assert not callback_finished_term.is_set()
-            release_callback_term.set()
-            await callback_finished_term.wait()
+            assert callback_finished_term.is_set()
             await asyncio.sleep(0.01)
             assert len(captured_case4_wrappers) == 1
             wrapper_4 = captured_case4_wrappers[0]
@@ -3401,7 +3429,21 @@ async def main() -> None:
                     on_poll=awaiting_runner_callback,
                 )
             )
-            await cb_7_started.wait()
+            startup_waiter_7 = asyncio.create_task(cb_7_started.wait())
+            try:
+                done_7, _ = await asyncio.wait(
+                    {startup_waiter_7, polling_waiter_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if polling_waiter_task in done_7:
+                    await polling_waiter_task
+            finally:
+                if not startup_waiter_7.done():
+                    startup_waiter_7.cancel()
+                try:
+                    await startup_waiter_7
+                except (asyncio.CancelledError, BaseException):
+                    pass
             assert not polling_waiter_task.done()
             clock.advance(1.0)
             res_7 = await polling_waiter_task
@@ -3436,6 +3478,7 @@ asyncio.run(main())
     async def async_mutating_callback(r: Any) -> None:
         nonlocal mutated_count
         mutated_count += 1
+        await asyncio.sleep(0.01)
         r.status = "MUTATED"
         r.actions.publish = True
         r.additional_properties["mutated"] = "mutated_value"
