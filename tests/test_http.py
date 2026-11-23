@@ -1340,6 +1340,10 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                 head_commit_sha=OTHER_HEAD,
                 on_poll=cb,
             )
+            assert [p[0].status for p in polled_reviews] == ["PENDING", "RUNNING"]
+            assert [p[1] for p in polled_reviews] == [1, 2]
+            assert polled_reviews[0][0].head_commit_sha is UNSET
+            assert polled_reviews[1][0].head_commit_sha == HEAD
         assert result.status == "INCOMPLETE"
         assert result.review.status == "RUNNING"
         assert gap_facts(result) == [PINNED_ELSEWHERE]
@@ -1347,10 +1351,6 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         # The second read names the head, so the review that would complete is never read.
         assert len(server.requests) == 2
         assert clock.delays == [5, 10, 5, 5]
-        assert [p[0].status for p in polled_reviews] == ["PENDING", "RUNNING"]
-        assert [p[1] for p in polled_reviews] == [1, 2]
-        assert polled_reviews[0][0].head_commit_sha is UNSET
-        assert polled_reviews[1][0].head_commit_sha == HEAD
 
 
 @MODES
@@ -4905,6 +4905,7 @@ asyncio.run(main())
     copied_tuple = next(iter(copied_set))
     assert copied_tuple[0].d == {"key": "val"}
     assert copied_tuple[0].d is not inner_dict
+    assert copied_tuple in copied_set
 
     # Snapshot overlapping views of one subclass exporter, visiting a view first:
     # assert shared writes, original isolation, copied attributes, and scalar shape ()
@@ -5141,6 +5142,35 @@ asyncio.run(main())
         curr_obj.__self__ = prev  # type: ignore[attr-defined]
 
     assert client_module._is_immutable(curr_obj) is False
+
+    # Non-callable object with immutable __self__ is not classified as immutable
+    class NonCallableWithSelf:
+        __self__ = 42
+
+    nc_inst = NonCallableWithSelf()
+    assert client_module._is_immutable(nc_inst) is False
+    detail_nc = CustomerReviewDetail.from_dict(responses[1])
+    detail_nc.additional_properties["nc"] = nc_inst
+    snap_nc = _snapshot_review(detail_nc)
+    assert snap_nc is not None
+    copied_nc = snap_nc.additional_properties["nc"]
+    assert copied_nc is not nc_inst
+
+    # Memoryview over bytes subclass exporter whose __bytes__ tries expansion
+    mv_sub_bytes = memoryview(small_sub_bytes)[1:5]
+    detail_mv_sub_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_mv_sub_bytes.additional_properties["mv_sub_bytes"] = mv_sub_bytes
+    snap_mv_sub = _snapshot_review(detail_mv_sub_bytes)
+    assert snap_mv_sub is not None
+    copied_mv_sub = snap_mv_sub.additional_properties["mv_sub_bytes"]
+    assert copied_mv_sub.tobytes() == b"mall"
+    assert type(copied_mv_sub.obj) is CustomBytesWithExpansion
+    assert memoryview(copied_mv_sub.obj).tobytes() == b"small_sub"
+
+    # Tuple containing oversized bytes (> 65536) returns None
+    detail_tuple_big_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_tuple_big_bytes.additional_properties["tuple_big"] = (b"A" * 65537,)
+    assert _snapshot_review(detail_tuple_big_bytes) is None
 
     # Invalid callback return raising property on close
     class RaisingCloseReturn:
@@ -5452,19 +5482,25 @@ async def test_wait_for_review_pending_futures_and_clock(
         loop.set_exception_handler(old_h)
 
     # Late SystemExit inside callback wrapper is suppressed after deadline
+    exit_task_done = asyncio.Event()
+
     async def late_system_exit_coro(r: Any) -> None:
-        await asyncio.sleep(0.01)
-        raise SystemExit(42)
+        try:
+            clock.now += 200.0
+            raise SystemExit(42)
+        finally:
+            exit_task_done.set()
 
     with Server(lambda request, index: Reply(body=responses[0])) as server:
         async with session("async", server.url) as client:
             res_exit = await client.wait_for_review(
                 ORG,
                 REVIEW,
-                timeout=0.01,
+                timeout=10.0,
                 on_poll=late_system_exit_coro,
             )
             assert res_exit.status == "TIMED_OUT"
+            await asyncio.wait_for(exit_task_done.wait(), timeout=1.0)
 
     # In-budget SystemExit inside callback wrapper propagates
     async def in_budget_system_exit_coro(r: Any) -> None:
@@ -5493,10 +5529,12 @@ async def test_wait_for_review_pending_futures_and_clock(
 
             t_loop.run_until_complete(run_in_t())
             assert id(t_fut) in client_module._DETACHED_FUTURES
+            assert getattr(t_loop, "_proofline_detached_futures", {}).get(id(t_fut)) is t_fut
         finally:
             t_loop.close()
             asyncio.set_event_loop(None)
         assert id(t_fut) not in client_module._DETACHED_FUTURES
+        assert not getattr(t_loop, "_proofline_detached_futures", {})
 
         # Loop that rejects assignment to close: assert future never enters _DETACHED_FUTURES
         u_loop = asyncio.new_event_loop()

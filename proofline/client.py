@@ -55,6 +55,7 @@ from types import (
     FunctionType,
     MemberDescriptorType,
     MethodType,
+    ModuleType,
     TracebackType,
 )
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
@@ -318,37 +319,48 @@ def _deadline_expired() -> bool:
 
 
 def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
-    curr = val
-    local_seen = seen if seen is not None else set()
-    while hasattr(curr, "__self__"):
-        curr_id = id(curr)
-        if curr_id in local_seen:
-            return False
-        local_seen.add(curr_id)
-        if _deadline_expired():
-            return False
-        try:
-            curr = curr.__self__
-        except BaseException:
-            return False
-
-    if curr is None or curr is UNSET:
+    if val is None or val is UNSET:
         return True
-    if isinstance(curr, type):
-        return curr in _SAFE_BUILTIN_CLASSES
-    curr_id = id(curr)
-    if curr_id in local_seen:
-        return False
-    t = type(curr)
+    if isinstance(val, type):
+        return val in _SAFE_BUILTIN_CLASSES
+    t = type(val)
     if t in _IMMUTABLE_TYPES:
         return True
-    if isinstance(curr, BuiltinFunctionType):
-        return not bool(getattr(curr, "__dict__", None))
-    if isinstance(curr, (FunctionType, MethodType)):
-        return False
     if t is datetime.datetime:
-        tz = curr.tzinfo
+        tz = val.tzinfo
         return tz is None or type(tz) is datetime.timezone
+    if isinstance(val, (FunctionType, MethodType)):
+        return False
+    if isinstance(val, BuiltinFunctionType):
+        if bool(getattr(val, "__dict__", None)):
+            return False
+        curr = getattr(val, "__self__", None)
+        if curr is None:
+            return True
+        if isinstance(curr, ModuleType):
+            return True
+        if isinstance(curr, type):
+            return curr in _SAFE_BUILTIN_CLASSES or curr is object
+        local_seen = seen if seen is not None else set()
+        val_id = id(val)
+        if val_id in local_seen:
+            return False
+        local_seen.add(val_id)
+        while curr is not None and isinstance(curr, (BuiltinFunctionType, MethodType)):
+            curr_id = id(curr)
+            if curr_id in local_seen:
+                return False
+            local_seen.add(curr_id)
+            if _deadline_expired():
+                return False
+            curr = getattr(curr, "__self__", None)
+        if curr is None:
+            return True
+        if isinstance(curr, ModuleType):
+            return True
+        if isinstance(curr, type):
+            return curr in _SAFE_BUILTIN_CLASSES or curr is object
+        return _is_immutable(curr, local_seen)
     return False
 
 
@@ -923,7 +935,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                                 if type(exporter) is bytes:
                                     cloned_exporter = bytes(exporter)
                                 else:
-                                    cloned_exporter = bytes.__new__(type(exporter), exporter)
+                                    raw_exp = bytes(memoryview(exporter))
+                                    if len(raw_exp) > _MAX_SAFE_BUFFER_SIZE:
+                                        return None
+                                    cloned_exporter = bytes.__new__(type(exporter), raw_exp)
                             elif isinstance(exporter, bytearray):
                                 cloned_exporter = bytearray.__new__(type(exporter))
                                 bytearray.__init__(cloned_exporter, exporter)
@@ -1269,6 +1284,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     v = next(it)
                 except StopIteration:
                     break
+                if type(v) is bytes and len(v) > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 if _is_immutable(v):
                     temp_list.append(v)
                 elif id(v) in memo:
@@ -1733,6 +1750,16 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     for td_id, entries in dict_ordered_entries.items():
         if dict_next_index[td_id] < len(entries):
             raise TypeError("Unsupported cyclic reference in dict")
+        target_dict = dict_targets[td_id]
+        for orig_k, _ in entries:
+            if _deadline_expired():
+                return None
+            k = orig_k if _is_immutable(orig_k) else memo.get(id(orig_k), orig_k)
+            try:
+                if k not in target_dict:
+                    return None
+            except Exception:
+                return None
     if deferred_tuple_finalizations:
         raise TypeError("Unsupported cyclic reference in tuple")
     if deferred_attr_assignments:
@@ -1749,6 +1776,50 @@ def _safe_cancel_target(target: Any) -> None:
         target.cancel()
     except BaseException:
         pass
+
+
+def _ensure_loop_close_hooked(loop: Any) -> bool:
+    hook_installed = getattr(loop, "_proofline_close_hooked", False)
+    if hook_installed:
+        return True
+    try:
+        orig_loop_close = loop.close
+
+        def _hooked_loop_close(*args: Any, **kwargs: Any) -> Any:
+            close_res = orig_loop_close(*args, **kwargs)
+            l_futs = getattr(loop, "_proofline_detached_futures", None)
+            if l_futs is not None:
+                for fid in list(l_futs.keys()):
+                    _DETACHED_FUTURES.pop(fid, None)
+                l_futs.clear()
+            l_tasks = getattr(loop, "_proofline_detached_tasks", None)
+            if l_tasks is not None:
+                for tid in list(l_tasks.keys()):
+                    _DETACHED_TASKS.pop(tid, None)
+                l_tasks.clear()
+            for fid, f in list(_DETACHED_FUTURES.items()):
+                f_loop = None
+                try:
+                    f_loop = f.get_loop() if hasattr(f, "get_loop") else AsyncFuture.get_loop(f)
+                except BaseException:
+                    f_loop = getattr(f, "_loop", None)
+                if f_loop is loop:
+                    _DETACHED_FUTURES.pop(fid, None)
+            for tid, t in list(_DETACHED_TASKS.items()):
+                t_loop = None
+                try:
+                    t_loop = t.get_loop() if hasattr(t, "get_loop") else AsyncTask.get_loop(t)
+                except BaseException:
+                    t_loop = getattr(t, "_loop", None)
+                if t_loop is loop:
+                    _DETACHED_TASKS.pop(tid, None)
+            return close_res
+
+        loop.close = _hooked_loop_close
+        setattr(loop, "_proofline_close_hooked", True)
+        return True
+    except BaseException:
+        return False
 
 
 def _detach_overdue_future(fut: Any) -> None:
@@ -1789,35 +1860,7 @@ def _detach_overdue_future(fut: Any) -> None:
         if loop_futures is not None:
             loop_futures[fut_id] = fut
 
-        hook_installed = getattr(loop, "_proofline_close_hooked", False)
-        if not hook_installed:
-            try:
-                orig_loop_close = loop.close
-
-                def _hooked_loop_close(*args: Any, **kwargs: Any) -> Any:
-                    close_res = orig_loop_close(*args, **kwargs)
-                    l_futs = getattr(loop, "_proofline_detached_futures", None)
-                    if l_futs is not None:
-                        for fid in list(l_futs.keys()):
-                            _DETACHED_FUTURES.pop(fid, None)
-                        l_futs.clear()
-                    for fid, f in list(_DETACHED_FUTURES.items()):
-                        f_loop = None
-                        try:
-                            f_loop = (
-                                f.get_loop() if hasattr(f, "get_loop") else AsyncFuture.get_loop(f)
-                            )
-                        except BaseException:
-                            f_loop = getattr(f, "_loop", None)
-                        if f_loop is loop:
-                            _DETACHED_FUTURES.pop(fid, None)
-                    return close_res
-
-                loop.close = _hooked_loop_close  # type: ignore[method-assign]
-                setattr(loop, "_proofline_close_hooked", True)
-                hook_installed = True
-            except BaseException:
-                hook_installed = False
+        hook_installed = _ensure_loop_close_hooked(loop)
 
         if hook_installed:
             try:
@@ -1961,6 +2004,7 @@ def _detach_overdue_task(
             loop = None
 
     task_id = id(task)
+    hook_installed = False
     if loop is not None and not loop.is_closed():
         loop_tasks = getattr(loop, "_proofline_detached_tasks", None)
         if loop_tasks is None:
@@ -1972,10 +2016,13 @@ def _detach_overdue_task(
         if loop_tasks is not None:
             loop_tasks[task_id] = task
 
-    try:
-        _DETACHED_TASKS[task_id] = task
-    except (TypeError, BaseException):
-        pass
+        hook_installed = _ensure_loop_close_hooked(loop)
+
+    if hook_installed:
+        try:
+            _DETACHED_TASKS[task_id] = task
+        except (TypeError, BaseException):
+            pass
 
     def _on_detached_task_done(t: Any) -> None:
         _DETACHED_TASKS.pop(task_id, None)
@@ -2938,6 +2985,7 @@ class AsyncProoflineClient(AsyncOperations):
                                         _cleanup_discarded_awaitable(res, waiter_task=waiter_task)
                                 except Exception:
                                     pass
+                                await async_sleep(0)
                                 raise AsyncCancelledError()
                         try:
                             res_awaitable = isawaitable(res)
