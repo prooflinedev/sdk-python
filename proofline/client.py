@@ -510,7 +510,13 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     deferred_attr_assignments: list[tuple[Any, tuple[Any, bool], Any]] = []
 
     def _collect_set_members(val: Any) -> list[Any] | None:
-        if hasattr(val, "__len__") and len(val) > _MAX_SAFE_BUFFER_SIZE:
+        if isinstance(val, set):
+            if set.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
+                return None
+        elif isinstance(val, frozenset):
+            if frozenset.__len__(val) > _MAX_SAFE_BUFFER_SIZE:
+                return None
+        elif hasattr(val, "__len__") and len(val) > _MAX_SAFE_BUFFER_SIZE:
             return None
         members: list[Any] = []
         it = iter(val)
@@ -521,6 +527,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
             except StopIteration:
                 break
             members.append(m)
+            if len(members) > _MAX_SAFE_BUFFER_SIZE:
+                return None
             batch_count += 1
             if (batch_count & 63) == 0 and _deadline_expired():
                 return None
@@ -946,20 +954,59 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             "Unsupported mutable value in review extension data: "
                             f"{type(val).__name__}"
                         )
-                    if val.readonly:
-                        resolved_mv = memoryview(bytes(val))
-                    else:
-                        resolved_mv = memoryview(bytearray(val))
-                    if val.ndim == 0:
-                        resolved_mv = cast(Any, resolved_mv).cast(val.format, shape=())
-                    elif val.format != "B" or (val.ndim > 1 and val.shape != resolved_mv.shape):
+                    if exporter is not None:
+                        exp_id = id(exporter)
+                        if exp_id in memo:
+                            cloned_buf = memo[exp_id]
+                        else:
+                            if val.readonly:
+                                cloned_buf = bytes(exporter)
+                            else:
+                                cloned_buf = bytearray(exporter)
+                            memo[exp_id] = cloned_buf
+                        offset = 0
                         try:
+                            b_val = _Py_buffer()
+                            b_exp = _Py_buffer()
+                            if _py_get_buffer(val, ctypes.byref(b_val), 0x0118) == 0:
+                                try:
+                                    if _py_get_buffer(exporter, ctypes.byref(b_exp), 0x0118) == 0:
+                                        try:
+                                            offset = b_val.buf - b_exp.buf
+                                        finally:
+                                            _py_release_buffer(ctypes.byref(b_exp))
+                                finally:
+                                    _py_release_buffer(ctypes.byref(b_val))
+                        except BaseException:
+                            pass
+                        resolved_mv = memoryview(cloned_buf)[offset : offset + val.nbytes]
+                    else:
+                        if val.readonly:
+                            resolved_mv = memoryview(bytes(val))
+                        else:
+                            resolved_mv = memoryview(bytearray(val))
+                    val_strides = val.strides
+                    val_shape = val.shape
+                    try:
+                        if val.ndim == 1 and val_shape is not None and val_strides is not None:
+                            shape = val_shape[0]
+                            itemsize = val.itemsize
+                            stride = val_strides[0]
+                            elem_stride = stride // itemsize if itemsize > 0 else 1
+                            if shape == 0:
+                                casted = cast(Any, resolved_mv).cast(val.format)
+                                resolved_mv = casted[::elem_stride]
+                            elif val.format != "B":
+                                resolved_mv = cast(Any, resolved_mv).cast(val.format)
+                        elif val.ndim == 0:
+                            resolved_mv = cast(Any, resolved_mv).cast(val.format, shape=())
+                        elif val.format != "B" or (val.ndim > 1 and val.shape != resolved_mv.shape):
                             resolved_mv = cast(Any, resolved_mv).cast(val.format, shape=val.shape)
-                        except Exception as exc:
-                            raise TypeError(
-                                "Unsupported mutable value in review extension data: "
-                                f"{type(val).__name__}"
-                            ) from exc
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        ) from exc
                 if val.readonly:
                     resolved_mv = resolved_mv.toreadonly()
                 memo[val_id] = resolved_mv
@@ -1618,7 +1665,6 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
 
 _DETACHED_TASKS: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
 _DETACHED_FUTURES: dict[int, Any] = {}
-_CLEANED_UP_AWAITABLES: set[int] = set()
 
 
 def _safe_cancel_target(target: Any) -> None:
@@ -1720,33 +1766,27 @@ def _cleanup_discarded_awaitable(res: Any, waiter_task: Any = None) -> None:
         if waiter_task is None or res is not waiter_task:
             _detach_overdue_future(res)
         return
-    res_id = id(res)
-    if res_id in _CLEANED_UP_AWAITABLES:
-        return
-    try:
-        if getattr(res, "_proofline_cleaned_up", False):
-            return
-    except BaseException:
-        pass
-    _CLEANED_UP_AWAITABLES.add(res_id)
-    try:
-        setattr(res, "_proofline_cleaned_up", True)
-    except BaseException:
-        pass
     if iscoroutine(res):
         try:
             if getcoroutinestate(res) == CORO_CREATED:
                 res.close()
         except BaseException:
             pass
-    elif isgenerator(res):
+        return
+    if isgenerator(res):
         try:
             if getgeneratorstate(res) == GEN_CREATED:
                 res.close()
         except BaseException:
             pass
-    else:
-        _safe_close(res)
+        return
+    try:
+        if getattr(res, "_proofline_cleaned_up", False):
+            return
+        setattr(res, "_proofline_cleaned_up", True)
+    except BaseException:
+        pass
+    _safe_close(res)
 
 
 def _detach_overdue_task(
@@ -2300,8 +2340,6 @@ class ProoflineClient(Operations):
                                         res.close()
                                 except Exception:
                                     pass
-                            else:
-                                _safe_close(res)
                             raise TypeError(
                                 "on_poll returned an awaitable; use AsyncProoflineClient "
                                 "for async callbacks."
@@ -2764,7 +2802,11 @@ class AsyncProoflineClient(AsyncOperations):
                             except BaseException:
                                 pass
                             if current_cancelling > initial_cancelling:
-                                _cleanup_discarded_awaitable(res, waiter_task=waiter_task)
+                                try:
+                                    if isawaitable(res):
+                                        _cleanup_discarded_awaitable(res, waiter_task=waiter_task)
+                                except Exception:
+                                    pass
                                 raise AsyncCancelledError()
                         try:
                             res_awaitable = isawaitable(res)

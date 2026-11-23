@@ -2967,6 +2967,12 @@ async def main() -> None:
                 except (asyncio.CancelledError, BaseException):
                     pass
         finally:
+            if not waiter_task_3.done():
+                waiter_task_3.cancel()
+            try:
+                await waiter_task_3
+            except (asyncio.CancelledError, BaseException):
+                pass
             client_module.async_create_task = orig_create_task_3
             sleep_forbidden = False
             release_callback.set()
@@ -3117,6 +3123,12 @@ async def main() -> None:
             assert not wrapper_4.cancelled()
             assert getattr(wrapper_4, "exception_calls", 0) > 0
         finally:
+            if not waiter_task_4.done():
+                waiter_task_4.cancel()
+            try:
+                await waiter_task_4
+            except (asyncio.CancelledError, BaseException):
+                pass
             client_module.async_create_task = orig_create_task_4
             for w in captured_case4_wrappers:
                 if not w.done():
@@ -3156,32 +3168,56 @@ async def main() -> None:
         orig_create_task_6: Any = None
         captured_case6_wrappers: list[asyncio.Task[Any]] = []
         try:
-            # 6a: Future callback cancelled after startup
-            failing_fut = loop.create_future()
-            future_started = asyncio.Event()
-
-            def failing_future_cb(r: Any) -> asyncio.Future[None]:
-                future_started.set()
-                assert failing_fut is not None
-                return failing_fut
-
-            client.get_review = fake_running  # type: ignore
-            waiter_fut_task = asyncio.create_task(
-                client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=10.0,
-                    on_poll=failing_future_cb,
-                )
-            )
-            await future_started.wait()
-            waiter_fut_task.cancel()
-            cancelled_fut = False
+            waiter_fut_task: asyncio.Task[Any] | None = None
             try:
-                await waiter_fut_task
-            except asyncio.CancelledError:
-                cancelled_fut = True
-            assert cancelled_fut
+                # 6a: Future callback cancelled after startup
+                failing_fut = loop.create_future()
+                future_started = asyncio.Event()
+
+                def failing_future_cb(r: Any) -> asyncio.Future[None]:
+                    future_started.set()
+                    assert failing_fut is not None
+                    return failing_fut
+
+                client.get_review = fake_running  # type: ignore
+                waiter_fut_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10.0,
+                        on_poll=failing_future_cb,
+                    )
+                )
+                startup_waiter_6a = asyncio.create_task(future_started.wait())
+                try:
+                    done_6a, _ = await asyncio.wait(
+                        {startup_waiter_6a, waiter_fut_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_fut_task in done_6a:
+                        await waiter_fut_task
+                finally:
+                    if not startup_waiter_6a.done():
+                        startup_waiter_6a.cancel()
+                    try:
+                        await startup_waiter_6a
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                waiter_fut_task.cancel()
+                cancelled_fut = False
+                try:
+                    await waiter_fut_task
+                except asyncio.CancelledError:
+                    cancelled_fut = True
+                assert cancelled_fut
+            finally:
+                if waiter_fut_task is not None and not waiter_fut_task.done():
+                    waiter_fut_task.cancel()
+                if waiter_fut_task is not None:
+                    try:
+                        await waiter_fut_task
+                    except (asyncio.CancelledError, BaseException):
+                        pass
 
             assert id(failing_fut) in client_module._DETACHED_FUTURES
             failing_fut.set_exception(RuntimeError("error in cancelled future callback"))
@@ -3304,50 +3340,74 @@ async def main() -> None:
                     except BaseException:
                         pass
 
-            # Coroutine callback cancelled after startup
-            coro_started = asyncio.Event()
-            coro_trigger = asyncio.Event()
-            about_to_raise = asyncio.Event()
-            captured_case6_wrappers.clear()
-            orig_create_task_6 = client_module.async_create_task
-
-            def tracked_create_task_6(coro: Any, *args: Any, **kwargs: Any) -> Any:
-                t = orig_create_task_6(coro, *args, **kwargs)
-                t.exception_calls = 0
-                orig_exc = t.exception
-
-                def tracked_exc() -> Any:
-                    t.exception_calls += 1
-                    return orig_exc()
-
-                t.exception = tracked_exc
-                captured_case6_wrappers.append(t)
-                return t
-
-            client_module.async_create_task = tracked_create_task_6
-
-            async def failing_overdue_coro(r: Any) -> None:
-                coro_started.set()
-                await coro_trigger.wait()
-                about_to_raise.set()
-                raise RuntimeError("error in overdue callback")
-
-            waiter_coro_task = asyncio.create_task(
-                client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=10.0,
-                    on_poll=failing_overdue_coro,
-                )
-            )
-            await coro_started.wait()
-            waiter_coro_task.cancel()
-            cancelled_coro = False
+            waiter_coro_task: asyncio.Task[Any] | None = None
             try:
-                await waiter_coro_task
-            except asyncio.CancelledError:
-                cancelled_coro = True
-            assert cancelled_coro
+                # Coroutine callback cancelled after startup
+                coro_started = asyncio.Event()
+                coro_trigger = asyncio.Event()
+                about_to_raise = asyncio.Event()
+                captured_case6_wrappers.clear()
+                orig_create_task_6 = client_module.async_create_task
+
+                def tracked_create_task_6(coro: Any, *args: Any, **kwargs: Any) -> Any:
+                    t = orig_create_task_6(coro, *args, **kwargs)
+                    t.exception_calls = 0
+                    orig_exc = t.exception
+
+                    def tracked_exc() -> Any:
+                        t.exception_calls += 1
+                        return orig_exc()
+
+                    t.exception = tracked_exc
+                    captured_case6_wrappers.append(t)
+                    return t
+
+                client_module.async_create_task = tracked_create_task_6
+
+                async def failing_overdue_coro(r: Any) -> None:
+                    coro_started.set()
+                    await coro_trigger.wait()
+                    about_to_raise.set()
+                    raise RuntimeError("error in overdue callback")
+
+                waiter_coro_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10.0,
+                        on_poll=failing_overdue_coro,
+                    )
+                )
+                startup_waiter_6c = asyncio.create_task(coro_started.wait())
+                try:
+                    done_6c, _ = await asyncio.wait(
+                        {startup_waiter_6c, waiter_coro_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_coro_task in done_6c:
+                        await waiter_coro_task
+                finally:
+                    if not startup_waiter_6c.done():
+                        startup_waiter_6c.cancel()
+                    try:
+                        await startup_waiter_6c
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                waiter_coro_task.cancel()
+                cancelled_coro = False
+                try:
+                    await waiter_coro_task
+                except asyncio.CancelledError:
+                    cancelled_coro = True
+                assert cancelled_coro
+            finally:
+                if waiter_coro_task is not None and not waiter_coro_task.done():
+                    waiter_coro_task.cancel()
+                if waiter_coro_task is not None:
+                    try:
+                        await waiter_coro_task
+                    except (asyncio.CancelledError, BaseException):
+                        pass
 
             assert len(client_module._DETACHED_TASKS) == 1
             detached_task_id = next(iter(client_module._DETACHED_TASKS.keys()))
@@ -3451,6 +3511,13 @@ async def main() -> None:
             await asyncio.wait_for(callback_completed_7.wait(), timeout=1.0)
         finally:
             sleep_forbidden = False
+            if polling_waiter_task is not None and not polling_waiter_task.done():
+                polling_waiter_task.cancel()
+            if polling_waiter_task is not None:
+                try:
+                    await polling_waiter_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
 
 asyncio.run(main())
 """
@@ -4951,6 +5018,15 @@ asyncio.run(main())
     assert c_strided.c_contiguous == mv_strided.c_contiguous
     assert bytes(c_strided) == bytes(mv_strided)
 
+    # Empty strided memoryview over immutable bytes preserves strides
+    mv_empty_strided = memoryview(b_data)[0:0:2]
+    detail_empty_strided = CustomerReviewDetail.from_dict(responses[1])
+    detail_empty_strided.additional_properties["empty_strided"] = mv_empty_strided
+    snap_empty_strided = _snapshot_review(detail_empty_strided)
+    assert snap_empty_strided is not None
+    c_empty_strided = snap_empty_strided.additional_properties["empty_strided"]
+    assert c_empty_strided.strides == mv_empty_strided.strides
+
     # 1-byte view over backing buffer > 65,536 bytes skips delivery (returns None)
     big_backing = b"A" * 65537
     mv_1byte = memoryview(big_backing)[0:1]
@@ -5098,6 +5174,41 @@ async def test_wait_for_review_pending_futures_and_clock(
                 timely_late_fut.exception()
         except BaseException:
             pass
+
+    # Timely coroutine failure propagates when clock advances after coroutine raises
+    # but before wrapper done-callback runs or waiter resumes
+    orig_create_task_timely = client_module.async_create_task
+
+    def advancing_create_task(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
+        t = orig_create_task_timely(coro_arg, **kwargs)
+        orig_add_done = t.add_done_callback
+
+        def wrapped_add_done(fn: Any, *, context: Any = None) -> None:
+            def advancing_fn(task_arg: Any) -> None:
+                clock.now += 200.0
+                fn(task_arg)
+
+            orig_add_done(advancing_fn, context=context)
+
+        t.add_done_callback = wrapped_add_done
+        return t
+
+    monkeypatch.setattr(client_module, "async_create_task", advancing_create_task)
+
+    async def timely_fail_coro(r: Any) -> None:
+        raise ValueError("timely coroutine failure")
+
+    with Server(lambda request, index: Reply(body=responses[0])) as server:
+        async with session("async", server.url) as client:
+            with pytest.raises(ValueError, match="timely coroutine failure"):
+                await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=timely_fail_coro,
+                )
+    assert clock.now >= 200.0
+    monkeypatch.setattr(client_module, "async_create_task", orig_create_task_timely)
 
     # Late-observed pending future failure preserves the classified outcome
     class TrackedFuture(asyncio.Future[None]):
