@@ -2958,7 +2958,26 @@ async def main() -> None:
                 assert callback_running.is_set()
                 assert not callback_finished.is_set()
                 release_callback.set()
-                await callback_finished.wait()
+                assert cb_task_3 is not None
+                finish_waiter_3 = asyncio.create_task(callback_finished.wait())
+                try:
+                    done_fin_3, _ = await asyncio.wait(
+                        {finish_waiter_3, cb_task_3},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if cb_task_3.cancelled():
+                        pytest.fail("Callback wrapper task was cancelled unexpectedly")
+                    if not callback_finished.is_set():
+                        if cb_task_3.done() and cb_task_3.exception():
+                            raise cb_task_3.exception()
+                        pytest.fail("Callback wrapper exited without setting completion event")
+                finally:
+                    if not finish_waiter_3.done():
+                        finish_waiter_3.cancel()
+                    try:
+                        await finish_waiter_3
+                    except (asyncio.CancelledError, BaseException):
+                        pass
             finally:
                 if not startup_waiter_3.done():
                     startup_waiter_3.cancel()
@@ -3111,14 +3130,32 @@ async def main() -> None:
             assert not waiter_task_4.done()
             clock.advance(1.0)
             release_callback_term.set()
-            await callback_finished_term.wait()
+            assert len(captured_case4_wrappers) == 1
+            wrapper_4 = captured_case4_wrappers[0]
+            finish_waiter_4 = asyncio.create_task(callback_finished_term.wait())
+            try:
+                done_fin_4, _ = await asyncio.wait(
+                    {finish_waiter_4, wrapper_4},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if wrapper_4.cancelled():
+                    pytest.fail("Callback wrapper task was cancelled unexpectedly")
+                if not callback_finished_term.is_set():
+                    if wrapper_4.done() and wrapper_4.exception():
+                        raise wrapper_4.exception()
+                    pytest.fail("Callback wrapper exited without setting completion event")
+            finally:
+                if not finish_waiter_4.done():
+                    finish_waiter_4.cancel()
+                try:
+                    await finish_waiter_4
+                except (asyncio.CancelledError, BaseException):
+                    pass
             res_4 = await waiter_task_4
             assert res_4.status == "COMPLETED"
             assert callback_running_term.is_set()
             assert callback_finished_term.is_set()
             await asyncio.sleep(0.01)
-            assert len(captured_case4_wrappers) == 1
-            wrapper_4 = captured_case4_wrappers[0]
             assert wrapper_4.done()
             assert not wrapper_4.cancelled()
             assert getattr(wrapper_4, "exception_calls", 0) > 0
@@ -3523,7 +3560,9 @@ asyncio.run(main())
 """
         checkout_root = Path(__file__).resolve().parent.parent
         subprocess.run(
-            [sys.executable, "-c", watchdog_code],
+            [sys.executable, "-"],
+            input=watchdog_code,
+            text=True,
             cwd=str(checkout_root),
             check=True,
             timeout=10,
@@ -5034,6 +5073,33 @@ asyncio.run(main())
     detail_1byte.additional_properties["mv_1b"] = mv_1byte
     assert _snapshot_review(detail_1byte) is None
 
+    # Array subclass overriding buffer_info to underreport size skips delivery
+    class UnderreportingArray(array.array):
+        def buffer_info(self) -> tuple[int, int]:
+            return (0, 0)
+
+    big_arr = UnderreportingArray("B", [0] * 65537)
+    detail_arr_underreport = CustomerReviewDetail.from_dict(responses[1])
+    detail_arr_underreport.additional_properties["arr_under"] = big_arr
+    assert _snapshot_review(detail_arr_underreport) is None
+
+    # Read-only view visited first over writable bytearray exporter followed by writable view
+    shared_exp = bytearray(b"0123456789")
+    ro_view = memoryview(shared_exp).toreadonly()
+    rw_view = memoryview(shared_exp)
+    detail_sibling_views = CustomerReviewDetail.from_dict(responses[1])
+    detail_sibling_views.additional_properties["ro_first"] = ro_view
+    detail_sibling_views.additional_properties["rw_second"] = rw_view
+    snap_siblings = _snapshot_review(detail_sibling_views)
+    assert snap_siblings is not None
+    copied_ro = snap_siblings.additional_properties["ro_first"]
+    copied_rw = snap_siblings.additional_properties["rw_second"]
+    assert copied_ro.readonly is True
+    assert copied_rw.readonly is False
+    copied_rw[0] = ord(b"Z")
+    assert copied_ro[0] == ord(b"Z")
+    assert shared_exp[0] == ord(b"0")
+
     # Invalid callback return raising property on close
     class RaisingCloseReturn:
         @property
@@ -5283,3 +5349,52 @@ async def test_wait_for_review_pending_futures_and_clock(
                 except BaseException:
                     pass
         loop.set_exception_handler(old_h)
+
+    # Late SystemExit inside callback wrapper is suppressed after deadline
+    async def late_system_exit_coro(r: Any) -> None:
+        await asyncio.sleep(0.01)
+        raise SystemExit(42)
+
+    with Server(lambda request, index: Reply(body=responses[0])) as server:
+        async with session("async", server.url) as client:
+            res_exit = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=0.01,
+                on_poll=late_system_exit_coro,
+            )
+            assert res_exit.status == "TIMED_OUT"
+
+    # In-budget SystemExit inside callback wrapper propagates
+    async def in_budget_system_exit_coro(r: Any) -> None:
+        raise SystemExit(42)
+
+    with Server(lambda request, index: Reply(body=responses[0])) as server:
+        async with session("async", server.url) as client:
+            with pytest.raises(SystemExit) as exc_info:
+                await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=in_budget_system_exit_coro,
+                )
+            assert exc_info.value.code == 42
+
+    # Closing loop releases strong retention from _DETACHED_FUTURES
+    def test_loop_close_in_thread() -> None:
+        t_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(t_loop)
+            t_fut = t_loop.create_future()
+
+            async def run_in_t() -> None:
+                client_module._detach_overdue_future(t_fut)
+
+            t_loop.run_until_complete(run_in_t())
+            assert id(t_fut) in client_module._DETACHED_FUTURES
+        finally:
+            t_loop.close()
+            asyncio.set_event_loop(None)
+        assert id(t_fut) not in client_module._DETACHED_FUTURES
+
+    await asyncio.to_thread(test_loop_close_in_thread)

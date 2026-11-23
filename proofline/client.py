@@ -815,8 +815,28 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     )
-                if val.buffer_info()[1] * val.itemsize > _MAX_SAFE_BUFFER_SIZE:
-                    return None
+                native_len: int | None = None
+                try:
+                    b_arr = _Py_buffer()
+                    if _py_get_buffer(val, ctypes.byref(b_arr), 0x0118) == 0:
+                        try:
+                            native_len = b_arr.len
+                        finally:
+                            _py_release_buffer(ctypes.byref(b_arr))
+                except BaseException:
+                    pass
+                if native_len is not None:
+                    if native_len > _MAX_SAFE_BUFFER_SIZE:
+                        return None
+                else:
+                    try:
+                        arr_byte_count = array.array.buffer_info(val)[
+                            1
+                        ] * array.array.itemsize.__get__(val)
+                    except BaseException:
+                        arr_byte_count = val.buffer_info()[1] * val.itemsize
+                    if arr_byte_count > _MAX_SAFE_BUFFER_SIZE:
+                        return None
                 try:
                     resolved_arr = cast(Any, array.array).__new__(type(val), val.typecode, val)
                 except Exception as exc:
@@ -959,7 +979,23 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         if exp_id in memo:
                             cloned_buf = memo[exp_id]
                         else:
-                            if val.readonly:
+                            exp_readonly = False
+                            try:
+                                b_exp_chk = _Py_buffer()
+                                if _py_get_buffer(exporter, ctypes.byref(b_exp_chk), 0x0118) == 0:
+                                    try:
+                                        exp_readonly = bool(b_exp_chk.readonly)
+                                    finally:
+                                        _py_release_buffer(ctypes.byref(b_exp_chk))
+                                else:
+                                    exp_readonly = getattr(
+                                        exporter, "readonly", False
+                                    ) or isinstance(exporter, (bytes, tuple))
+                            except BaseException:
+                                exp_readonly = getattr(exporter, "readonly", False) or isinstance(
+                                    exporter, (bytes, tuple)
+                                )
+                            if exp_readonly:
                                 cloned_buf = bytes(exporter)
                             else:
                                 cloned_buf = bytearray(exporter)
@@ -1702,13 +1738,53 @@ def _detach_overdue_future(fut: Any) -> None:
         if loop is not running_loop or loop.is_closed():
             return
         fut_id = id(fut)
+        loop_futures = getattr(loop, "_proofline_detached_futures", None)
+        if loop_futures is None:
+            loop_futures = {}
+            try:
+                setattr(loop, "_proofline_detached_futures", loop_futures)
+            except Exception:
+                pass
+        if loop_futures is not None:
+            loop_futures[fut_id] = fut
+
         try:
             _DETACHED_FUTURES[fut_id] = fut
         except (TypeError, BaseException):
             pass
 
+        if not getattr(loop, "_proofline_close_hooked", False):
+            orig_loop_close = loop.close
+
+            def _hooked_loop_close(*args: Any, **kwargs: Any) -> Any:
+                l_futs = getattr(loop, "_proofline_detached_futures", None)
+                if l_futs is not None:
+                    for fid in list(l_futs.keys()):
+                        _DETACHED_FUTURES.pop(fid, None)
+                    l_futs.clear()
+                for fid, f in list(_DETACHED_FUTURES.items()):
+                    f_loop = None
+                    try:
+                        f_loop = f.get_loop() if hasattr(f, "get_loop") else AsyncFuture.get_loop(f)
+                    except BaseException:
+                        f_loop = getattr(f, "_loop", None)
+                    if f_loop is loop:
+                        _DETACHED_FUTURES.pop(fid, None)
+                return orig_loop_close(*args, **kwargs)
+
+            try:
+                loop.close = _hooked_loop_close  # type: ignore[method-assign]
+                setattr(loop, "_proofline_close_hooked", True)
+            except BaseException:
+                pass
+
         def _on_detached_fut_done(t: Any) -> None:
             _DETACHED_FUTURES.pop(fut_id, None)
+            if loop is not None:
+                l_futs = getattr(loop, "_proofline_detached_futures", None)
+                if l_futs is not None:
+                    l_futs.pop(fut_id, None)
+                    l_futs.pop(id(t), None)
             try:
                 is_canc = t.cancelled() if hasattr(t, "cancelled") else False
                 if not is_canc:
@@ -2944,7 +3020,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 wrapper_started = False
                                 captured_deadline = _transport.DEADLINE.get()
 
-                                async def _runner() -> None:
+                                async def _runner() -> Any:
                                     nonlocal wrapper_started
                                     waiter_cancelling = False
                                     if waiter_task is not None:
@@ -2971,14 +3047,18 @@ class AsyncProoflineClient(AsyncOperations):
                                     )
                                     if waiter_cancelling or deadline_expired:
                                         _cleanup_discarded_awaitable(coro)
-                                        return
+                                        return None
                                     wrapper_started = True
                                     _transport.DEADLINE.set(None)
+                                    handback_exc: BaseException | None = None
                                     try:
                                         assert coro is not None
                                         await coro
+                                    except (SystemExit, KeyboardInterrupt) as exc:
+                                        handback_exc = exc
                                     finally:
                                         completed_at.append(monotonic())
+                                    return handback_exc
 
                                 runner_coro = _runner()
                                 deadline_token_task = _transport.DEADLINE.set(None)
@@ -3056,9 +3136,11 @@ class AsyncProoflineClient(AsyncOperations):
                                             pass
                                         _cleanup_discarded_awaitable(res)
                                     if hasattr(task, "result"):
-                                        task.result()
+                                        res_val = task.result()
                                     else:
-                                        AsyncTask.result(task)
+                                        res_val = AsyncTask.result(task)
+                                    if isinstance(res_val, (SystemExit, KeyboardInterrupt)):
+                                        raise res_val
 
                                 remaining_budget = _transport.remaining()
                                 if remaining_budget is not None and remaining_budget <= 0:
@@ -3093,9 +3175,11 @@ class AsyncProoflineClient(AsyncOperations):
                                             pass
                                         _cleanup_discarded_awaitable(res)
                                     if hasattr(task, "result"):
-                                        task.result()
+                                        res_val = task.result()
                                     else:
-                                        AsyncTask.result(task)
+                                        res_val = AsyncTask.result(task)
+                                    if isinstance(res_val, (SystemExit, KeyboardInterrupt)):
+                                        raise res_val
                                 else:
                                     _detach_overdue_task(task, res, wrapper_started)
                                     if result is not None:
