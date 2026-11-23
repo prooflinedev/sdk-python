@@ -1,0 +1,3 @@
+# Check out text files with LF on every OS, so the gate's byte comparisons
+# and formatters see the same files as CI.
+* text=auto eol=lf

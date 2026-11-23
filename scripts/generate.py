@@ -85,7 +85,7 @@ def generate(destination: Path) -> None:
         raise SystemExit(f"Generation requires openapi-python-client=={VERSION}.")
     if importlib.metadata.version("ruff") != RUFF_VERSION:
         raise SystemExit(f"Generation requires ruff=={RUFF_VERSION}.")
-    document = json.loads(DOCUMENT.read_text())
+    document = json.loads(DOCUMENT.read_text(encoding="utf-8"))
     # The 7.2 SDK accepts (checkpoint, due_at, result) positionally. The
     # generator emits optional constructor arguments in schema property order.
     checkpoint = document["components"]["schemas"]["DeployCoverageCheckpoint"]
@@ -107,13 +107,14 @@ def generate(destination: Path) -> None:
     }
     with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
         json_document = Path(temporary) / "openapi.json"
-        json_document.write_text(json.dumps(json_operations(document)))
+        json_document.write_text(json.dumps(json_operations(document)), encoding="utf-8")
         generate_json(destination, json_document)
 
 
 def check_version() -> None:
-    document = json.loads(DOCUMENT.read_text())
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    document = json.loads(DOCUMENT.read_text(encoding="utf-8"))
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    version = tomllib.loads(pyproject)["project"]["version"]
     package_version = tuple(map(int, version.split(".")))
     api_version = tuple(map(int, document["info"]["version"].split(".")))
     if package_version[:2] != api_version[:2] or package_version[2] < api_version[2]:
@@ -162,8 +163,8 @@ def generate_json(destination: Path, document: Path) -> None:
         sync=custom["ProoflineClient"],
         asynchronous=custom["AsyncProoflineClient"],
     )
-    (destination / "api/operations.py").write_text(facade)
-    body = json.loads(document.read_text())["paths"][
+    (destination / "api/operations.py").write_text(facade, encoding="utf-8")
+    body = json.loads(document.read_text(encoding="utf-8"))["paths"][
         "/api/v1/organizations/{org_id}/repositories/{repo_id}/pull-requests/{number}/review"
     ]["post"].get("requestBody")
     if body is not None:
@@ -175,7 +176,7 @@ def generate_json(destination: Path, document: Path) -> None:
         ):
             raise SystemExit("request_review requires its optional named RunNowRequest JSON body.")
         endpoint = destination / "api" / "default" / "request_review.py"
-        source = endpoint.read_text()
+        source = endpoint.read_text(encoding="utf-8")
         header = '    headers["Content-Type"] = "application/json"\n'
         json_body = (
             '    if not isinstance(body, Unset):\n        _kwargs["json"] = body.to_dict()\n'
@@ -188,7 +189,8 @@ def generate_json(destination: Path, document: Path) -> None:
             raise SystemExit("The pinned optional request_review body template has changed.")
         # The pinned generator sets this header even when its optional body is UNSET.
         endpoint.write_text(
-            source.replace(header, "    if not isinstance(body, Unset):\n    " + header)
+            source.replace(header, "    if not isinstance(body, Unset):\n    " + header),
+            encoding="utf-8",
         )
     shutil.copyfile(ROOT / "templates" / "LICENSE.openapi-python-client", destination / "LICENSE")
     subprocess.run(
@@ -207,7 +209,20 @@ def generate_json(destination: Path, document: Path) -> None:
         check=True,
         cwd=ROOT,
     )
-    subprocess.run([sys.executable, "-m", "ruff", "format", str(destination)], check=True, cwd=ROOT)
+    # The generator writes CRLF on Windows; the committed files are LF on every OS.
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "format",
+            "--config",
+            "format.line-ending = 'lf'",
+            str(destination),
+        ],
+        check=True,
+        cwd=ROOT,
+    )
 
 
 def files(directory: Path) -> dict[Path, bytes]:

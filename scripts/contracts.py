@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
-    document = json.loads((ROOT / "openapi.public.json").read_text())
+    document = json.loads((ROOT / "openapi.public.json").read_text(encoding="utf-8"))
     declared = {
         operation["operationId"]
         for item in json_operations(document)["paths"].values()
@@ -52,7 +52,7 @@ def main() -> None:
             raise SystemExit(f"{client.__name__} operations differ from the public contract.")
     prohibited = {"safe", "passed", "clean"}
     for path in (ROOT / "proofline").rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             identifier = None
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 identifier = node.name
