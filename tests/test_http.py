@@ -1318,16 +1318,20 @@ async def test_wait_ends_on_the_read_that_names_another_head(
     with Server(lambda request, index: Reply(body=responses[index])) as server:
         polled_reviews: list[tuple[Any, int]] = []
         if mode == "async":
+            first_cb_event = asyncio.Event()
+            second_cb_reached = asyncio.Event()
             cb_gate = asyncio.Event()
             waiter_task: asyncio.Task[Any] | None = None
 
             async def async_mismatch_cb(r: Any) -> None:
                 if len(polled_reviews) == 1:
                     assert waiter_task is not None
-                    await asyncio.sleep(0.01)
                     assert not waiter_task.done()
+                    second_cb_reached.set()
                     await cb_gate.wait()
                 polled_reviews.append((r, len(server.requests)))
+                if len(polled_reviews) == 1:
+                    first_cb_event.set()
 
             cb: Any = async_mismatch_cb
         else:
@@ -1347,12 +1351,38 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                         on_poll=cb,
                     )
                 )
-                while len(polled_reviews) < 1:
-                    await asyncio.sleep(0.01)
-                await asyncio.sleep(0.05)
+                first_waiter = asyncio.create_task(first_cb_event.wait())
+                try:
+                    done_first, _ = await asyncio.wait(
+                        {first_waiter, waiter_task},
+                        timeout=5.0,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_task in done_first:
+                        await waiter_task
+                    assert first_cb_event.is_set()
+                finally:
+                    if not first_waiter.done():
+                        first_waiter.cancel()
+
+                gate_waiter = asyncio.create_task(second_cb_reached.wait())
+                try:
+                    done_gate, _ = await asyncio.wait(
+                        {gate_waiter, waiter_task},
+                        timeout=5.0,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_task in done_gate:
+                        await waiter_task
+                    assert second_cb_reached.is_set()
+                finally:
+                    if not gate_waiter.done():
+                        gate_waiter.cancel()
+
+                await asyncio.sleep(0.01)
                 assert not waiter_task.done()
                 cb_gate.set()
-                result = await waiter_task
+                result = await asyncio.wait_for(asyncio.shield(waiter_task), timeout=5.0)
             else:
                 result = await call(
                     client,
@@ -4712,12 +4742,19 @@ asyncio.run(main())
     inner_fs = frozenset([leaf_payload])
     outer_fs = frozenset([inner_fs])
 
+    class NonemptySubFrozenset1(frozenset[Any]):
+        pass
+
     member_payload = HashablePayload("test_key", ["original_val"])
     normal_s = {member_payload}
-    normal_fs = frozenset([member_payload])
+    normal_fs = NonemptySubFrozenset1([member_payload])
+    normal_fs.custom_attr = "subclass_attr_1"
+    normal_fs.shared_list = ["shared_val_1"]
+    alias_dict_1 = normal_fs.__dict__
     detail_sets = CustomerReviewDetail.from_dict(responses[1])
     detail_sets.additional_properties["normal_s"] = normal_s
     detail_sets.additional_properties["normal_fs"] = normal_fs
+    detail_sets.additional_properties["sub_fs_alias"] = alias_dict_1
     detail_sets.additional_properties["nested_fs"] = outer_fs
     detail_sets.additional_properties["fs_list"] = [normal_fs, normal_fs]
     snap_sets = _snapshot_review(detail_sets)
@@ -4725,7 +4762,13 @@ asyncio.run(main())
     assert snap_sets.additional_properties["normal_s"] == normal_s
     assert snap_sets.additional_properties["normal_s"] is not normal_s
     copied_fs = snap_sets.additional_properties["normal_fs"]
-    assert isinstance(copied_fs, frozenset)
+    assert isinstance(copied_fs, NonemptySubFrozenset1)
+    assert copied_fs.custom_attr == "subclass_attr_1"
+    assert copied_fs.shared_list == ["shared_val_1"]
+    assert copied_fs.shared_list is not normal_fs.shared_list
+    copied_alias_dict = snap_sets.additional_properties["sub_fs_alias"]
+    assert copied_fs.__dict__ is copied_alias_dict
+    assert copied_fs.__dict__ is not alias_dict_1
     assert len(copied_fs) == 1
     copied_list = snap_sets.additional_properties["fs_list"]
     assert copied_list[0] is copied_list[1]
@@ -5109,23 +5152,65 @@ asyncio.run(main())
         def __eq__(self, other: Any) -> bool:
             return isinstance(other, CustomHashWithFrozenset) and self.f_set == other.f_set
 
+    class NonemptySubFrozenset2(frozenset[Any]):
+        pass
+
     deferred_dict: dict[str, Any] = {"ready_key": "ready_val"}
-    f_set = frozenset([DictHolder(deferred_dict)])
+    f_set = NonemptySubFrozenset2([DictHolder(deferred_dict)])
+    f_set.custom_attr = "subclass_attr_2"
+    f_set.shared_list = ["shared_val_2"]
+    alias_dict_2 = f_set.__dict__
     deferred_dict["pending_val"] = f_set
     custom_fs_obj = CustomHashWithFrozenset(f_set)
     set_with_fs_custom = {custom_fs_obj}
     detail_fs_custom = CustomerReviewDetail.from_dict(responses[1])
     detail_fs_custom.additional_properties["fs_custom"] = set_with_fs_custom
+    detail_fs_custom.additional_properties["sub_fs_2_alias"] = alias_dict_2
     snap_fsc = _snapshot_review(detail_fs_custom)
     assert snap_fsc is not None
     copied_fsc_set = snap_fsc.additional_properties["fs_custom"]
     assert len(copied_fsc_set) == 1
     copied_obj = next(iter(copied_fsc_set))
     assert copied_obj in copied_fsc_set
+    copied_f_set = copied_obj.f_set
+    assert isinstance(copied_f_set, NonemptySubFrozenset2)
+    assert copied_f_set.custom_attr == "subclass_attr_2"
+    assert copied_f_set.shared_list == ["shared_val_2"]
+    assert copied_f_set.shared_list is not f_set.shared_list
+    copied_alias_2 = snap_fsc.additional_properties["sub_fs_2_alias"]
+    assert copied_f_set.__dict__ is copied_alias_2
+    assert copied_f_set.__dict__ is not alias_dict_2
     copied_holder = next(iter(copied_obj.f_set))
     assert copied_holder.d["ready_key"] == "ready_val"
     assert copied_holder.d["pending_val"] is copied_obj.f_set
     assert copied_holder.d is not deferred_dict
+
+    # Dictionary key whose hash depends on cloned nested state: snapshot succeeds and lookup works
+    class NestedStateKey:
+        def __init__(self, inner: dict[str, Any]) -> None:
+            self.inner = inner
+
+        def __hash__(self) -> int:
+            return hash(tuple(sorted((k, str(v)) for k, v in self.inner.items())))
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, NestedStateKey) and self.inner == other.inner
+
+    inner_mapping = {"nested_field": "nested_val"}
+    nested_key = NestedStateKey(inner_mapping)
+    dict_with_nested_key = {nested_key: "found_val"}
+    detail_nested = CustomerReviewDetail.from_dict(responses[1])
+    detail_nested.additional_properties["nested_key_dict"] = dict_with_nested_key
+
+    snap_nested = _snapshot_review(detail_nested)
+    assert snap_nested is not None
+    copied_nested_dict = snap_nested.additional_properties["nested_key_dict"]
+    copied_k = next(iter(copied_nested_dict.keys()))
+    assert copied_k is not nested_key
+    assert copied_k.inner is not inner_mapping
+    assert copied_k.inner == {"nested_field": "nested_val"}
+    assert copied_nested_dict[copied_k] == "found_val"
+    assert copied_k in copied_nested_dict
 
     # Dictionary fixture whose key hash changes during clone finalization: snapshot is rejected
     class MutatingHashKey:

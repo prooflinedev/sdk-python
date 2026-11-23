@@ -835,6 +835,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         _install_cloned_dict(val, None, memo, stack)
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         for slot_or_name, is_desc, attr_val in _get_obj_attrs(val):
+                            if type(attr_val) is bytes and len(attr_val) > _MAX_SAFE_BUFFER_SIZE:
+                                return None
                             if (
                                 not _is_immutable(attr_val)
                                 and id(attr_val) not in memo
@@ -1777,6 +1779,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                 if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                     for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
                         if _is_immutable(attr_val):
+                            if type(attr_val) is bytes and len(attr_val) > _MAX_SAFE_BUFFER_SIZE:
+                                return None
                             _assign_target(res_set, (slot_or_name, is_desc), True, attr_val)
                         elif id(attr_val) in memo:
                             _assign_target(
@@ -1830,6 +1834,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if hasattr(orig_val, "__dict__") or hasattr(orig_val, "__slots__"):
                         for slot_or_name, is_desc, attr_val in _get_obj_attrs(orig_val):
                             if _is_immutable(attr_val):
+                                if (
+                                    type(attr_val) is bytes
+                                    and len(attr_val) > _MAX_SAFE_BUFFER_SIZE
+                                ):
+                                    return None
                                 _assign_target(res_set, (slot_or_name, is_desc), True, attr_val)
                             elif id(attr_val) in memo:
                                 _assign_target(
@@ -3296,10 +3305,14 @@ class AsyncProoflineClient(AsyncOperations):
                                                 )
                                             elif hasattr(waiter_task, "cancelled"):
                                                 waiter_cancelling = waiter_task.cancelled()
+                                            if getattr(waiter_task, "_must_cancel", False):
+                                                waiter_cancelling = True
                                         except BaseException:
                                             pass
                                     try:
-                                        if hasattr(task, "cancelling") and task.cancelling() > 0:
+                                        if getattr(task, "_must_cancel", False):
+                                            waiter_cancelling = True
+                                        elif hasattr(task, "cancelling") and task.cancelling() > 0:
                                             waiter_cancelling = True
                                         elif hasattr(task, "cancelled") and task.cancelled():
                                             waiter_cancelling = True
@@ -3383,43 +3396,57 @@ class AsyncProoflineClient(AsyncOperations):
                                         _detach_overdue_task(task, res, wrapper_started)
                                         raise
 
-                                deadline_val = _transport.DEADLINE.get()
-                                cb_finished_in_budget = bool(completed_at) and (
-                                    deadline_val is None or completed_at[0] <= deadline_val
-                                )
+                                done_wait: set[Any] = set()
                                 try:
-                                    task_is_done = task.done() if hasattr(task, "done") else False
-                                except BaseException:
-                                    _detach_overdue_task(task, res, wrapper_started)
-                                    raise
-
-                                if task_is_done and cb_finished_in_budget:
-                                    if not wrapper_started:
-                                        try:
-                                            task.cancel()
-                                        except BaseException:
-                                            pass
-                                        _cleanup_discarded_awaitable(res)
-                                    if hasattr(task, "result"):
-                                        res_val = task.result()
-                                    else:
-                                        res_val = AsyncTask.result(task)
-                                    if isinstance(res_val, (SystemExit, KeyboardInterrupt)):
-                                        raise res_val
-
-                                remaining_budget = _transport.remaining()
-                                if remaining_budget is not None and remaining_budget <= 0:
-                                    _detach_overdue_task(task, res, wrapper_started)
-                                    if result is not None:
-                                        return result
-                                    break
-                                try:
-                                    done, _ = await async_wait(
-                                        {task_completion_fut}, timeout=remaining_budget
+                                    deadline_val = _transport.DEADLINE.get()
+                                    cb_finished_in_budget = bool(completed_at) and (
+                                        deadline_val is None or completed_at[0] <= deadline_val
                                     )
-                                except BaseException:
-                                    _detach_overdue_task(task, res, wrapper_started)
-                                    raise
+                                    try:
+                                        task_is_done = (
+                                            task.done() if hasattr(task, "done") else False
+                                        )
+                                    except BaseException:
+                                        _detach_overdue_task(task, res, wrapper_started)
+                                        raise
+
+                                    if task_is_done and cb_finished_in_budget:
+                                        if not wrapper_started:
+                                            try:
+                                                task.cancel()
+                                            except BaseException:
+                                                pass
+                                            _cleanup_discarded_awaitable(res)
+                                        if hasattr(task, "result"):
+                                            res_val = task.result()
+                                        else:
+                                            res_val = AsyncTask.result(task)
+                                        if isinstance(res_val, (SystemExit, KeyboardInterrupt)):
+                                            raise res_val
+
+                                    remaining_budget = _transport.remaining()
+                                    if remaining_budget is not None and remaining_budget <= 0:
+                                        _detach_overdue_task(task, res, wrapper_started)
+                                        if result is not None:
+                                            return result
+                                        break
+                                    try:
+                                        done_wait, _ = await async_wait(
+                                            {task_completion_fut}, timeout=remaining_budget
+                                        )
+                                    except BaseException:
+                                        _detach_overdue_task(task, res, wrapper_started)
+                                        raise
+                                finally:
+                                    try:
+                                        if hasattr(task, "remove_done_callback"):
+                                            task.remove_done_callback(_on_task_done)
+                                        elif isinstance(task, AsyncTask):
+                                            AsyncTask.remove_done_callback(task, _on_task_done)
+                                        else:
+                                            AsyncFuture.remove_done_callback(task, _on_task_done)
+                                    except BaseException:
+                                        pass
                                 deadline_val = _transport.DEADLINE.get()
                                 cb_finished_in_budget = bool(completed_at) and (
                                     deadline_val is None or completed_at[0] <= deadline_val
@@ -3431,7 +3458,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     raise
 
                                 if cb_finished_in_budget and (
-                                    task_completion_fut in done or task_is_done
+                                    task_completion_fut in done_wait or task_is_done
                                 ):
                                     if not wrapper_started:
                                         try:
