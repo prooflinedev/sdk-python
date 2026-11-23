@@ -1210,6 +1210,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     )
+                if type(val) is not datetime.datetime and "__copy__" in type(val).__dict__:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 tz = val.tzinfo
                 copied_tz = tz
                 if tz is not None and type(tz) is not datetime.timezone:
@@ -1247,26 +1251,23 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         _assign_target(target, key, is_attr, new_dt)
                 else:
                     try:
-                        new_dt = val.replace(tzinfo=copied_tz)
-                    except Exception:
-                        try:
-                            new_dt = type(val).__new__(
-                                type(val),
-                                val.year,
-                                val.month,
-                                val.day,
-                                val.hour,
-                                val.minute,
-                                val.second,
-                                val.microsecond,
-                                tzinfo=copied_tz,
-                                fold=val.fold,
-                            )
-                        except Exception as exc:
-                            raise TypeError(
-                                "Unsupported mutable value in review extension data: "
-                                f"{type(val).__name__}"
-                            ) from exc
+                        new_dt = datetime.datetime.__new__(
+                            type(val),
+                            val.year,
+                            val.month,
+                            val.day,
+                            val.hour,
+                            val.minute,
+                            val.second,
+                            val.microsecond,
+                            tzinfo=copied_tz,
+                            fold=val.fold,
+                        )
+                    except Exception as exc:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        ) from exc
                     if new_dt is val or new_dt.tzinfo is not copied_tz:
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
@@ -3091,11 +3092,13 @@ class AsyncProoflineClient(AsyncOperations):
         This allows any classified outcome to be returned when a callback finishes or returns
         after the deadline. When the deadline expires or when the wait is cancelled, unstarted
         coroutines returned by on_poll are closed without entering their body (a wrapper task
-        may already have been scheduled), while already-running callback tasks and futures are
-        detached without cancellation and may continue running (detached callback coroutines
-        suppress late SystemExit and KeyboardInterrupt signals, which do not propagate once
-        detached). Synchronous callbacks must return before a terminal result can be
-        delivered and the polling deadline cannot interrupt them.
+        may already have been scheduled; cancelling the waiter through an underlying pending
+        future can leave unresumed tasks unflagged until resumption unless observed through the
+        pending future), while already-running callback tasks and futures are detached without
+        cancellation and may continue running (detached callback coroutines suppress late
+        SystemExit and KeyboardInterrupt signals, which do not propagate once detached).
+        Synchronous callbacks must return before a terminal result can be delivered and the
+        polling deadline cannot interrupt them.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
@@ -3327,6 +3330,24 @@ class AsyncProoflineClient(AsyncOperations):
                                                 waiter_cancelling = waiter_task.cancelled()
                                             if getattr(waiter_task, "_must_cancel", False):
                                                 waiter_cancelling = True
+                                            fw = getattr(waiter_task, "_fut_waiter", None)
+                                            while fw is not None:
+                                                try:
+                                                    if (
+                                                        hasattr(fw, "cancelling")
+                                                        and fw.cancelling() > 0
+                                                    ):
+                                                        waiter_cancelling = True
+                                                        break
+                                                    if hasattr(fw, "cancelled") and fw.cancelled():
+                                                        waiter_cancelling = True
+                                                        break
+                                                    if getattr(fw, "_must_cancel", False):
+                                                        waiter_cancelling = True
+                                                        break
+                                                    fw = getattr(fw, "_fut_waiter", None)
+                                                except BaseException:
+                                                    break
                                         except BaseException:
                                             pass
                                     try:
@@ -3335,6 +3356,11 @@ class AsyncProoflineClient(AsyncOperations):
                                         elif hasattr(task, "cancelling") and task.cancelling() > 0:
                                             waiter_cancelling = True
                                         elif hasattr(task, "cancelled") and task.cancelled():
+                                            waiter_cancelling = True
+                                    except BaseException:
+                                        pass
+                                    try:
+                                        if task_completion_fut.cancelled():
                                             waiter_cancelling = True
                                     except BaseException:
                                         pass

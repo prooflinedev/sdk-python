@@ -1309,6 +1309,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
             )
         assert result.status == "INCOMPLETE"
         assert result.review.status == "RUNNING"
+        assert result.review.head_commit_sha == HEAD
         assert gap_facts(result) == [PINNED_ELSEWHERE]
         assert result.reason == "The review is pinned to another head commit."
         assert len(server.requests) == 2
@@ -1408,6 +1409,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
             assert polled_reviews[1][0].head_commit_sha == HEAD
         assert result.status == "INCOMPLETE"
         assert result.review.status == "RUNNING"
+        assert result.review.head_commit_sha == HEAD
         assert gap_facts(result) == [PINNED_ELSEWHERE]
         assert result.reason == "The review is pinned to another head commit."
         # The second read names the head, so the review that would complete is never read.
