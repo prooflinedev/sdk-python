@@ -968,7 +968,86 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     except BaseException:
                         pass
                 resolved_mv: Any
-                if isinstance(exporter, (bytearray, array.array, bytes)):
+                if isinstance(exporter, ctypes.Array):
+                    if _has_mutable_class_attrs(type(exporter)):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(exporter).__name__}"
+                        )
+                    exp_id = id(exporter)
+                    if exp_id in memo:
+                        cloned_exporter = memo[exp_id]
+                    else:
+                        if ctypes.sizeof(exporter) > _MAX_SAFE_BUFFER_SIZE:
+                            return None
+                        cloned_exporter = type(exporter).from_buffer_copy(exporter)
+                        memo[exp_id] = cloned_exporter
+                        if hasattr(exporter, "__dict__") or hasattr(exporter, "__slots__"):
+                            _install_cloned_dict(exporter, cloned_exporter, memo, stack)
+                            stack.append(
+                                (_OBJ_EXPAND, cloned_exporter, iter(_get_obj_attrs(exporter)))
+                            )
+                    b_val = _Py_buffer()
+                    b_exp = _Py_buffer()
+                    offset = 0
+                    if _py_get_buffer(val, ctypes.byref(b_val), 0x0118) != 0:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
+                    try:
+                        if _py_get_buffer(exporter, ctypes.byref(b_exp), 0x0118) != 0:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{type(exporter).__name__}"
+                            )
+                        try:
+                            offset = b_val.buf - b_exp.buf
+                        finally:
+                            _py_release_buffer(ctypes.byref(b_exp))
+                    finally:
+                        _py_release_buffer(ctypes.byref(b_val))
+                    elem_type = getattr(type(exporter), "_type_", ctypes.c_byte)
+                    val_strides = val.strides
+                    val_shape = val.shape
+                    if val.ndim == 0:
+                        scalar_obj = elem_type.from_buffer(cloned_exporter, offset)
+                        resolved_mv = memoryview(scalar_obj)
+                    elif val.ndim == 1 and val_shape is not None and val_strides is not None:
+                        shape = val_shape[0]
+                        itemsize = val.itemsize
+                        stride = val_strides[0]
+                        elem_stride = stride // itemsize if itemsize > 0 else 1
+                        if shape == 0:
+                            sub_arr = (elem_type * 0).from_buffer(cloned_exporter, offset)
+                            resolved_mv = memoryview(sub_arr)
+                        elif stride >= 0:
+                            span_items = (shape - 1) * elem_stride + 1
+                            sub_arr = (elem_type * span_items).from_buffer(cloned_exporter, offset)
+                            resolved_mv = memoryview(sub_arr)[::elem_stride]
+                        else:
+                            lowest_byte = offset + (shape - 1) * stride
+                            span_items = (shape - 1) * abs(elem_stride) + 1
+                            sub_arr = (elem_type * span_items).from_buffer(
+                                cloned_exporter, lowest_byte
+                            )
+                            start_elem = (shape - 1) * (-elem_stride)
+                            resolved_mv = memoryview(sub_arr)[start_elem:None:elem_stride]
+                    elif val.c_contiguous:
+                        count = val.nbytes // val.itemsize if val.itemsize > 0 else 0
+                        sub_arr = (elem_type * count).from_buffer(cloned_exporter, offset)
+                        resolved_mv = memoryview(sub_arr)
+                    else:
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{type(val).__name__}"
+                        )
+                    if val.readonly:
+                        resolved_mv = resolved_mv.toreadonly()
+                    memo[val_id] = resolved_mv
+                    _assign_target(target, key, is_attr, resolved_mv)
+                    continue
+                elif isinstance(exporter, (bytearray, array.array, bytes)):
                     if type(exporter) not in (
                         bytearray,
                         array.array,
@@ -1278,6 +1357,26 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                         _install_cloned_dict(val, new_dt, memo, stack)
                         stack.append((_OBJ_EXPAND, new_dt, iter(_get_obj_attrs(val))))
+            elif isinstance(val, ctypes.Array):
+                arr_nbytes = ctypes.sizeof(val)
+                if arr_nbytes > _MAX_SAFE_BUFFER_SIZE:
+                    return None
+                if _has_mutable_class_attrs(type(val)):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
+                new_arr: Any
+                try:
+                    new_arr = type(val).from_buffer_copy(val)
+                except Exception as exc:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    ) from exc
+                memo[val_id] = new_arr
+                _assign_target(target, key, is_attr, new_arr)
+                if hasattr(val, "__dict__") or hasattr(val, "__slots__"):
+                    _install_cloned_dict(val, new_arr, memo, stack)
+                    stack.append((_OBJ_EXPAND, new_arr, iter(_get_obj_attrs(val))))
             elif hasattr(val, "__dict__") or hasattr(val, "__slots__"):
                 if _has_mutable_class_attrs(type(val)):
                     raise TypeError(
@@ -2645,7 +2744,10 @@ class ProoflineClient(Operations):
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    if (
+                        error.type == "urn:proofline:sdk:timeout"
+                        or (error.status == 0 and (_transport.remaining() or 0) <= 0.05)
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
@@ -3113,7 +3215,10 @@ class AsyncProoflineClient(AsyncOperations):
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    if (
+                        error.type == "urn:proofline:sdk:timeout"
+                        or (error.status == 0 and (_transport.remaining() or 0) <= 0.05)
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
@@ -3265,9 +3370,6 @@ class AsyncProoflineClient(AsyncOperations):
                                                 remaining_budget is not None
                                                 and remaining_budget <= 0
                                             ):
-                                                _detach_overdue_future(res)
-                                                if result is not None:
-                                                    return result
                                                 break
                                             try:
                                                 done, _ = await async_wait(
@@ -3367,7 +3469,7 @@ class AsyncProoflineClient(AsyncOperations):
 
                                     deadline_expired = (
                                         captured_deadline is not None
-                                        and monotonic() > captured_deadline
+                                        and monotonic() >= captured_deadline
                                     )
                                     if waiter_cancelling or deadline_expired:
                                         _cleanup_discarded_awaitable(coro)
@@ -3473,9 +3575,6 @@ class AsyncProoflineClient(AsyncOperations):
                                     while True:
                                         remaining_budget = _transport.remaining()
                                         if remaining_budget is not None and remaining_budget <= 0:
-                                            _detach_overdue_task(task, res, wrapper_started)
-                                            if result is not None:
-                                                return result
                                             break
                                         try:
                                             done_wait, _ = await async_wait(

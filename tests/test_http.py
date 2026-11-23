@@ -2912,7 +2912,9 @@ async def main() -> None:
             if waiter_task_1 in done_1:
                 await waiter_task_1
             assert pending_fut is not None
-            res_1 = await asyncio.wait_for(waiter_task_1, timeout=1.0)
+            done_waiter_1, _ = await asyncio.wait({waiter_task_1}, timeout=1.0)
+            assert waiter_task_1 in done_waiter_1
+            res_1 = waiter_task_1.result()
             assert res_1.status == "TIMED_OUT"
             assert not pending_fut.cancelled()
             assert not pending_fut.done()
@@ -2930,6 +2932,8 @@ async def main() -> None:
             await asyncio.sleep(0)
             assert id(pending_fut) not in client_module._DETACHED_FUTURES
         finally:
+            if pending_fut is not None and not pending_fut.done():
+                pending_fut.set_result(None)
             if not startup_waiter_1.done():
                 startup_waiter_1.cancel()
             try:
@@ -2939,11 +2943,9 @@ async def main() -> None:
             if not waiter_task_1.done():
                 waiter_task_1.cancel()
             try:
-                await waiter_task_1
-            except (asyncio.CancelledError, BaseException):
+                done_clean_1, _ = await asyncio.wait({waiter_task_1}, timeout=1.0)
+            except BaseException:
                 pass
-            if pending_fut is not None and not pending_fut.done():
-                pending_fut.set_result(None)
 
         # Case 2: Pending same-loop Future that completes within budget without cancellation
         completed_fut = asyncio.get_running_loop().create_future()
