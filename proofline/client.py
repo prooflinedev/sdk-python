@@ -37,6 +37,7 @@ from asyncio import (
 )
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from enum import Enum
 from inspect import (
     CORO_CREATED,
     GEN_CREATED,
@@ -49,7 +50,6 @@ from inspect import (
 from inspect import (
     signature as inspect_signature,
 )
-from enum import Enum
 from string import hexdigits
 from time import monotonic, sleep
 from types import (
@@ -319,6 +319,17 @@ def _deadline_expired() -> bool:
     return budget is not None and budget <= 0
 
 
+def _is_immutable_enum(val: Enum, seen: set[int] | None = None) -> bool:
+    if not _is_immutable(val.value, seen):
+        return False
+    inst_dict = getattr(val, "__dict__", None)
+    if inst_dict:
+        for v in inst_dict.values():
+            if not _is_immutable(v, seen):
+                return False
+    return True
+
+
 def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     if val is None or val is UNSET:
         return True
@@ -328,7 +339,7 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     if t in _IMMUTABLE_TYPES:
         return True
     if isinstance(val, Enum):
-        return True
+        return _is_immutable_enum(val, seen)
     if t is datetime.datetime:
         tz = val.tzinfo
         return tz is None or type(tz) is datetime.timezone
@@ -697,6 +708,13 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                 raise TypeError(
                     f"Unsupported mutable value in review extension data: {type(val).__name__}"
                 )
+            if isinstance(val, Enum):
+                if not _is_immutable(val):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
+                _assign_target(target, key, is_attr, val)
+                continue
             if _is_immutable(val):
                 if type(val) is bytes and len(val) > _MAX_SAFE_BUFFER_SIZE:
                     return None
@@ -849,6 +867,9 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                     _install_cloned_dict(val, new_list, memo, stack)
                     stack.append((_OBJ_EXPAND, new_list, iter(_get_obj_attrs(val))))
             elif isinstance(val, set):
+                set_len = set.__len__(val)
+                if set_len > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 if type(val) is not set and _has_mutable_class_attrs(type(val)):
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
@@ -857,7 +878,6 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     )
-                set_len = set.__len__(val)
                 if type(val) is not set:
                     try:
                         if set_len == 0:
@@ -897,11 +917,17 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                     deferred_set_insertions.append((new_set, val, orig_set_members))
                     stack.append((_SET_EXPAND, None, iter(val)))
             elif isinstance(val, frozenset):
+                fs_len = frozenset.__len__(val)
+                if fs_len > _MAX_SAFE_BUFFER_SIZE:
+                    return None
                 if type(val) is not frozenset and _has_mutable_class_attrs(type(val)):
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {type(val).__name__}"
                     )
-                fs_len = frozenset.__len__(val)
+                if "__copy__" in type(val).__dict__:
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {type(val).__name__}"
+                    )
                 if type(val) is not frozenset:
                     try:
                         if fs_len == 0:
@@ -1149,20 +1175,24 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                         if val.ndim == 0:
                             scalar_obj = elem_type.from_buffer(cloned_exporter, offset)
                             resolved_mv = memoryview(scalar_obj)
-                        elif val.ndim == 1 and val_shape is not None and val_strides is not None:
-                            shape = val_shape[0]
-                            stride = val_strides[0]
-                            elem_stride = stride // itemsize if itemsize > 0 else 1
-                            if shape == 0:
+                        elif (
+                            full_mv.ndim >= 1
+                            and full_mv.strides is not None
+                            and val_shape is not None
+                            and val_strides is not None
+                        ):
+                            exp_stride = full_mv.strides[0]
+                            start = offset // exp_stride if exp_stride != 0 else 0
+                            step = val_strides[0] // exp_stride if exp_stride != 0 else 1
+                            length = val_shape[0]
+                            if length == 0:
                                 resolved_mv = full_mv[0:0]
-                            elif elem_stride > 0:
-                                resolved_mv = full_mv[
-                                    item_offset : item_offset + shape * elem_stride : elem_stride
-                                ]
+                            elif step > 0:
+                                resolved_mv = full_mv[start : start + length * step : step]
                             else:
-                                last = item_offset + (shape - 1) * elem_stride
-                                stop = None if (last + elem_stride < 0) else (last + elem_stride)
-                                resolved_mv = full_mv[item_offset:stop:elem_stride]
+                                last = start + (length - 1) * step
+                                stop = None if (last + step < 0) else (last + step)
+                                resolved_mv = full_mv[start:stop:step]
                         elif val.c_contiguous:
                             count = val.nbytes // val.itemsize if val.itemsize > 0 else 0
                             resolved_mv = full_mv[item_offset : item_offset + count]
@@ -3535,6 +3565,7 @@ class AsyncProoflineClient(AsyncOperations):
                         deadline_token = _transport.DEADLINE.set(None)
                         try:
                             res = on_poll(snapshot)
+                            cb_return_time = monotonic()
                         finally:
                             _transport.DEADLINE.reset(deadline_token)
                         if waiter_task is not None:
@@ -3582,10 +3613,9 @@ class AsyncProoflineClient(AsyncOperations):
                                 except BaseException:
                                     is_done = False
                                 if is_done:
-                                    done_observed_time = monotonic()
                                     deadline_val = _transport.DEADLINE.get()
                                     cb_returned_in_budget = (
-                                        deadline_val is None or done_observed_time < deadline_val
+                                        deadline_val is None or cb_return_time < deadline_val
                                     )
                                     if cb_returned_in_budget:
                                         if hasattr(res, "result"):

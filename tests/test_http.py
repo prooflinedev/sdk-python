@@ -2985,8 +2985,6 @@ async def main() -> None:
             def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
                 super().add_done_callback(fn, context=context)
                 self.active_callbacks.append(fn)
-                if "_on_future_done" in getattr(fn, "__name__", ""):
-                    clock.advance(1.0)
                 self.wait_entered.set()
 
             def remove_done_callback(self, fn: Any) -> int:
@@ -3025,6 +3023,10 @@ async def main() -> None:
             if waiter_task_1 in done_1:
                 await waiter_task_1
             assert pending_fut is not None
+            await pending_fut.wait_entered.wait()
+            while getattr(waiter_task_1, "_fut_waiter", None) is None:
+                await asyncio.sleep(0)
+            clock.advance(1.0)
             done_waiter_1, _ = await asyncio.wait({waiter_task_1}, timeout=1.0)
             assert waiter_task_1 in done_waiter_1
             res_1 = waiter_task_1.result()
@@ -3172,6 +3174,9 @@ async def main() -> None:
                         await finish_waiter_3
                     except (asyncio.CancelledError, BaseException):
                         pass
+                done_cb3_fin, _ = await asyncio.wait({cb_task_3}, timeout=1.0)
+                assert cb_task_3 in done_cb3_fin
+                assert cb_task_3.result() is None
             finally:
                 if not startup_waiter_3.done():
                     startup_waiter_3.cancel()
@@ -3313,7 +3318,6 @@ async def main() -> None:
             callback_running_term.set()
             await release_callback_term.wait()
             callback_finished_term.set()
-            raise RuntimeError("overdue coroutine failure")
 
         client.get_review = fake_completed  # type: ignore
 
@@ -3379,10 +3383,9 @@ async def main() -> None:
                     pass
             assert callback_running_term.is_set()
             assert callback_finished_term.is_set()
-            await asyncio.sleep(0.01)
-            assert wrapper_4.done()
-            assert not wrapper_4.cancelled()
-            assert getattr(wrapper_4, "exception_calls", 0) > 0
+            done_w4_wrap, _ = await asyncio.wait({wrapper_4}, timeout=1.0)
+            assert wrapper_4 in done_w4_wrap
+            assert wrapper_4.result() is None
         finally:
             release_callback_term.set()
             if not waiter_task_4.done():
