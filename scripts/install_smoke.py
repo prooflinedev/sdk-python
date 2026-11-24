@@ -13,12 +13,20 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import proofline
-from proofline import AsyncProoflineClient, ProoflineClient, ReviewFilters, SecretStr
+from proofline import (
+    AsyncProoflineClient,
+    ProoflineClient,
+    ProoflineError,
+    RetryPolicy,
+    ReviewFilters,
+    SecretStr,
+)
 
 ORG = UUID("00000000-0000-4000-8000-000000000001")
 REVIEW = UUID("00000000-0000-4000-8000-000000000002")
 ASSESSMENT = UUID("00000000-0000-4000-8000-000000000003")
 FINDING = UUID("00000000-0000-4000-8000-000000000004")
+RETRY_FINDING = UUID("00000000-0000-4000-8000-000000000005")
 TOKEN = "pln_synthetic_installed_package_token"
 QUERY = '(status:COMPLETED OR status:FAILED) AND -author:"release bot"'
 
@@ -29,6 +37,7 @@ def main() -> None:
     package_version = importlib.metadata.version("proofline-sdk")
     assert proofline.__version__ == package_version
     calls: list[str] = []
+    retry_path = f"/api/v1/organizations/{ORG}/findings/{RETRY_FINDING}"
     filters: ReviewFilters = {"query": QUERY}
     finding = {
         "id": str(FINDING),
@@ -84,8 +93,17 @@ def main() -> None:
             assert self.headers["Authorization"] == f"Bearer {TOKEN}"
             assert self.headers["User-Agent"] == f"proofline-python/{package_version}"
             calls.append(self.path)
-            body = finding if "/findings/" in self.path else review
             path = urlsplit(self.path)
+            if path.path == retry_path:
+                payload = json.dumps({"detail": "Synthetic retryable failure."}).encode()
+                self.send_response(503)
+                self.send_header("Content-Type", "application/problem+json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Retry-After", "0")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            body = finding if "/findings/" in self.path else review
             if path.path in (
                 f"/api/v1/organizations/{ORG}/reviews",
                 f"/api/v1/organizations/{ORG}/reviews/pr/repo%2Fname/42",
@@ -110,30 +128,50 @@ def main() -> None:
     url = f"http://127.0.0.1:{server.server_port}"
 
     async def asynchronous() -> None:
-        async with AsyncProoflineClient(SecretStr(TOKEN), base_url=url) as client:
+        async with AsyncProoflineClient(
+            SecretStr(TOKEN), base_url=url, retry_policy=RetryPolicy(max_attempts=1)
+        ) as client:
             assert (await client.list_reviews(ORG, query=QUERY)).items == []
             history = await client.list_pull_request_reviews(ORG, "repo/name", 42, filters=filters)
             assert history.items == []
             assert [item async for item in client.iter_reviews(ORG, filters=filters)] == []
             assert (await client.get_finding(ORG, FINDING)).id == FINDING
+            retry_calls = calls.count(retry_path)
+            try:
+                await client.get_finding(ORG, RETRY_FINDING)
+            except ProoflineError as error:
+                assert error.status == 503
+            else:
+                raise AssertionError("The async retry-limit request unexpectedly succeeded.")
+            assert calls.count(retry_path) == retry_calls + 1
             result = await client.wait_for_review(ORG, REVIEW, timeout=2)
             assert result.status == "INCOMPLETE"
             assert result.gaps[0].reason_codes[0] == "WORLD_UNAVAILABLE"
             assert TOKEN not in repr(client)
 
     try:
-        with ProoflineClient(SecretStr(TOKEN), base_url=url) as client:
+        with ProoflineClient(
+            SecretStr(TOKEN), base_url=url, retry_policy=RetryPolicy(max_attempts=1)
+        ) as client:
             assert client.list_reviews(ORG, query=QUERY).items == []
             history = client.list_pull_request_reviews(ORG, "repo/name", 42, filters=filters)
             assert history.items == []
             assert list(client.iter_reviews(ORG, filters=filters)) == []
             assert client.get_finding(ORG, FINDING).id == FINDING
+            retry_calls = calls.count(retry_path)
+            try:
+                client.get_finding(ORG, RETRY_FINDING)
+            except ProoflineError as error:
+                assert error.status == 503
+            else:
+                raise AssertionError("The sync retry-limit request unexpectedly succeeded.")
+            assert calls.count(retry_path) == retry_calls + 1
             result = client.wait_for_review(ORG, REVIEW, timeout=2)
             assert result.status == "INCOMPLETE"
             assert result.gaps[0].reason_codes[0] == "WORLD_UNAVAILABLE"
             assert TOKEN not in repr(client)
         asyncio.run(asynchronous())
-        assert len(calls) == 10
+        assert len(calls) == 12
     finally:
         server.shutdown()
         server.server_close()

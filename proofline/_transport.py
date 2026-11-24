@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import os
+import random
 import re
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
@@ -37,6 +38,7 @@ from ._generated.models import (
 from ._generated.types import Unset
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
+from .retries import RetryPolicy
 
 VERSION = "9.2.0"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -195,10 +197,15 @@ def limit_timeout(request: httpx2.Request) -> None:
     }
 
 
-def retry_delay(value: str | None, attempt: int) -> float | None:
+def retry_delay(value: str | None, attempt: int, policy: RetryPolicy) -> float | None:
     """An invalid or longer Retry-After returns the problem without an early retry."""
     if value is None:
-        return float(2**attempt)
+        delay = policy.initial_backoff
+        for _ in range(attempt):
+            delay = min(policy.max_backoff, delay * policy.backoff_multiplier)
+        if policy.jitter:
+            delay *= random.uniform(1 - policy.jitter, 1 + policy.jitter)
+        return min(delay, policy.max_backoff)
     value = value.strip()
     if value.isascii() and value.isdigit():
         try:
@@ -229,7 +236,7 @@ def retry_delay(value: str | None, attempt: int) -> float | None:
             delay = max(0.0, (date - now).total_seconds())
         except (ValueError, TypeError, OverflowError):
             return None
-    return delay if math.isfinite(delay) and delay <= 60 else None
+    return delay if math.isfinite(delay) and delay <= policy.max_backoff else None
 
 
 def redacted(value: object, raw: str) -> object:
@@ -359,7 +366,9 @@ def encoding_error(status: int) -> ProoflineError:
     )
 
 
-def check_stream(size: int, status: int, deadline: float) -> None:
+def check_stream(
+    size: int, status: int, deadline: float, retryable_statuses: frozenset[int]
+) -> None:
     if size > MAX_RESPONSE_BYTES:
         raise ProoflineError(
             status, "urn:proofline:sdk:invalid-response", "The response exceeds 8 MiB."
@@ -367,7 +376,7 @@ def check_stream(size: int, status: int, deadline: float) -> None:
     budget = remaining()
     if monotonic() >= deadline or (budget is not None and budget <= 0):
         # Retryable statuses time out as an expired read does; other problems keep their status.
-        if 200 <= status < 300 or status in (429, 503):
+        if 200 <= status < 300 or status in retryable_statuses:
             raise timeout_error()
         raise unreadable_problem(status)
 
@@ -385,10 +394,17 @@ def io_budget(deadline: float) -> float:
 
 
 class DeadlineStream(httpx2.SyncByteStream):
-    def __init__(self, inner: httpx2.SyncByteStream, status: int, deadline: float) -> None:
+    def __init__(
+        self,
+        inner: httpx2.SyncByteStream,
+        status: int,
+        deadline: float,
+        retryable_statuses: frozenset[int],
+    ) -> None:
         self._inner = inner
         self._status = status
         self._deadline = deadline
+        self._retryable_statuses = retryable_statuses
 
     def __iter__(self) -> Iterator[bytes]:
         size = 0
@@ -396,9 +412,9 @@ class DeadlineStream(httpx2.SyncByteStream):
         try:
             for chunk in self._inner:
                 size += len(chunk)
-                check_stream(size, self._status, self._deadline)
+                check_stream(size, self._status, self._deadline, self._retryable_statuses)
                 yield chunk
-            check_stream(size, self._status, self._deadline)
+            check_stream(size, self._status, self._deadline, self._retryable_statuses)
         finally:
             IO_DEADLINE.reset(deadline)
 
@@ -407,10 +423,17 @@ class DeadlineStream(httpx2.SyncByteStream):
 
 
 class AsyncDeadlineStream(httpx2.AsyncByteStream):
-    def __init__(self, inner: httpx2.AsyncByteStream, status: int, deadline: float) -> None:
+    def __init__(
+        self,
+        inner: httpx2.AsyncByteStream,
+        status: int,
+        deadline: float,
+        retryable_statuses: frozenset[int],
+    ) -> None:
         self._inner = inner
         self._status = status
         self._deadline = deadline
+        self._retryable_statuses = retryable_statuses
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         size = 0
@@ -424,22 +447,23 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
             except TimeoutError:
                 raise httpx2.ReadTimeout("The request deadline expired.") from None
             size += len(chunk)
-            check_stream(size, self._status, self._deadline)
+            check_stream(size, self._status, self._deadline, self._retryable_statuses)
             yield chunk
-        check_stream(size, self._status, self._deadline)
+        check_stream(size, self._status, self._deadline, self._retryable_statuses)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
 
 
 class RetryTransport(httpx2.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: SecretStr, timeout: float, policy: RetryPolicy) -> None:
         self._token = token
         self._timeout = timeout
+        self._policy = policy
         self._inner = SyncHTTPTransport()
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
-        for attempt in range(4):
+        for attempt in range(self._policy.max_attempts):
             limit_timeout(request)
             deadline = monotonic() + self._timeout
             marker = IO_DEADLINE.set(io_deadline(deadline))
@@ -456,23 +480,28 @@ class RetryTransport(httpx2.BaseTransport):
             if not isinstance(response.stream, httpx2.SyncByteStream):
                 response.close()
                 raise unreadable_problem(response.status_code)
-            response.stream = DeadlineStream(response.stream, response.status_code, deadline)
+            response.stream = DeadlineStream(
+                response.stream,
+                response.status_code,
+                deadline,
+                self._policy.retryable_statuses,
+            )
             if 200 <= response.status_code < 300:
                 return response
             try:
                 response.read()
                 error = problem(response, self._token)
             except httpx2.HTTPError:
-                if response.status_code in (429, 503):
+                if response.status_code in self._policy.retryable_statuses:
                     raise
                 error = unreadable_problem(response.status_code)
             finally:
                 response.close()
-            delay = retry_delay(response.headers.get("Retry-After"), attempt)
+            delay = retry_delay(response.headers.get("Retry-After"), attempt, self._policy)
             if (
                 request.method != "GET"
-                or response.status_code not in (429, 503)
-                or attempt == 3
+                or response.status_code not in self._policy.retryable_statuses
+                or attempt + 1 == self._policy.max_attempts
                 or delay is None
             ):
                 raise error from None
@@ -484,13 +513,14 @@ class RetryTransport(httpx2.BaseTransport):
 
 
 class AsyncRetryTransport(httpx2.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: SecretStr, timeout: float, policy: RetryPolicy) -> None:
         self._token = token
         self._timeout = timeout
+        self._policy = policy
         self._inner = httpx2.AsyncHTTPTransport()
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-        for attempt in range(4):
+        for attempt in range(self._policy.max_attempts):
             limit_timeout(request)
             deadline = monotonic() + self._timeout
             try:
@@ -507,23 +537,28 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
             if not isinstance(response.stream, httpx2.AsyncByteStream):
                 await response.aclose()
                 raise unreadable_problem(response.status_code)
-            response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
+            response.stream = AsyncDeadlineStream(
+                response.stream,
+                response.status_code,
+                deadline,
+                self._policy.retryable_statuses,
+            )
             if 200 <= response.status_code < 300:
                 return response
             try:
                 await response.aread()
                 error = problem(response, self._token)
             except httpx2.HTTPError:
-                if response.status_code in (429, 503):
+                if response.status_code in self._policy.retryable_statuses:
                     raise
                 error = unreadable_problem(response.status_code)
             finally:
                 await response.aclose()
-            delay = retry_delay(response.headers.get("Retry-After"), attempt)
+            delay = retry_delay(response.headers.get("Retry-After"), attempt, self._policy)
             if (
                 request.method != "GET"
-                or response.status_code not in (429, 503)
-                or attempt == 3
+                or response.status_code not in self._policy.retryable_statuses
+                or attempt + 1 == self._policy.max_attempts
                 or delay is None
             ):
                 raise error from None

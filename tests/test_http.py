@@ -44,6 +44,7 @@ from proofline import (
     RepositoryGuidance,
     RepositoryNames,
     RerunResponse,
+    RetryPolicy,
     ReviewPage,
     RunNowMode,
     RunNowRequest,
@@ -875,6 +876,84 @@ async def test_retry_count_is_bounded_for_rate_limit_and_provider_unavailable(
 
 
 @MODES
+async def test_retry_policy_controls_status_attempts_and_backoff(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    policy = RetryPolicy(
+        max_attempts=3,
+        retryable_statuses=frozenset({500}),
+        initial_backoff=0.5,
+        backoff_multiplier=3,
+        max_backoff=1,
+    )
+    with Server(
+        lambda request, index: (
+            Reply(500, {"detail": "Unavailable."}) if index < 2 else Reply(body=finding())
+        )
+    ) as server:
+        async with session(mode, server.url, retry_policy=policy) as client:
+            assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
+        assert len(server.requests) == 3
+        assert clock.delays == [0.5, 1]
+
+    for rejected_policy, status in [
+        (policy, 503),
+        (RetryPolicy(max_attempts=1), 503),
+        (RetryPolicy(retryable_statuses=frozenset({500}), max_backoff=1), 500),
+    ]:
+        headers = {"Retry-After": "2"} if status == 500 else {}
+        with Server(
+            lambda request, index, status=status, headers=headers: Reply(
+                status, {"detail": "Unavailable."}, headers
+            )
+        ) as server:
+            async with session(mode, server.url, retry_policy=rejected_policy) as client:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, "get_finding", ORG, FINDING)
+                assert raised.value.status == status
+            assert len(server.requests) == 1
+
+
+@MODES
+async def test_retry_policy_jitters_only_computed_backoff(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    ranges: list[tuple[float, float]] = []
+
+    def upper_bound(lower: float, upper: float) -> float:
+        ranges.append((lower, upper))
+        return upper
+
+    monkeypatch.setattr(_transport.random, "uniform", upper_bound)
+    policy = RetryPolicy(initial_backoff=2, max_backoff=10, jitter=0.25)
+    with Server(
+        lambda request, index: (
+            Reply(503, {"detail": "Unavailable."}) if index == 0 else Reply(body=finding())
+        )
+    ) as server:
+        async with session(mode, server.url, retry_policy=policy) as client:
+            assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
+        assert len(server.requests) == 2
+        assert clock.delays == [2.5]
+        assert ranges == [(0.75, 1.25)]
+
+    with Server(
+        lambda request, index: (
+            Reply(503, {"detail": "Unavailable."}, {"Retry-After": "2"})
+            if index == 0
+            else Reply(body=finding())
+        )
+    ) as server:
+        async with session(mode, server.url, retry_policy=policy) as client:
+            assert (await call(client, "get_finding", ORG, FINDING)).id == FINDING
+        assert len(server.requests) == 2
+        assert clock.delays == [2.5, 2]
+        assert ranges == [(0.75, 1.25)]
+
+
+@MODES
 async def test_long_retry_after_is_not_retried_early(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1431,27 +1510,33 @@ async def test_retry_after_is_bounded_by_wait_deadline(
 
 
 @MODES
-@pytest.mark.parametrize("status", [429, 503, 403])
+@pytest.mark.parametrize("status", [429, 500, 503, 403])
 async def test_deadline_expiring_with_a_received_problem_chunk_keeps_retry_policy(
     mode: str, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Clock(monkeypatch)
+    policy = RetryPolicy(retryable_statuses=frozenset({429, 500}))
     checked = _transport.check_stream
 
-    def late(size: int, response_status: int, deadline: float) -> None:
+    def late(
+        size: int,
+        response_status: int,
+        deadline: float,
+        retryable_statuses: frozenset[int],
+    ) -> None:
         # The wait deadline passes while a received body chunk is still being checked.
         clock.now += 10
-        checked(size, response_status, deadline)
+        checked(size, response_status, deadline, retryable_statuses)
 
     monkeypatch.setattr(_transport, "check_stream", late)
     with Server(
         lambda request, index: Reply(status, {"detail": PRIVATE}, {"Retry-After": "2"})
     ) as server:
-        async with session(mode, server.url) as client:
-            if status == 403:
+        async with session(mode, server.url, retry_policy=policy) as client:
+            if status not in policy.retryable_statuses:
                 with pytest.raises(ProoflineError) as raised:
                     await call(client, "wait_for_review", ORG, REVIEW, timeout=1)
-                assert raised.value.status == 403
+                assert raised.value.status == status
             else:
                 result = await call(client, "wait_for_review", ORG, REVIEW, timeout=1)
                 assert result.status == "TIMED_OUT"
