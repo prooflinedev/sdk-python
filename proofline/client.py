@@ -199,15 +199,18 @@ def _cancelled(event: threading.Event | AsyncEvent | None) -> bool:
     return event is not None and event.is_set()
 
 
-def _wait_for_event(event: threading.Event, timeout: float) -> None:
-    event.wait(timeout)
+def _wait_for_event(event: threading.Event, timeout: float) -> bool:
+    """Return True when the event woke the wait, False when it timed out."""
+    return event.wait(timeout)
 
 
-async def _async_wait_for_event(event: AsyncEvent, timeout: float) -> None:
+async def _async_wait_for_event(event: AsyncEvent, timeout: float) -> bool:
+    """Return True when the event woke the wait, False when it timed out."""
     try:
         await async_wait_for(event.wait(), timeout)
+        return True
     except TimeoutError:
-        return
+        return False
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -229,7 +232,8 @@ def _sleep_with_cancel(
         remaining = end - monotonic()
         if remaining <= 0:
             return not _cancelled(event)
-        _wait_for_event(event, remaining)
+        if _wait_for_event(event, remaining):
+            return False
 
 
 async def _async_sleep_with_cancel(
@@ -245,7 +249,8 @@ async def _async_sleep_with_cancel(
         remaining = end - monotonic()
         if remaining <= 0:
             return not _cancelled(event)
-        await _async_wait_for_event(event, remaining)
+        if await _async_wait_for_event(event, remaining):
+            return False
 
 
 def _export_page_limit(max_pages: int) -> None:
@@ -629,7 +634,8 @@ class ProoflineClient(Operations):
         if _cancelled(cancel_event):
             return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
         last: CustomerReviewDetail | None = None
-        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        deadline_at = monotonic() + timeout
+        deadline = _transport.DEADLINE.set(deadline_at)
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
@@ -651,8 +657,7 @@ class ProoflineClient(Operations):
                 if result is not None:
                     return result
                 remaining = _transport.remaining() or 0
-                cutoff = monotonic() + remaining
-                if not _sleep_with_cancel(min(interval, remaining), cancel_event, cutoff):
+                if not _sleep_with_cancel(min(interval, remaining), cancel_event, deadline_at):
                     return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 interval = min(60, interval * 2)
             if _cancelled(cancel_event):
@@ -1031,7 +1036,8 @@ class AsyncProoflineClient(AsyncOperations):
         if _cancelled(cancel_event):
             return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
         last: CustomerReviewDetail | None = None
-        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        deadline_at = monotonic() + timeout
+        deadline = _transport.DEADLINE.set(deadline_at)
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
@@ -1053,9 +1059,8 @@ class AsyncProoflineClient(AsyncOperations):
                 if result is not None:
                     return result
                 remaining = _transport.remaining() or 0
-                cutoff = monotonic() + remaining
                 if not await _async_sleep_with_cancel(
-                    min(interval, remaining), cancel_event, cutoff
+                    min(interval, remaining), cancel_event, deadline_at
                 ):
                     return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 interval = min(60, interval * 2)

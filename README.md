@@ -78,7 +78,7 @@ if outcome.status != "COMPLETED":
 
 ## Cancelling a wait
 
-Pass `cancel_event` to stop a wait when your own code no longer needs the result: a `threading.Event` for `wait_for_review` on `ProoflineClient`, or an `asyncio.Event` for `wait_for_review` on `AsyncProoflineClient`. Set it from another thread or task. For an `asyncio.Event`, use `loop.call_soon_threadsafe(cancel.set)` when the setter is another thread; `loop.add_signal_handler(cancel.set)` is safe because the callback runs on the loop. Do not call `threading.Event.set()` directly from a Python signal handler; have the handler hand off to another thread instead.
+Pass `cancel_event` to stop a wait when your own code no longer needs the result: a `threading.Event` for `wait_for_review` on `ProoflineClient`, or an `asyncio.Event` for `wait_for_review` on `AsyncProoflineClient`. Set it from another thread or task. For an `asyncio.Event`, use `loop.call_soon_threadsafe(cancel.set)` when the setter is another thread. If you register a signal handler with `loop.add_signal_handler(signal.SIGINT, cancel.set)`, remove it in a `finally` block with `loop.remove_signal_handler(signal.SIGINT)` so a later Ctrl-C is not swallowed. Do not call `threading.Event.set()` directly from a Python signal handler; have the handler hand off to another thread instead.
 
 ```python
 import threading
@@ -90,11 +90,9 @@ outcome = client.wait_for_review(organization_id, review_id, cancel_event=cancel
 
 ```python
 import asyncio
-import signal
 
 cancel = asyncio.Event()
 loop = asyncio.get_running_loop()
-loop.add_signal_handler(signal.SIGINT, cancel.set)
 outcome = await async_client.wait_for_review(
     organization_id,
     review_id,

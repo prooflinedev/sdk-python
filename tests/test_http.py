@@ -120,12 +120,14 @@ class Clock:
         monkeypatch.setattr(client_module, "_wait_for_event", self.wait_for_event)
         monkeypatch.setattr(client_module, "_async_wait_for_event", self.async_wait_for_event)
 
-    def wait_for_event(self, event: Any, timeout: float) -> None:
+    def wait_for_event(self, event: Any, timeout: float) -> bool:
         self.sleep(timeout)
+        return bool(event.is_set())
 
-    async def async_wait_for_event(self, event: Any, timeout: float) -> None:
+    async def async_wait_for_event(self, event: Any, timeout: float) -> bool:
         self.sleep(timeout)
         await asyncio.sleep(0)
+        return bool(event.is_set())
 
     def sleep(self, delay: float) -> None:
         self.delays.append(delay)
@@ -1443,35 +1445,40 @@ async def test_wait_for_review_cancel_event_stops_before_any_request(
 
 
 @MODES
-async def test_wait_for_review_cancel_event_interrupts_poll_interval(
-    mode: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = Clock(monkeypatch)
-    event = asyncio.Event() if mode == "async" else threading.Event()
+async def test_wait_for_review_cancel_event_wakes_real_backoff(mode: str) -> None:
+    body = review("RUNNING")
+    body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+    thread: threading.Thread | None = None
+    if mode == "sync":
+        event: Any = threading.Event()
 
-    def wait_for_event(wait_event: Any, timeout: float) -> None:
-        clock.sleep(timeout)
-        if len(clock.delays) == 1:
+        def set_event() -> None:
+            time.sleep(0.05)
             event.set()
 
-    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
-    if mode == "async":
+        thread = threading.Thread(target=set_event, daemon=True)
+        thread.start()
+    else:
+        event = asyncio.Event()
+        asyncio.get_running_loop().call_later(0.05, event.set)
 
-        async def async_wait_for_event(wait_event: Any, timeout: float) -> None:
-            wait_for_event(wait_event, timeout)
-            await asyncio.sleep(0)
+    started = time.monotonic()
+    try:
+        with Server(lambda request, index: Reply(body=body)) as server:
+            async with session(mode, server.url) as client:
+                result = await call(
+                    client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+                )
+            assert len(server.requests) == 1
+    finally:
+        if thread is not None:
+            thread.join()
+    elapsed = time.monotonic() - started
 
-        monkeypatch.setattr(client_module, "_async_wait_for_event", async_wait_for_event)
-
-    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
-        async with session(mode, server.url) as client:
-            result = await call(
-                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
-            )
-        assert len(server.requests) == 1
+    assert elapsed < 2.0
     assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
     assert result.review.id == REVIEW
-    assert clock.delays == [5.0]
 
 
 @MODES
