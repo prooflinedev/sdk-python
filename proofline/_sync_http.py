@@ -133,12 +133,15 @@ class Race:
         self.failure: Exception | None = None
         self.failures = 0
 
-    def start(self, connect: Callable[[], httpcore2.NetworkStream]) -> None:
+    def start(self, connect: Callable[[], httpcore2.NetworkStream], address: str = "") -> None:
         with self._changed:
             self._running += 1
         try:
             threading.Thread(
-                target=self._attempt, args=(connect,), name="proofline-connect", daemon=True
+                target=self._attempt,
+                args=(connect,),
+                name=f"proofline-connect {address}".rstrip(),
+                daemon=True,
             ).start()
         except BaseException:
             with self._changed:
@@ -215,6 +218,15 @@ class NetworkBackend(httpcore2.SyncBackend):
         deadline = None if budget is None else monotonic() + budget
         options = list(socket_options or ())
         connect = super().connect_tcp
+
+        def attempt(address: str) -> httpcore2.NetworkStream:
+            # Measure the budget when the thread runs, not when it was scheduled, so an
+            # attempt whose thread starts late still cannot connect past the deadline.
+            left = None if deadline is None else deadline - monotonic()
+            if left is not None and left <= 0:
+                raise httpcore2.ConnectTimeout("The request deadline expired.")
+            return connect(address, port, left, local_address, options)
+
         race = Race()
         # Failures that have already started an attempt. Each failure starts at most one,
         # so one that arrives while an attempt is being started still starts the next.
@@ -238,8 +250,7 @@ class NetworkBackend(httpcore2.SyncBackend):
                         break
                     if seen > answered:
                         answered += 1
-                remaining = None if deadline is None else max(0.0, deadline - monotonic())
-                race.start(partial(connect, address, port, remaining, local_address, options))
+                race.start(partial(attempt, address), address)
             while not expired and race.winner is None and race.running:
                 if deadline is None:
                     race.wait(None)
@@ -255,8 +266,8 @@ class NetworkBackend(httpcore2.SyncBackend):
             raise
         winner = race.settle()
         # A stream that won is used even if the deadline passed while it was handed over: each
-        # attempt's own connect timeout is the remaining budget, so it connected within it, and
-        # later I/O stays bounded by the request deadline. Only failures defer to the timeout.
+        # attempt connects within the budget left when it runs, so it connected before the
+        # deadline, and later I/O stays bounded by it. Only failures defer to the timeout.
         if winner is not None:
             return NetworkStream(winner)
         if expired:

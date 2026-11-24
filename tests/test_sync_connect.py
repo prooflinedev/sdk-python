@@ -38,23 +38,25 @@ def until(condition: Callable[[], bool], what: str) -> None:
 @dataclass
 class Network:
     hosts: dict[str, list[str]] = field(default_factory=dict)
-    # Every address the backend tried, in order, with its start time and connect timeout.
-    attempts: list[tuple[str, float, float | None]] = field(default_factory=list)
+    # Attempts in the order the scheduler launched them, recorded on the scheduler thread.
+    launches: list[tuple[str, float]] = field(default_factory=list)
+    # Each address's connect call, recorded by its worker: when it ran and its timeout.
+    runs: dict[str, tuple[float, float | None]] = field(default_factory=dict)
     silence: threading.Event = field(default_factory=threading.Event)
 
     @property
     def tried(self) -> list[str]:
-        return [address for address, _, _ in self.attempts]
+        return [address for address, _ in self.launches]
 
     @property
     def gaps(self) -> list[float]:
-        """Seconds between consecutive attempt starts: the scheduler's launch decisions."""
-        starts = [at for _, at, _ in self.attempts]
+        """Seconds between consecutive launches: the scheduler's launch decisions."""
+        starts = [at for _, at in self.launches]
         return [later - earlier for earlier, later in zip(starts, starts[1:], strict=False)]
 
     @property
     def timeouts(self) -> list[float | None]:
-        return [timeout for _, _, timeout in self.attempts]
+        return [self.runs[address][1] for address in self.tried]
 
 
 @pytest.fixture
@@ -78,8 +80,16 @@ def network(monkeypatch: pytest.MonkeyPatch) -> Iterator[Network]:
             for address in state.hosts[host]
         ]
 
+    launch = _sync_http.Race.start
+
+    def start(
+        race: _sync_http.Race, connect: Callable[[], httpcore2.NetworkStream], address: str = ""
+    ) -> None:
+        state.launches.append((address, time.monotonic()))
+        launch(race, connect, address)
+
     def connect_tcp(self: Any, host: str, port: int, timeout: float | None, *args: Any) -> Any:
-        state.attempts.append((host, time.monotonic(), timeout))
+        state.runs[host] = (time.monotonic(), timeout)
         if host in (SILENT, SILENT_V6):
             state.silence.wait(timeout)
             raise httpcore2.ConnectTimeout("timed out")
@@ -89,6 +99,7 @@ def network(monkeypatch: pytest.MonkeyPatch) -> Iterator[Network]:
 
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect_tcp)
+    monkeypatch.setattr(_sync_http.Race, "start", start)
     try:
         yield state
     finally:
@@ -109,11 +120,7 @@ def test_a_silent_first_address_falls_back_to_the_next_one(network: Network) -> 
     assert network.tried == [SILENT_V6, SILENT, "127.0.0.1"]
     # Each silent address costs one attempt delay, not the 5 second connect timeout.
     assert elapsed < 2
-    starts = [at for _, at, _ in network.attempts]
-    assert all(
-        later - earlier >= _sync_http.ATTEMPT_DELAY * 0.8
-        for earlier, later in zip(starts, starts[1:], strict=False)
-    )
+    assert all(gap >= _sync_http.ATTEMPT_DELAY * 0.8 for gap in network.gaps)
 
 
 def test_the_client_reads_through_a_silent_address(
@@ -178,6 +185,35 @@ def test_the_wait_deadline_still_bounds_the_race(
     assert first is not None and second is not None
     assert first <= 0.4
     assert second <= 0.4 - _sync_http.ATTEMPT_DELAY * 0.8
+
+
+def test_an_attempt_whose_thread_starts_late_still_ends_at_the_deadline(
+    network: Network, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every worker thread starts 0.3 s after it is launched. The second is launched at about
+    # 0.25 s and runs at about 0.55 s, so only about 0.05 s of the 0.6 s budget is left then.
+    network.hosts["late.proofline.invalid"] = [SILENT, SILENT_V6]
+    launch = _sync_http.Race.start
+
+    def start_late(
+        race: _sync_http.Race, connect: Callable[[], httpcore2.NetworkStream], address: str = ""
+    ) -> None:
+        def late() -> httpcore2.NetworkStream:
+            time.sleep(0.3)
+            return connect()
+
+        launch(race, late, address)
+
+    monkeypatch.setattr(_sync_http.Race, "start", start_late)
+    with httpx2.Client(transport=_sync_http.Transport(), timeout=0.6) as client:
+        started = time.monotonic()
+        with pytest.raises(httpx2.TimeoutException):
+            client.get("http://late.proofline.invalid:443/finding")
+    assert network.runs
+    for ran, timeout in network.runs.values():
+        # No connect call may run past the request deadline, however late its thread started.
+        assert timeout is not None
+        assert ran + timeout <= started + 0.6 + 0.05
 
 
 def test_every_refused_address_raises_a_connect_error(network: Network) -> None:
@@ -246,12 +282,18 @@ def test_a_failure_while_an_attempt_starts_still_starts_the_next(
     # times out, so that failure has started nothing yet: the fourth attempt starts at once.
     first_fails = threading.Event()
     silence = threading.Event()
-    starts: dict[str, float] = {}
+    launches: dict[str, float] = {}
     original_wait = _sync_http.Race.wait
+    original_start = _sync_http.Race.start
     calls = 0
 
+    def start(
+        race: _sync_http.Race, connect: Callable[[], httpcore2.NetworkStream], address: str = ""
+    ) -> None:
+        launches[address] = time.monotonic()
+        original_start(race, connect, address)
+
     def connect_tcp(self: Any, host: str, port: int, timeout: float | None, *args: Any) -> Any:
-        starts[host] = time.monotonic()
         if host == "192.0.2.1":
             first_fails.wait(5)
             raise httpcore2.ConnectError("Connection reset")
@@ -272,39 +314,45 @@ def test_a_failure_while_an_attempt_starts_still_starts_the_next(
     monkeypatch.setattr(_sync_http, "resolve", lambda *_: addresses)
     monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect_tcp)
     monkeypatch.setattr(_sync_http.Race, "wait", wait)
+    monkeypatch.setattr(_sync_http.Race, "start", start)
     try:
         with pytest.raises(httpcore2.ConnectTimeout):
             _sync_http.NetworkBackend().connect_tcp("dark.proofline.invalid", 443, 1.2)
     finally:
         silence.set()
-    assert list(starts) == addresses
-    assert starts["192.0.2.4"] - starts["192.0.2.3"] < _sync_http.ATTEMPT_DELAY / 2
+    assert list(launches) == addresses
+    assert launches["192.0.2.4"] - launches["192.0.2.3"] < _sync_http.ATTEMPT_DELAY / 2
 
 
 def test_a_failure_after_the_deadline_still_reports_the_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Both attempts hang until the deadline ends the race; one then fails with a reset.
-    # The deadline ended the request, so the caller sees a timeout, not the late reset.
+    # Both attempts hang past the deadline. When the final wait returns at the deadline, both
+    # fail with a reset before the scheduler looks again. The deadline ended the request, so
+    # the caller sees a timeout, not the late reset.
     reset = threading.Event()
 
     def connect_tcp(self: Any, host: str, port: int, timeout: float | None, *args: Any) -> Any:
         reset.wait(10)
         raise httpcore2.ConnectError("Connection reset")
 
-    settle = _sync_http.Race.settle
+    original_wait = _sync_http.Race.wait
+    deadline = 0.0
 
-    def settle_then_fail(race: _sync_http.Race) -> httpcore2.NetworkStream | None:
-        winner = settle(race)
-        reset.set()
-        until(lambda: not race.running, "the late attempts to fail")
-        return winner
+    def wait(race: _sync_http.Race, timeout: float | None, **kwargs: Any) -> int:
+        seen = original_wait(race, timeout, **kwargs)
+        if time.monotonic() >= deadline and not reset.is_set():
+            reset.set()
+            until(lambda: not race.running, "the late attempts to fail")
+        return seen
 
     monkeypatch.setattr(_sync_http, "resolve", lambda *_: [SILENT, SILENT_V6])
     monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect_tcp)
-    monkeypatch.setattr(_sync_http.Race, "settle", settle_then_fail)
+    monkeypatch.setattr(_sync_http.Race, "wait", wait)
+    deadline = time.monotonic() + 0.4
     with pytest.raises(httpcore2.ConnectTimeout):
         _sync_http.NetworkBackend().connect_tcp("dark.proofline.invalid", 443, 0.4)
+    assert reset.is_set()
 
 
 def test_a_winner_is_closed_when_starting_the_next_attempt_fails(
@@ -322,14 +370,16 @@ def test_a_winner_is_closed_when_starting_the_next_attempt_fails(
     original_start = _sync_http.Race.start
     starts = 0
 
-    def start(race: _sync_http.Race, connect: Callable[[], httpcore2.NetworkStream]) -> None:
+    def start(
+        race: _sync_http.Race, connect: Callable[[], httpcore2.NetworkStream], address: str = ""
+    ) -> None:
         nonlocal starts
         starts += 1
         if starts == 2:
             release.set()
             until(lambda: race.winner is not None, "the first attempt to connect")
             raise RuntimeError("can't start new thread")
-        original_start(race, connect)
+        original_start(race, connect, address)
 
     monkeypatch.setattr(_sync_http, "resolve", lambda *_: [SILENT, SILENT_V6])
     monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect_tcp)
