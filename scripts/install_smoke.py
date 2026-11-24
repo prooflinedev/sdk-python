@@ -13,7 +13,14 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import proofline
-from proofline import AsyncProoflineClient, ProoflineClient, RetryPolicy, ReviewFilters, SecretStr
+from proofline import (
+    AsyncProoflineClient,
+    ProoflineClient,
+    ProoflineError,
+    RetryPolicy,
+    ReviewFilters,
+    SecretStr,
+)
 
 ORG = UUID("00000000-0000-4000-8000-000000000001")
 REVIEW = UUID("00000000-0000-4000-8000-000000000002")
