@@ -47,6 +47,12 @@ class Network:
         return [address for address, _, _ in self.attempts]
 
     @property
+    def gaps(self) -> list[float]:
+        """Seconds between consecutive attempt starts: the scheduler's launch decisions."""
+        starts = [at for _, at, _ in self.attempts]
+        return [later - earlier for earlier, later in zip(starts, starts[1:], strict=False)]
+
+    @property
     def timeouts(self) -> list[float | None]:
         return [timeout for _, _, timeout in self.attempts]
 
@@ -133,12 +139,11 @@ def test_a_refused_address_starts_the_next_attempt_at_once(network: Network) -> 
     with Server(lambda request, index: Reply(body=finding())) as server:
         port = server.url.rsplit(":", 1)[1]
         with httpx2.Client(transport=_sync_http.Transport(), timeout=5) as client:
-            started = time.monotonic()
             response = client.get(f"http://refused.proofline.invalid:{port}/finding")
-            elapsed = time.monotonic() - started
         assert response.json()["id"] == str(FINDING)
     assert network.tried == [REFUSED, "127.0.0.1"]
-    assert elapsed < _sync_http.ATTEMPT_DELAY
+    # The refusal started the next attempt without waiting out the stagger.
+    assert network.gaps[0] < _sync_http.ATTEMPT_DELAY / 2
 
 
 def test_every_silent_address_ends_at_the_request_deadline(network: Network) -> None:
@@ -178,13 +183,11 @@ def test_the_wait_deadline_still_bounds_the_race(
 def test_every_refused_address_raises_a_connect_error(network: Network) -> None:
     network.hosts["closed.proofline.invalid"] = [REFUSED, REFUSED_V6]
     with httpx2.Client(transport=_sync_http.Transport(), timeout=5) as client:
-        started = time.monotonic()
         with pytest.raises(httpx2.TransportError) as raised:
             client.get("http://closed.proofline.invalid:443/finding")
-        elapsed = time.monotonic() - started
     assert not isinstance(raised.value, httpx2.TimeoutException)
     assert network.tried == [REFUSED, REFUSED_V6]
-    assert elapsed < _sync_http.ATTEMPT_DELAY
+    assert network.gaps[0] < _sync_http.ATTEMPT_DELAY / 2
 
 
 class Stream(httpcore2.MockStream):
@@ -212,7 +215,10 @@ def test_a_stream_that_connects_after_the_race_settles_is_closed() -> None:
     assert race.winner is None
 
 
-def test_a_losing_stream_is_closed_and_the_winner_kept() -> None:
+@pytest.mark.parametrize("settled", [False, True], ids=["before-settle", "after-settle"])
+def test_a_losing_stream_is_closed_and_the_winner_kept(settled: bool) -> None:
+    # The loser connects after the winner is published, either while the caller is still
+    # handing the winner over or after it has settled the race.
     release = threading.Event()
     winner, loser = Stream(), Stream()
 
@@ -224,9 +230,12 @@ def test_a_losing_stream_is_closed_and_the_winner_kept() -> None:
     race.start(connect_loser)
     race.start(lambda: winner)
     race.wait(5)
-    assert race.settle() is winner
+    assert race.winner is winner
+    if settled:
+        assert race.settle() is winner
     release.set()
     assert loser.closed.wait(5)
+    assert race.settle() is winner
     assert not winner.closed.is_set()
 
 
