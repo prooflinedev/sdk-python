@@ -3,6 +3,10 @@
 Operating-system name resolution cannot be interrupted, so it runs on a daemon
 thread and the request stops waiting for it at the deadline. An abandoned lookup
 finishes on its own thread and its result is discarded.
+
+A host name with several addresses races its connection attempts (RFC 8305): each starts
+250 ms after the previous one, or at once when it fails, and the first connection wins. An
+address that silently drops packets then costs one attempt delay instead of the deadline.
 """
 
 from __future__ import annotations
@@ -11,9 +15,10 @@ import ipaddress
 import socket
 import ssl
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import partial
 from time import monotonic
 from typing import Any
 
@@ -100,6 +105,84 @@ class NetworkStream(httpcore2.NetworkStream):
         return self._inner.get_extra_info(info)
 
 
+# RFC 8305 recommends 250 ms between connection attempts, as anyio uses for the async client.
+ATTEMPT_DELAY = 0.25
+
+
+def interleaved(addresses: list[str]) -> list[str]:
+    """Alternate address families, starting with the resolver's first preference (RFC 8305 §4)."""
+    families: dict[bool, list[str]] = {True: [], False: []}
+    for address in addresses:
+        families[":" in address].append(address)
+    first = ":" in addresses[0]
+    preferred, other = families[first], families[not first]
+    ordered: list[str] = []
+    for index in range(max(len(preferred), len(other))):
+        ordered.extend(family[index] for family in (preferred, other) if index < len(family))
+    return ordered
+
+
+class Race:
+    """Concurrent connection attempts. The first stream wins; later streams are closed."""
+
+    def __init__(self) -> None:
+        self._changed = threading.Condition()
+        self._running = 0
+        self._settled = False
+        self.winner: httpcore2.NetworkStream | None = None
+        self.failure: Exception | None = None
+        self.failures = 0
+
+    def start(self, connect: Callable[[], httpcore2.NetworkStream]) -> None:
+        with self._changed:
+            self._running += 1
+        threading.Thread(
+            target=self._attempt, args=(connect,), name="proofline-connect", daemon=True
+        ).start()
+
+    def _attempt(self, connect: Callable[[], httpcore2.NetworkStream]) -> None:
+        try:
+            stream = connect()
+        except Exception as error:
+            with self._changed:
+                self._running -= 1
+                self.failure = error
+                self.failures += 1
+                self._changed.notify_all()
+            return
+        with self._changed:
+            self._running -= 1
+            if not self._settled and self.winner is None:
+                self.winner = stream
+                self._changed.notify_all()
+                return
+        # The request already has a connection or stopped waiting for one.
+        stream.close()
+
+    def wait(self, timeout: float | None, *, failures: int | None = None) -> None:
+        """Wait for a winner or for every attempt to fail; or for more than `failures` failures."""
+        with self._changed:
+            self._changed.wait_for(
+                lambda: (
+                    self.winner is not None
+                    or self._running == 0
+                    or (failures is not None and self.failures > failures)
+                ),
+                timeout,
+            )
+
+    def settle(self) -> httpcore2.NetworkStream | None:
+        """Stop accepting streams; a stream that connects later is closed by its attempt."""
+        with self._changed:
+            self._settled = True
+            return self.winner
+
+    @property
+    def running(self) -> int:
+        with self._changed:
+            return self._running
+
+
 class NetworkBackend(httpcore2.SyncBackend):
     def connect_tcp(
         self,
@@ -109,17 +192,51 @@ class NetworkBackend(httpcore2.SyncBackend):
         local_address: str | None = None,
         socket_options: Iterable[Any] | None = None,
     ) -> httpcore2.NetworkStream:
-        failure: httpcore2.ConnectError | httpcore2.ConnectTimeout | None = None
-        for address in resolve(host, port, bounded_timeout(timeout)):
-            try:
-                stream = super().connect_tcp(
-                    address, port, bounded_timeout(timeout), local_address, socket_options
-                )
-            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as error:
-                failure = error
-            else:
-                return NetworkStream(stream)
-        raise failure or httpcore2.ConnectError("The host name did not resolve.")
+        addresses = resolve(host, port, bounded_timeout(timeout))
+        if len(addresses) == 1:
+            stream = super().connect_tcp(
+                addresses[0], port, bounded_timeout(timeout), local_address, socket_options
+            )
+            return NetworkStream(stream)
+        # One address that silently drops packets must not spend the whole request deadline
+        # while the next address would answer, so attempts overlap ATTEMPT_DELAY apart.
+        budget = bounded_timeout(timeout)
+        deadline = None if budget is None else monotonic() + budget
+        options = list(socket_options or ())
+        connect = super().connect_tcp
+        race = Race()
+        failures = 0
+        try:
+            for index, address in enumerate(interleaved(addresses)):
+                if index:
+                    # Start the next attempt after the delay, or as soon as any attempt fails.
+                    race.wait(
+                        ATTEMPT_DELAY
+                        if deadline is None
+                        else min(ATTEMPT_DELAY, deadline - monotonic()),
+                        failures=failures,
+                    )
+                    if race.winner is not None:
+                        break
+                    if deadline is not None and monotonic() >= deadline:
+                        break
+                failures = race.failures
+                remaining = None if deadline is None else max(0.0, deadline - monotonic())
+                race.start(partial(connect, address, port, remaining, local_address, options))
+            while race.winner is None and race.running:
+                if deadline is None:
+                    race.wait(None)
+                elif (left := deadline - monotonic()) > 0:
+                    race.wait(left)
+                else:
+                    break
+        finally:
+            winner = race.settle()
+        if winner is not None:
+            return NetworkStream(winner)
+        if race.running:
+            raise httpcore2.ConnectTimeout("No resolved address connected in time.")
+        raise race.failure or httpcore2.ConnectError("The host name did not resolve.")
 
 
 @contextmanager
