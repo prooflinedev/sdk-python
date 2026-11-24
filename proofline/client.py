@@ -78,7 +78,7 @@ from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
-from .outcomes import ReviewOutcome, outcome
+from .outcomes import ReviewOutcome, _validate, outcome
 
 T = TypeVar("T")
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
@@ -197,6 +197,13 @@ _CANCEL_REASON = "The wait was cancelled by the caller."
 
 def _cancelled(event: threading.Event | AsyncEvent | None) -> bool:
     return event is not None and event.is_set()
+
+
+def _stopped(url: str, last: CustomerReviewDetail | None, review_id: UUID) -> ReviewOutcome:
+    """Build a STOPPED outcome, validating any review it carries."""
+    if last is not None:
+        _validate(last, review_id)
+    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
 
 
 def _wait_for_event(event: threading.Event, timeout: float) -> bool:
@@ -621,8 +628,10 @@ class ProoflineClient(Operations):
         another head ends the wait on that read and is never COMPLETED.
 
         cancel_event stops the wait before another request. It is checked before
-        each poll, during the backoff, and after each read; an in-flight read is
-        not interrupted and finishes within the client's HTTP timeout.
+        each poll, during the backoff, and after each read. An in-flight read is
+        not interrupted: cancellation waits for that read to finish, including
+        transport retries and their delays. Those delays count toward the overall
+        wait deadline rather than a single HTTP timeout.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
@@ -632,7 +641,7 @@ class ProoflineClient(Operations):
             raise TypeError("cancel_event must be a threading.Event.")
         url = _review_url(self._base_url, organization_id, review_id)
         if _cancelled(cancel_event):
-            return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
+            return _stopped(url, None, review_id)
         last: CustomerReviewDetail | None = None
         deadline_at = monotonic() + timeout
         deadline = _transport.DEADLINE.set(deadline_at)
@@ -640,17 +649,17 @@ class ProoflineClient(Operations):
         try:
             while (_transport.remaining() or 0) > 0:
                 if _cancelled(cancel_event):
-                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                    return _stopped(url, last, review_id)
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
                     if _cancelled(cancel_event):
-                        return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                        return _stopped(url, last, review_id)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
                 if _cancelled(cancel_event):
-                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                    return _stopped(url, last, review_id)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
@@ -658,10 +667,10 @@ class ProoflineClient(Operations):
                     return result
                 remaining = _transport.remaining() or 0
                 if not _sleep_with_cancel(min(interval, remaining), cancel_event, deadline_at):
-                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                    return _stopped(url, last, review_id)
                 interval = min(60, interval * 2)
             if _cancelled(cancel_event):
-                return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                return _stopped(url, last, review_id)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
@@ -1034,7 +1043,7 @@ class AsyncProoflineClient(AsyncOperations):
             raise TypeError("cancel_event must be an asyncio.Event.")
         url = _review_url(self._base_url, organization_id, review_id)
         if _cancelled(cancel_event):
-            return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
+            return _stopped(url, None, review_id)
         last: CustomerReviewDetail | None = None
         deadline_at = monotonic() + timeout
         deadline = _transport.DEADLINE.set(deadline_at)
@@ -1042,17 +1051,17 @@ class AsyncProoflineClient(AsyncOperations):
         try:
             while (_transport.remaining() or 0) > 0:
                 if _cancelled(cancel_event):
-                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                    return _stopped(url, last, review_id)
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
                     if _cancelled(cancel_event):
-                        return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                        return _stopped(url, last, review_id)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
                 if _cancelled(cancel_event):
-                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                    return _stopped(url, last, review_id)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
@@ -1062,10 +1071,10 @@ class AsyncProoflineClient(AsyncOperations):
                 if not await _async_sleep_with_cancel(
                     min(interval, remaining), cancel_event, deadline_at
                 ):
-                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                    return _stopped(url, last, review_id)
                 interval = min(60, interval * 2)
             if _cancelled(cancel_event):
-                return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+                return _stopped(url, last, review_id)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:

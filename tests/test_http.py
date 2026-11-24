@@ -1445,22 +1445,48 @@ async def test_wait_for_review_cancel_event_stops_before_any_request(
 
 
 @MODES
-async def test_wait_for_review_cancel_event_wakes_real_backoff(mode: str) -> None:
+async def test_wait_for_review_cancel_event_wakes_real_backoff(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     body = review("RUNNING")
     body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
     thread: threading.Thread | None = None
+    task: asyncio.Task[None] | None = None
+    entered: Any
+
     if mode == "sync":
         event: Any = threading.Event()
+        entered = threading.Event()
+        real_wait = client_module._wait_for_event
+
+        def wait_for_event(wait_event: Any, timeout: float) -> bool:
+            entered.set()
+            return real_wait(wait_event, timeout)
+
+        monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
 
         def set_event() -> None:
-            time.sleep(0.05)
+            assert entered.wait(2.0)
             event.set()
 
         thread = threading.Thread(target=set_event, daemon=True)
         thread.start()
     else:
         event = asyncio.Event()
-        asyncio.get_running_loop().call_later(0.05, event.set)
+        entered = asyncio.Event()
+        real_async_wait = client_module._async_wait_for_event
+
+        async def async_wait_for_event(wait_event: Any, timeout: float) -> bool:
+            entered.set()
+            return await real_async_wait(wait_event, timeout)
+
+        monkeypatch.setattr(client_module, "_async_wait_for_event", async_wait_for_event)
+
+        async def set_event() -> None:
+            await asyncio.wait_for(entered.wait(), 2.0)
+            event.set()
+
+        task = asyncio.create_task(set_event())
 
     started = time.monotonic()
     try:
@@ -1473,8 +1499,11 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(mode: str) -> Non
     finally:
         if thread is not None:
             thread.join()
+        if task is not None:
+            task.cancel()
     elapsed = time.monotonic() - started
 
+    assert entered.is_set()
     assert elapsed < 2.0
     assert result.status == "STOPPED"
     assert result.reason == "The wait was cancelled by the caller."
@@ -1505,6 +1534,33 @@ async def test_wait_for_review_cancel_event_stops_after_the_read_that_saw_it(
     assert result.status == "STOPPED"
     assert result.review.id == REVIEW
     assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_review_cancelled_read_rejects_wrong_review_id(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    loop = asyncio.get_running_loop() if mode == "async" else None
+    body = review("RUNNING")
+    body["id"] = str(UUID(int=1))
+    body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+
+    def respond(request: Request, index: int) -> Reply:
+        if loop is None:
+            event.set()
+        else:
+            loop.call_soon_threadsafe(event.set)
+        return Reply(body=body)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event)
+            assert raised.value.type == "urn:proofline:sdk:invalid-response"
+            assert "invalid identity" in raised.value.detail
+            assert len(server.requests) == 1
 
 
 @MODES
