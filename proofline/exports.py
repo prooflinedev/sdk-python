@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-import httpx
+import httpx2
 
-from ._transport import ProoflineError
+from ._csv import parse_csv
+from ._transport import MAX_RESPONSE_BYTES, ProoflineError
 
 ExportDataset = Literal["reviews", "finding_outcomes", "finding_validations", "spend", "findings"]
 ExportFormat = Literal["csv", "ndjson"]
+
+# Version 2 of the finding datasets adds code-lane rows. Version 1 stays accepted from servers
+# that have not moved to version 2.
+_VERSIONS: dict[str, tuple[str, ...]] = {"findings": ("1", "2"), "finding_validations": ("1", "2")}
 
 
 @dataclass(frozen=True)
@@ -27,12 +30,16 @@ class ExportPage:
     next_cursor: str | None
 
 
-def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
+def decode_export(
+    response: httpx2.Response, format: ExportFormat, dataset: ExportDataset
+) -> ExportPage:
     try:
+        if len(response.content) > MAX_RESPONSE_BYTES:
+            raise ValueError
         media = "text/csv" if format == "csv" else "application/x-ndjson"
-        if (
-            response.headers.get("content-type", "").split(";")[0].strip() != media
-            or response.headers.get("x-proofline-export-version") != "1"
+        version = response.headers.get("x-proofline-export-version")
+        if response.headers.get("content-type", "").split(";")[0].strip().lower() != media or (
+            version not in _VERSIONS.get(dataset, ("1",))
         ):
             raise ValueError
         horizon = response.headers["x-proofline-export-settled-until"]
@@ -40,7 +47,7 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
             raise ValueError
         text = response.content.decode("utf-8")
         if format == "csv":
-            records = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+            records = parse_csv(text)
             columns = records.pop(0)
             if len(set(columns)) != len(columns) or any(
                 len(row) != len(columns) for row in records
@@ -48,13 +55,20 @@ def decode_export(response: httpx.Response, format: ExportFormat) -> ExportPage:
                 raise ValueError
             rows = [dict(zip(columns, row, strict=True)) for row in records]
         else:
-            rows = [json.loads(line) for line in text.splitlines() if line.strip()]
-        if any(not isinstance(row, dict) or str(row.get("dataset_version")) != "1" for row in rows):
+            rows = [json.loads(line) for line in text.split("\n") if line.strip()]
+        if any(
+            not isinstance(row, dict) or str(row.get("dataset_version")) != version for row in rows
+        ):
             raise ValueError
         return ExportPage(
-            format, text, rows, 1, horizon, response.headers.get("x-proofline-export-next-cursor")
+            format,
+            text,
+            rows,
+            int(version),
+            horizon,
+            response.headers.get("x-proofline-export-next-cursor"),
         )
-    except (ValueError, KeyError, IndexError, UnicodeError, csv.Error):
+    except (ValueError, KeyError, IndexError, UnicodeError):
         raise ProoflineError(
             response.status_code,
             "urn:proofline:sdk:invalid-response",

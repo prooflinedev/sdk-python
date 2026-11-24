@@ -31,11 +31,13 @@ class FindingOutcomesExportRow:
         from_ (datetime.datetime): The inclusive start of the requested first-publication window.
         group_by (FindingOutcomesGroupBy):
         key (str): The grouping value: a repository or environment ID, a risk domain, a severity or a
-             review kind, as `group_by` selects.
+             review kind, as `group_by` selects. Grouped by environment, code-lane findings, which
+             belong to no environment, share the key `code_review`.
         limitations (list[str]): Gaps in publication history that keep findings outside these counts; they mean
              missing history, not zero findings.
         name (str): The group's display name: the repository's full name (or `Repository` and its ID when
-             no name is recorded), the environment's display name, or otherwise `key`.
+             no name is recorded), the environment's display name (`Code review` for the code-lane
+             group), or otherwise `key`.
         organization_id (UUID): The organization whose findings are counted.
         outcomes (list[FindingOutcomesOutcomeCount]): One count per outcome, always all six `FindingOutcomesOutcome`
             values in a fixed order.
@@ -114,12 +116,8 @@ class FindingOutcomesExportRow:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.finding_outcomes_count import FindingOutcomesCount  # noqa: PLC0415
-        from ..models.finding_outcomes_outcome_count import (
-            FindingOutcomesOutcomeCount,  # noqa: PLC0415
-        )
-        from ..models.finding_outcomes_post_merge_counts import (
-            FindingOutcomesPostMergeCounts,  # noqa: PLC0415
-        )
+        from ..models.finding_outcomes_outcome_count import FindingOutcomesOutcomeCount  # noqa: PLC0415
+        from ..models.finding_outcomes_post_merge_counts import FindingOutcomesPostMergeCounts  # noqa: PLC0415
 
         d = dict(src_dict)
         code_changed = FindingOutcomesCount.from_dict(d.pop("code_changed"))

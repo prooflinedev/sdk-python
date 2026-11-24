@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..models.rule_source import RuleSource
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.finding_rule_incident_view import FindingRuleIncidentView
+
 
 T = TypeVar("T", bound="FindingRuleRevisionView")
 
@@ -19,14 +23,19 @@ class FindingRuleRevisionView:
         scope (str): `ORGANIZATION`, `ENVIRONMENT`, `TEAM` or `REPOSITORY`.
         source (RuleSource):
         revision (int | None | Unset): The console revision. Null for a configuration-file or implicit rule.
+        incident (FindingRuleIncidentView | None | Unset): The incident a prevention rule came from. Absent for every
+            other rule.
     """
 
     scope: str
     source: RuleSource
     revision: int | None | Unset = UNSET
+    incident: FindingRuleIncidentView | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.finding_rule_incident_view import FindingRuleIncidentView  # noqa: PLC0415
+
         scope = self.scope
 
         source = self.source.value
@@ -36,6 +45,14 @@ class FindingRuleRevisionView:
             revision = UNSET
         else:
             revision = self.revision
+
+        incident: dict[str, Any] | None | Unset
+        if isinstance(self.incident, Unset):
+            incident = UNSET
+        elif isinstance(self.incident, FindingRuleIncidentView):
+            incident = self.incident.to_dict()
+        else:
+            incident = self.incident
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -47,11 +64,15 @@ class FindingRuleRevisionView:
         )
         if revision is not UNSET:
             field_dict["revision"] = revision
+        if incident is not UNSET:
+            field_dict["incident"] = incident
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.finding_rule_incident_view import FindingRuleIncidentView  # noqa: PLC0415
+
         d = dict(src_dict)
         scope = d.pop("scope")
 
@@ -66,10 +87,28 @@ class FindingRuleRevisionView:
 
         revision = _parse_revision(d.pop("revision", UNSET))
 
+        def _parse_incident(data: object) -> FindingRuleIncidentView | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                incident_type_0 = FindingRuleIncidentView.from_dict(data)
+
+                return incident_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(FindingRuleIncidentView | None | Unset, data)
+
+        incident = _parse_incident(d.pop("incident", UNSET))
+
         finding_rule_revision_view = cls(
             scope=scope,
             source=source,
             revision=revision,
+            incident=incident,
         )
 
         finding_rule_revision_view.additional_properties = d

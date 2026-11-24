@@ -44,8 +44,9 @@ class CustomerCodeAssessment:
                 `POLICY_EXCLUDED`, `EVIDENCE_UNAVAILABLE`, `HYPOTHESES_UNRESOLVED` or
                 `MODEL_BUDGET_EXHAUSTED`. Null otherwise.
            reason_codes (list[str] | None | Unset): Public causes of an `INCOMPLETE` code assessment: `OUT_OF_CREDITS`
-                when credits refused its model. Absent otherwise; other recorded
-                details stay private.
+                when credits refused its model, and `MODEL_ANSWER_WITHHELD` when the
+                credential mask withheld its model's answer after the source was read.
+                Absent otherwise; other recorded details stay private.
            started_at (datetime.datetime | None | Unset): When the code assessment started. Null until it starts.
     """
 

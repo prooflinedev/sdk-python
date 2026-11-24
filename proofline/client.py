@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
 from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
 from urllib.parse import quote
 from uuid import UUID
 
-import httpx
+import httpx2
 from anyio import sleep as async_sleep
 from pydantic import SecretStr
 
@@ -104,6 +105,7 @@ _REVIEW_ROUTING_MODELS: _ReviewRoutingModels = (
 
 class ReviewFilters(TypedDict, total=False):
     attention: str | None
+    audits: str | None
     author: str | None
     cursor: str | None
     environment: UUID | None
@@ -133,7 +135,7 @@ def _configuration(
     return AuthenticatedClient(
         base_url=_transport.base_url(base_url),
         token=_transport.token_value(token),
-        timeout=httpx.Timeout(timeout),
+        timeout=httpx2.Timeout(timeout),
     )
 
 
@@ -149,6 +151,16 @@ def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
         raise ValueError(
             "Pagination requires page_size 1..100, max_pages 1..1000, max_items 1..100000."
         )
+
+
+def _head_commit(value: str | None) -> None:
+    # Only a full SHA names one exact commit; a branch or an abbreviation does not.
+    if value is not None and (
+        not isinstance(value, str)
+        or len(value) not in (40, 64)
+        or any(character not in hexdigits for character in value)
+    ):
+        raise ValueError("The head commit must be a full 40 or 64 character hexadecimal SHA.")
 
 
 def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
@@ -169,10 +181,31 @@ def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
     return cursor
 
 
-def _pagination_limit() -> ProoflineError:
+def _pagination_limit(resource: str = "Review") -> ProoflineError:
     return ProoflineError(
-        0, "urn:proofline:sdk:pagination-limit", "Review pagination reached the configured bound."
+        0,
+        "urn:proofline:sdk:pagination-limit",
+        f"{resource} pagination reached the configured bound.",
     )
+
+
+def _export_page_limit(max_pages: int) -> None:
+    if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= 1_000:
+        raise ValueError("Export pagination requires max_pages 1..1000.")
+
+
+def _export_next_cursor(page: ExportPage, seen: set[str]) -> str | None:
+    cursor = page.next_cursor
+    if cursor is None:
+        return None
+    if not cursor or cursor in seen:
+        raise ProoflineError(
+            0,
+            "urn:proofline:sdk:invalid-pagination",
+            "The export page has no new continuation cursor.",
+        )
+    seen.add(cursor)
+    return cursor
 
 
 class ProoflineClient(Operations):
@@ -191,14 +224,14 @@ class ProoflineClient(Operations):
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
-        self._http = httpx.Client(
+        self._http = httpx2.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
             headers={
                 "User-Agent": f"proofline-python/{_transport.VERSION}",
                 "Accept-Encoding": "identity",
             },
-            timeout=httpx.Timeout(timeout),
+            timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
             transport=_transport.RetryTransport(self._api.token, timeout),
@@ -268,9 +301,40 @@ class ProoflineClient(Operations):
                 params=params,
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )
-            return decode_export(response, format)
-        except httpx.HTTPError as error:
+            return decode_export(response, format, dataset)
+        except httpx2.HTTPError as error:
             raise _transport.network_error(error) from None
+
+    def iter_export_pages(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+        max_pages: int = 100,
+    ) -> Iterator[ExportPage]:
+        """Stream export pages, refusing cursor cycles and incomplete bounded traversals."""
+        _export_page_limit(max_pages)
+        seen = {cursor} if cursor is not None else set()
+        for _ in range(max_pages):
+            page = self.export_reviews(
+                organization_id,
+                dataset,
+                from_time=from_time,
+                to_time=to_time,
+                format=format,
+                cursor=cursor,
+                group_by=group_by,
+            )
+            cursor = _export_next_cursor(page, seen)
+            yield page
+            if cursor is None:
+                return
+        raise _pagination_limit("Export")
 
     def list_reviews(self, organization_id: UUID, **filters: Unpack[ReviewFilters]) -> ReviewPage:
         return self._call(list_reviews.sync_detailed, ReviewPage, organization_id, **filters)
@@ -476,16 +540,25 @@ class ProoflineClient(Operations):
         raise _pagination_limit()
 
     def wait_for_review(
-        self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        timeout: float = 300,
+        head_commit_sha: str | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
         A name lookup still running at the deadline returns TIMED_OUT; it never
         reports completion.
+
+        head_commit_sha holds the outcome to that commit. A review pinned to
+        another head ends the wait on that read and is never COMPLETED.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
+        _head_commit(head_commit_sha)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -500,12 +573,13 @@ class ProoflineClient(Operations):
                     raise
                 if (_transport.remaining() or 0) <= 0:
                     break
-                result = outcome(last, url, review_id=review_id)
+                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
                 sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
-            return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
+            timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
+            return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)
 
@@ -520,14 +594,14 @@ class AsyncProoflineClient(AsyncOperations):
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
-        self._http = httpx.AsyncClient(
+        self._http = httpx2.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
             headers={
                 "User-Agent": f"proofline-python/{_transport.VERSION}",
                 "Accept-Encoding": "identity",
             },
-            timeout=httpx.Timeout(timeout),
+            timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
             transport=_transport.AsyncRetryTransport(self._api.token, timeout),
@@ -597,9 +671,40 @@ class AsyncProoflineClient(AsyncOperations):
                 params=params,
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )
-            return decode_export(response, format)
-        except httpx.HTTPError as error:
+            return decode_export(response, format, dataset)
+        except httpx2.HTTPError as error:
             raise _transport.network_error(error) from None
+
+    async def iter_export_pages(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+        max_pages: int = 100,
+    ) -> AsyncIterator[ExportPage]:
+        """Stream export pages, refusing cursor cycles and incomplete bounded traversals."""
+        _export_page_limit(max_pages)
+        seen = {cursor} if cursor is not None else set()
+        for _ in range(max_pages):
+            page = await self.export_reviews(
+                organization_id,
+                dataset,
+                from_time=from_time,
+                to_time=to_time,
+                format=format,
+                cursor=cursor,
+                group_by=group_by,
+            )
+            cursor = _export_next_cursor(page, seen)
+            yield page
+            if cursor is None:
+                return
+        raise _pagination_limit("Export")
 
     async def list_reviews(
         self, organization_id: UUID, **filters: Unpack[ReviewFilters]
@@ -830,10 +935,16 @@ class AsyncProoflineClient(AsyncOperations):
         raise _pagination_limit()
 
     async def wait_for_review(
-        self, organization_id: UUID, review_id: UUID, *, timeout: float = 300
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        timeout: float = 300,
+        head_commit_sha: str | None = None,
     ) -> ReviewOutcome:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
+        _head_commit(head_commit_sha)
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
@@ -848,11 +959,12 @@ class AsyncProoflineClient(AsyncOperations):
                     raise
                 if (_transport.remaining() or 0) <= 0:
                     break
-                result = outcome(last, url, review_id=review_id)
+                result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
                 await async_sleep(min(interval, _transport.remaining() or 0))
                 interval = min(60, interval * 2)
-            return outcome(last, url, "TIMED_OUT") or ReviewOutcome("TIMED_OUT", url)
+            timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
+            return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)

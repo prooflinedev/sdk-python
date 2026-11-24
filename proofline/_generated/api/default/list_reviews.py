@@ -3,7 +3,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
-import httpx
+import httpx2
 
 from ...client import AuthenticatedClient, Client
 from ...models.problem import Problem
@@ -15,6 +15,7 @@ def _get_kwargs(
     org_id: UUID,
     *,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -26,6 +27,7 @@ def _get_kwargs(
     search: None | str | Unset = UNSET,
     status: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
+
     params: dict[str, Any] = {}
 
     json_attention: None | str | Unset
@@ -34,6 +36,13 @@ def _get_kwargs(
     else:
         json_attention = attention
     params["attention"] = json_attention
+
+    json_audits: None | str | Unset
+    if isinstance(audits, Unset):
+        json_audits = UNSET
+    else:
+        json_audits = audits
+    params["audits"] = json_audits
 
     json_author: None | str | Unset
     if isinstance(author, Unset):
@@ -123,7 +132,7 @@ def _get_kwargs(
 
 
 def _parse_response(
-    *, client: AuthenticatedClient | Client, response: httpx.Response
+    *, client: AuthenticatedClient | Client, response: httpx2.Response
 ) -> Problem | ReviewPage:
     if response.status_code == 200:
         response_200 = ReviewPage.from_dict(response.json())
@@ -136,7 +145,7 @@ def _parse_response(
 
 
 def _build_response(
-    *, client: AuthenticatedClient | Client, response: httpx.Response
+    *, client: AuthenticatedClient | Client, response: httpx2.Response
 ) -> Response[Problem | ReviewPage]:
     return Response(
         status_code=HTTPStatus(response.status_code),
@@ -151,6 +160,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -172,21 +182,31 @@ def sync_detailed(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         Response[Problem | ReviewPage]
@@ -195,6 +215,7 @@ def sync_detailed(
     kwargs = _get_kwargs(
         org_id=org_id,
         attention=attention,
+        audits=audits,
         author=author,
         cursor=cursor,
         environment=environment,
@@ -219,6 +240,7 @@ def sync(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -240,21 +262,31 @@ def sync(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         Problem | ReviewPage
@@ -264,6 +296,7 @@ def sync(
         org_id=org_id,
         client=client,
         attention=attention,
+        audits=audits,
         author=author,
         cursor=cursor,
         environment=environment,
@@ -282,6 +315,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -303,21 +337,31 @@ async def asyncio_detailed(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         Response[Problem | ReviewPage]
@@ -326,6 +370,7 @@ async def asyncio_detailed(
     kwargs = _get_kwargs(
         org_id=org_id,
         attention=attention,
+        audits=audits,
         author=author,
         cursor=cursor,
         environment=environment,
@@ -348,6 +393,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient,
     attention: None | str | Unset = UNSET,
+    audits: None | str | Unset = UNSET,
     author: None | str | Unset = UNSET,
     cursor: None | str | Unset = UNSET,
     environment: None | Unset | UUID = UNSET,
@@ -369,21 +415,31 @@ async def asyncio(
         attention (None | str | Unset): `needed` lists terminal reviews of open pull requests with
             active
              findings, FAILED/INCOMPLETE/STOPPED execution, or an earlier reviewed commit.
-        author (None | str | Unset):
+        audits (None | str | Unset): `only` lists repository audits; `none` leaves them out, so
+             `kind=REVISION_SCAN&audits=none` lists plain revision scans.
+        author (None | str | Unset): `mine` for the caller's own pull requests, or a GitHub user
+            ID. `mine`
+             needs a person's sign-in or token.
         cursor (None | str | Unset):
         environment (None | Unset | UUID):
-        findings (None | str | Unset):
-        kind (None | str | Unset):
+        findings (None | str | Unset): `present` lists reviews with at least one finding; `none`
+            lists reviews
+             with no finding.
+        kind (None | str | Unset): One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`,
+            `COMMIT`,
+             `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.
         limit (int | None | Unset):
         query (None | str | Unset): Qualifiers, quoted values, AND/OR, groups and minus
             exclusions.
         repository (None | Unset | UUID):
         search (None | str | Unset):
-        status (None | str | Unset):
+        status (None | str | Unset): One review status: `PENDING`, `RUNNING`, `COMPLETED`,
+            `INCOMPLETE`,
+             `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         Problem | ReviewPage
@@ -394,6 +450,7 @@ async def asyncio(
             org_id=org_id,
             client=client,
             attention=attention,
+            audits=audits,
             author=author,
             cursor=cursor,
             environment=environment,

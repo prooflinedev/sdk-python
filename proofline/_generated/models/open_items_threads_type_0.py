@@ -19,12 +19,15 @@ class OpenItemsThreadsType0:
         observed_at (datetime.datetime):
         status (Literal['KNOWN']):
         unresolved_count (int):
+        open_finding_threads (int | Unset): The unresolved threads in `unresolved_count` that belong to a
+             finding `open_findings` already counts. Absent when none does.
         unresolved_urls (list[str] | Unset): Root comment URLs for the unresolved Proofline threads in this observation.
     """
 
     observed_at: datetime.datetime
     status: Literal["KNOWN"]
     unresolved_count: int
+    open_finding_threads: int | Unset = UNSET
     unresolved_urls: list[str] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -34,6 +37,8 @@ class OpenItemsThreadsType0:
         status = self.status
 
         unresolved_count = self.unresolved_count
+
+        open_finding_threads = self.open_finding_threads
 
         unresolved_urls: list[str] | Unset = UNSET
         if not isinstance(self.unresolved_urls, Unset):
@@ -48,6 +53,8 @@ class OpenItemsThreadsType0:
                 "unresolved_count": unresolved_count,
             }
         )
+        if open_finding_threads is not UNSET:
+            field_dict["open_finding_threads"] = open_finding_threads
         if unresolved_urls is not UNSET:
             field_dict["unresolved_urls"] = unresolved_urls
 
@@ -64,12 +71,15 @@ class OpenItemsThreadsType0:
 
         unresolved_count = d.pop("unresolved_count")
 
+        open_finding_threads = d.pop("open_finding_threads", UNSET)
+
         unresolved_urls = cast(list[str], d.pop("unresolved_urls", UNSET))
 
         open_items_threads_type_0 = cls(
             observed_at=observed_at,
             status=status,
             unresolved_count=unresolved_count,
+            open_finding_threads=open_finding_threads,
             unresolved_urls=unresolved_urls,
         )
 

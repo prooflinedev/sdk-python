@@ -42,8 +42,19 @@ class ReviewSummary:
             `SUPERSEDED`, `STOPPED` or `EXCLUDED`.
         trigger_origin (str): Who asked for this review: `AUTOMATIC`, `COMMAND`, `RERUN`, `MANUAL`,
              or `UNKNOWN` for a trigger key this build does not recognise.
+        audit_mode (None | str | Unset): The repository audit's mode, `CODE_ONLY` or `INFRASTRUCTURE_AWARE`,
+             when this `REVISION_SCAN` is an audit. An audit's findings are in its
+             audit report, not in `finding_count` or the review's assessments.
+             Null for every other review.
         completed_at (datetime.datetime | None | Unset): When the review reached a terminal status. Absent while it is
             still pending or running.
+        counted_incomplete_causes (list[IncompleteCauseType0 | Literal['OUT_OF_CREDITS'] |
+            Literal['SPEND_LIMIT_REACHED'] | Literal['UNKNOWN']] | Unset): `incomplete_causes` as the Inbox and the reviews
+            `cause:` search
+             count them: `OUT_OF_CREDITS` or `SPEND_LIMIT_REACHED` in place of the
+             `NOT_CONFIGURED` an assessment records when credits or a monthly spend
+             limit refused it. Present exactly when
+             `incomplete_causes` is.
         current_head_commit_sha (None | str | Unset): The pull request's head commit as the latest provider projection
             reports it, which can differ from `head_commit_sha`. Set only on a single-review read, and absent for a
             deployment review or a pull request with no projection.
@@ -75,6 +86,9 @@ class ReviewSummary:
              is the fallback. Display metadata, never identity.
         pull_request_author_url (None | str | Unset): The author's profile on the deployment's GitHub host. Absent when
             no author login is known.
+        pull_request_draft (bool | None | Unset): Whether the pull request is a draft, as provider state last reported
+             it. Display state only: an open draft keeps `pull_request_state` `OPEN`.
+             Absent when `pull_request_state` is.
         pull_request_number (int | None | Unset): The pull request number. Absent for a deployment or patch review.
         pull_request_state (None | str | Unset): Current provider state of the pull request: `OPEN`, `CLOSED`, or
              `MERGED`. Absent for deployment reviews or a missing projection.
@@ -111,7 +125,17 @@ class ReviewSummary:
     publication: str
     status: str
     trigger_origin: str
+    audit_mode: None | str | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
+    counted_incomplete_causes: (
+        list[
+            IncompleteCauseType0
+            | Literal["OUT_OF_CREDITS"]
+            | Literal["SPEND_LIMIT_REACHED"]
+            | Literal["UNKNOWN"]
+        ]
+        | Unset
+    ) = UNSET
     current_head_commit_sha: None | str | Unset = UNSET
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
@@ -123,6 +147,7 @@ class ReviewSummary:
     pull_request_author_login: None | str | Unset = UNSET
     pull_request_author_name: None | str | Unset = UNSET
     pull_request_author_url: None | str | Unset = UNSET
+    pull_request_draft: bool | None | Unset = UNSET
     pull_request_number: int | None | Unset = UNSET
     pull_request_state: None | str | Unset = UNSET
     pull_request_title: None | str | Unset = UNSET
@@ -160,6 +185,12 @@ class ReviewSummary:
 
         trigger_origin = self.trigger_origin
 
+        audit_mode: None | str | Unset
+        if isinstance(self.audit_mode, Unset):
+            audit_mode = UNSET
+        else:
+            audit_mode = self.audit_mode
+
         completed_at: None | str | Unset
         if isinstance(self.completed_at, Unset):
             completed_at = UNSET
@@ -167,6 +198,30 @@ class ReviewSummary:
             completed_at = self.completed_at.isoformat()
         else:
             completed_at = self.completed_at
+
+        counted_incomplete_causes: (
+            list[
+                Literal["OUT_OF_CREDITS"]
+                | Literal["SPEND_LIMIT_REACHED"]
+                | Literal["UNKNOWN"]
+                | str
+            ]
+            | Unset
+        ) = UNSET
+        if not isinstance(self.counted_incomplete_causes, Unset):
+            counted_incomplete_causes = []
+            for counted_incomplete_causes_item_data in self.counted_incomplete_causes:
+                counted_incomplete_causes_item: (
+                    Literal["OUT_OF_CREDITS"]
+                    | Literal["SPEND_LIMIT_REACHED"]
+                    | Literal["UNKNOWN"]
+                    | str
+                )
+                if isinstance(counted_incomplete_causes_item_data, IncompleteCauseType0):
+                    counted_incomplete_causes_item = counted_incomplete_causes_item_data.value
+                else:
+                    counted_incomplete_causes_item = counted_incomplete_causes_item_data
+                counted_incomplete_causes.append(counted_incomplete_causes_item)
 
         current_head_commit_sha: None | str | Unset
         if isinstance(self.current_head_commit_sha, Unset):
@@ -236,6 +291,12 @@ class ReviewSummary:
             pull_request_author_url = UNSET
         else:
             pull_request_author_url = self.pull_request_author_url
+
+        pull_request_draft: bool | None | Unset
+        if isinstance(self.pull_request_draft, Unset):
+            pull_request_draft = UNSET
+        else:
+            pull_request_draft = self.pull_request_draft
 
         pull_request_number: int | None | Unset
         if isinstance(self.pull_request_number, Unset):
@@ -325,8 +386,12 @@ class ReviewSummary:
                 "trigger_origin": trigger_origin,
             }
         )
+        if audit_mode is not UNSET:
+            field_dict["audit_mode"] = audit_mode
         if completed_at is not UNSET:
             field_dict["completed_at"] = completed_at
+        if counted_incomplete_causes is not UNSET:
+            field_dict["counted_incomplete_causes"] = counted_incomplete_causes
         if current_head_commit_sha is not UNSET:
             field_dict["current_head_commit_sha"] = current_head_commit_sha
         if head_commit_sha is not UNSET:
@@ -349,6 +414,8 @@ class ReviewSummary:
             field_dict["pull_request_author_name"] = pull_request_author_name
         if pull_request_author_url is not UNSET:
             field_dict["pull_request_author_url"] = pull_request_author_url
+        if pull_request_draft is not UNSET:
+            field_dict["pull_request_draft"] = pull_request_draft
         if pull_request_number is not UNSET:
             field_dict["pull_request_number"] = pull_request_number
         if pull_request_state is not UNSET:
@@ -400,6 +467,15 @@ class ReviewSummary:
 
         trigger_origin = d.pop("trigger_origin")
 
+        def _parse_audit_mode(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        audit_mode = _parse_audit_mode(d.pop("audit_mode", UNSET))
+
         def _parse_completed_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -416,6 +492,77 @@ class ReviewSummary:
             return cast(datetime.datetime | None | Unset, data)
 
         completed_at = _parse_completed_at(d.pop("completed_at", UNSET))
+
+        _counted_incomplete_causes = d.pop("counted_incomplete_causes", UNSET)
+        counted_incomplete_causes: (
+            list[
+                IncompleteCauseType0
+                | Literal["OUT_OF_CREDITS"]
+                | Literal["SPEND_LIMIT_REACHED"]
+                | Literal["UNKNOWN"]
+            ]
+            | Unset
+        ) = UNSET
+        if _counted_incomplete_causes is not UNSET:
+            counted_incomplete_causes = []
+            for counted_incomplete_causes_item_data in _counted_incomplete_causes:
+
+                def _parse_counted_incomplete_causes_item(
+                    data: object,
+                ) -> (
+                    IncompleteCauseType0
+                    | Literal["OUT_OF_CREDITS"]
+                    | Literal["SPEND_LIMIT_REACHED"]
+                    | Literal["UNKNOWN"]
+                ):
+                    try:
+                        if not isinstance(data, str):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_0 = IncompleteCauseType0(data)
+
+                        return componentsschemas_incomplete_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    try:
+                        if not (type(data) is str and data == "UNKNOWN"):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_1 = cast(Literal["UNKNOWN"], data)
+                        if componentsschemas_incomplete_cause_type_1 != "UNKNOWN":
+                            raise ValueError(
+                                f"/components/schemas/IncompleteCause_type_1 must match const 'UNKNOWN', got '{componentsschemas_incomplete_cause_type_1}'"
+                            )
+                        return componentsschemas_incomplete_cause_type_1
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    try:
+                        if not (type(data) is str and data == "OUT_OF_CREDITS"):
+                            raise TypeError()
+                        componentsschemas_credit_refusal_cause_type_0 = cast(
+                            Literal["OUT_OF_CREDITS"], data
+                        )
+                        if componentsschemas_credit_refusal_cause_type_0 != "OUT_OF_CREDITS":
+                            raise ValueError(
+                                f"/components/schemas/CreditRefusalCause_type_0 must match const 'OUT_OF_CREDITS', got '{componentsschemas_credit_refusal_cause_type_0}'"
+                            )
+                        return componentsschemas_credit_refusal_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not (type(data) is str and data == "SPEND_LIMIT_REACHED"):
+                        raise TypeError()
+                    componentsschemas_credit_refusal_cause_type_1 = cast(
+                        Literal["SPEND_LIMIT_REACHED"], data
+                    )
+                    if componentsschemas_credit_refusal_cause_type_1 != "SPEND_LIMIT_REACHED":
+                        raise ValueError(
+                            f"/components/schemas/CreditRefusalCause_type_1 must match const 'SPEND_LIMIT_REACHED', got '{componentsschemas_credit_refusal_cause_type_1}'"
+                        )
+                    return componentsschemas_credit_refusal_cause_type_1
+
+                counted_incomplete_causes_item = _parse_counted_incomplete_causes_item(
+                    counted_incomplete_causes_item_data
+                )
+
+                counted_incomplete_causes.append(counted_incomplete_causes_item)
 
         def _parse_current_head_commit_sha(data: object) -> None | str | Unset:
             if data is None:
@@ -543,6 +690,15 @@ class ReviewSummary:
         pull_request_author_url = _parse_pull_request_author_url(
             d.pop("pull_request_author_url", UNSET)
         )
+
+        def _parse_pull_request_draft(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        pull_request_draft = _parse_pull_request_draft(d.pop("pull_request_draft", UNSET))
 
         def _parse_pull_request_number(data: object) -> int | None | Unset:
             if data is None:
@@ -678,7 +834,9 @@ class ReviewSummary:
             publication=publication,
             status=status,
             trigger_origin=trigger_origin,
+            audit_mode=audit_mode,
             completed_at=completed_at,
+            counted_incomplete_causes=counted_incomplete_causes,
             current_head_commit_sha=current_head_commit_sha,
             head_commit_sha=head_commit_sha,
             head_commit_url=head_commit_url,
@@ -690,6 +848,7 @@ class ReviewSummary:
             pull_request_author_login=pull_request_author_login,
             pull_request_author_name=pull_request_author_name,
             pull_request_author_url=pull_request_author_url,
+            pull_request_draft=pull_request_draft,
             pull_request_number=pull_request_number,
             pull_request_state=pull_request_state,
             pull_request_title=pull_request_title,

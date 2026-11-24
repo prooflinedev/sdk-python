@@ -3,6 +3,7 @@
 from .action_unavailability import ActionUnavailability
 from .actor_view import ActorView
 from .agent_session import AgentSession
+from .agent_session_connection import AgentSessionConnection
 from .agent_session_prompt_type_0 import AgentSessionPromptType0
 from .agent_session_prompt_type_1 import AgentSessionPromptType1
 from .agent_session_target import AgentSessionTarget
@@ -22,8 +23,12 @@ from .comment_address_evaluation_view import CommentAddressEvaluationView
 from .comment_address_outcome import CommentAddressOutcome
 from .comment_reaction import CommentReaction
 from .comment_reaction_view import CommentReactionView
+from .commit_deploy import CommitDeploy
+from .commit_deploy_rollback import CommitDeployRollback
+from .commit_deploy_verifications import CommitDeployVerifications
 from .commit_review_request import CommitReviewRequest
 from .commit_review_response import CommitReviewResponse
+from .commit_rollback_deploy import CommitRollbackDeploy
 from .coverage_refused import CoverageRefused
 from .coverage_upload_request import CoverageUploadRequest
 from .coverage_upload_response import CoverageUploadResponse
@@ -39,6 +44,8 @@ from .customer_review_detail import CustomerReviewDetail
 from .dataset import Dataset
 from .deep_review_escalation import DeepReviewEscalation
 from .deep_review_escalation_status import DeepReviewEscalationStatus
+from .deploy_checkpoint import DeployCheckpoint
+from .deploy_coverage_checkpoint import DeployCoverageCheckpoint
 from .domain_view import DomainView
 from .earlier_open_finding import EarlierOpenFinding
 from .environment_check import EnvironmentCheck
@@ -75,6 +82,7 @@ from .finding_outcomes_selector import FindingOutcomesSelector
 from .finding_outcomes_validation_sources import FindingOutcomesValidationSources
 from .finding_placement_view import FindingPlacementView
 from .finding_promotion_view import FindingPromotionView
+from .finding_rule_incident_view import FindingRuleIncidentView
 from .finding_rule_ref_view import FindingRuleRefView
 from .finding_rule_revision_view import FindingRuleRevisionView
 from .finding_support import FindingSupport
@@ -82,9 +90,12 @@ from .finding_validations_export_row import FindingValidationsExportRow
 from .findings_export_row import FindingsExportRow
 from .gate_status import GateStatus
 from .incomplete_cause_type_0 import IncompleteCauseType0
+from .linked_issue_capture import LinkedIssueCapture
 from .local_reverification import LocalReverification
 from .local_reverification_outcome import LocalReverificationOutcome
+from .local_stored_check import LocalStoredCheck
 from .matched_local_finding import MatchedLocalFinding
+from .model_warning import ModelWarning
 from .not_assessed_view import NotAssessedView
 from .open_finding_counts import OpenFindingCounts
 from .open_item_environment import OpenItemEnvironment
@@ -108,6 +119,7 @@ from .prose_outcome_type_0 import ProseOutcomeType0
 from .provider_wait import ProviderWait
 from .provider_wait_reason import ProviderWaitReason
 from .pull_request_merge_gate import PullRequestMergeGate
+from .questions_unavailable_reason import QuestionsUnavailableReason
 from .refresh_view import RefreshView
 from .refused_environment import RefusedEnvironment
 from .related_review import RelatedReview
@@ -116,11 +128,15 @@ from .repository_name import RepositoryName
 from .repository_names import RepositoryNames
 from .rerun_response import RerunResponse
 from .review_actions import ReviewActions
+from .review_cost_funding import ReviewCostFunding
 from .review_depth import ReviewDepth
 from .review_diff_stats import ReviewDiffStats
 from .review_filters import ReviewFilters
+from .review_investigation_citation import ReviewInvestigationCitation
+from .review_investigation_finding import ReviewInvestigationFinding
 from .review_open_items import ReviewOpenItems
 from .review_page import ReviewPage
+from .review_requirement_target import ReviewRequirementTarget
 from .review_routing_view_type_0 import ReviewRoutingViewType0
 from .review_routing_view_type_1 import ReviewRoutingViewType1
 from .review_routing_view_type_2 import ReviewRoutingViewType2
@@ -142,14 +158,19 @@ from .run_now_refusal_view_type_9 import RunNowRefusalViewType9
 from .run_now_refused import RunNowRefused
 from .run_now_request import RunNowRequest
 from .run_now_response import RunNowResponse
+from .run_progress import RunProgress
 from .scan_request_body import ScanRequestBody
 from .scan_response import ScanResponse
 from .spend_account_kind import SpendAccountKind
 from .spend_export_row import SpendExportRow
 from .start_session import StartSession
 from .stop_response import StopResponse
+from .stored_check_outcome import StoredCheckOutcome
+from .stored_check_result import StoredCheckResult
+from .stored_check_result_source import StoredCheckResultSource
 from .subject_authorization import SubjectAuthorization
 from .subject_view import SubjectView
+from .submitted_review import SubmittedReview
 from .summary_route import SummaryRoute
 from .thread_observation_freshness import ThreadObservationFreshness
 from .thread_observation_view import ThreadObservationView
@@ -165,6 +186,7 @@ __all__ = (
     "ActionUnavailability",
     "ActorView",
     "AgentSession",
+    "AgentSessionConnection",
     "AgentSessionPromptType0",
     "AgentSessionPromptType1",
     "AgentSessionTarget",
@@ -184,8 +206,12 @@ __all__ = (
     "CommentAddressOutcome",
     "CommentReaction",
     "CommentReactionView",
+    "CommitDeploy",
+    "CommitDeployRollback",
+    "CommitDeployVerifications",
     "CommitReviewRequest",
     "CommitReviewResponse",
+    "CommitRollbackDeploy",
     "CoverageRefused",
     "CoverageUploadRequest",
     "CoverageUploadResponse",
@@ -201,6 +227,8 @@ __all__ = (
     "Dataset",
     "DeepReviewEscalation",
     "DeepReviewEscalationStatus",
+    "DeployCheckpoint",
+    "DeployCoverageCheckpoint",
     "DomainView",
     "EarlierOpenFinding",
     "EnvironmentCheck",
@@ -237,6 +265,7 @@ __all__ = (
     "FindingOutcomesValidationSources",
     "FindingPlacementView",
     "FindingPromotionView",
+    "FindingRuleIncidentView",
     "FindingRuleRefView",
     "FindingRuleRevisionView",
     "FindingsExportRow",
@@ -244,9 +273,12 @@ __all__ = (
     "FindingValidationsExportRow",
     "GateStatus",
     "IncompleteCauseType0",
+    "LinkedIssueCapture",
     "LocalReverification",
     "LocalReverificationOutcome",
+    "LocalStoredCheck",
     "MatchedLocalFinding",
+    "ModelWarning",
     "NotAssessedView",
     "OpenFindingCounts",
     "OpenItemEnvironment",
@@ -270,6 +302,7 @@ __all__ = (
     "ProviderWait",
     "ProviderWaitReason",
     "PullRequestMergeGate",
+    "QuestionsUnavailableReason",
     "RefreshView",
     "RefusedEnvironment",
     "RelatedReview",
@@ -278,11 +311,15 @@ __all__ = (
     "RepositoryNames",
     "RerunResponse",
     "ReviewActions",
+    "ReviewCostFunding",
     "ReviewDepth",
     "ReviewDiffStats",
     "ReviewFilters",
+    "ReviewInvestigationCitation",
+    "ReviewInvestigationFinding",
     "ReviewOpenItems",
     "ReviewPage",
+    "ReviewRequirementTarget",
     "ReviewRoutingViewType0",
     "ReviewRoutingViewType1",
     "ReviewRoutingViewType2",
@@ -304,14 +341,19 @@ __all__ = (
     "RunNowRefused",
     "RunNowRequest",
     "RunNowResponse",
+    "RunProgress",
     "ScanRequestBody",
     "ScanResponse",
     "SpendAccountKind",
     "SpendExportRow",
     "StartSession",
     "StopResponse",
+    "StoredCheckOutcome",
+    "StoredCheckResult",
+    "StoredCheckResultSource",
     "SubjectAuthorization",
     "SubjectView",
+    "SubmittedReview",
     "SummaryRoute",
     "ThreadObservationFreshness",
     "ThreadObservationView",

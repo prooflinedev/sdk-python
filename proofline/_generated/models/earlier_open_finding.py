@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
+
+from ..types import UNSET, Unset
 
 T = TypeVar("T", bound="EarlierOpenFinding")
 
@@ -20,6 +22,9 @@ class EarlierOpenFinding:
         review_id (UUID): The first published review containing this occurrence.
         run_number (int): The earlier pull-request run that contains this occurrence.
         severity (str): Severity used by the series count; the linked occurrence may be less severe.
+        title (None | str | Unset): The linked occurrence's title, which heads the series' GitHub thread.
+             Absent when the occurrence has none or its review withheld a value
+             from it, so no text that review kept off GitHub is shown here.
     """
 
     finding_id: UUID
@@ -27,6 +32,7 @@ class EarlierOpenFinding:
     review_id: UUID
     run_number: int
     severity: str
+    title: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -40,6 +46,12 @@ class EarlierOpenFinding:
 
         severity = self.severity
 
+        title: None | str | Unset
+        if isinstance(self.title, Unset):
+            title = UNSET
+        else:
+            title = self.title
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -51,6 +63,8 @@ class EarlierOpenFinding:
                 "severity": severity,
             }
         )
+        if title is not UNSET:
+            field_dict["title"] = title
 
         return field_dict
 
@@ -67,12 +81,22 @@ class EarlierOpenFinding:
 
         severity = d.pop("severity")
 
+        def _parse_title(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        title = _parse_title(d.pop("title", UNSET))
+
         earlier_open_finding = cls(
             finding_id=finding_id,
             finding_series_id=finding_series_id,
             review_id=review_id,
             run_number=run_number,
             severity=severity,
+            title=title,
         )
 
         earlier_open_finding.additional_properties = d

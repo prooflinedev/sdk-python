@@ -22,6 +22,13 @@
             "description": "The login they were known by when they acted. Display metadata.",
             "type": "string"
           },
+          "name": {
+            "description": "Profile name resolved for this organization. Display metadata only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "profile_url": {
             "description": "Their profile on the deployment's GitHub host.",
             "type": [
@@ -161,10 +168,40 @@
         ],
         "type": "object"
       },
+      "AgentSessionConnection": {
+        "description": "A vendor connection a session on the previewed target may use.",
+        "properties": {
+          "id": {
+            "description": "The connection's ID, which a start names as `connection_id`.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "vendor": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AgentVendor"
+              }
+            ],
+            "description": "The coding-agent vendor."
+          }
+        },
+        "required": [
+          "id",
+          "vendor"
+        ],
+        "type": "object"
+      },
       "AgentSessionPrompt": {
         "oneOf": [
           {
             "properties": {
+              "connections": {
+                "description": "The organization's active vendor connections that allowlist the\n target repository; absent when none does. A start names one of\n them as `connection_id`.",
+                "items": {
+                  "$ref": "#/components/schemas/AgentSessionConnection"
+                },
+                "type": "array"
+              },
               "prompt_digest": {
                 "description": "SHA-256 of `untrusted_text`. A start names it, so the session\n sends what the person confirmed.",
                 "type": "string"
@@ -761,6 +798,159 @@
         ],
         "type": "object"
       },
+      "CommitDeploy": {
+        "description": "One deploy of the commit and where its verification stands.",
+        "properties": {
+          "checkpoints": {
+            "description": "The four checks in order, each with its recorded result, if any, and\n when a missing one becomes overdue. Empty when no verification of\n the deploy exists.",
+            "items": {
+              "$ref": "#/components/schemas/DeployCoverageCheckpoint"
+            },
+            "type": "array"
+          },
+          "deploy_url": {
+            "description": "The deploy's console page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deployment_task": {
+            "description": "The GitHub deployment's task, such as `deploy` or `deploy:web`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environment_id": {
+            "description": "The Proofline environment that holds the deploy.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "gaps": {
+            "description": "What the checks that leave the deploy unproven name.",
+            "items": {
+              "$ref": "#/components/schemas/DeployVerificationGap"
+            },
+            "type": "array"
+          },
+          "github_environment": {
+            "description": "The GitHub Environment the deployment named.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "regressed": {
+            "description": "Whether any check recorded `REGRESSED`, whatever its gaps.",
+            "type": "boolean"
+          },
+          "rollback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommitDeployRollback"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present when the deploy is a rollback: the previous deploy of the same\n task ran a commit that a recorded merge into this commit's branch made\n after this commit, as the deploy's console page reads it. Absent for a\n forward deploy and when either merge is unrecorded."
+          },
+          "rolled_back": {
+            "default": false,
+            "description": "Whether the deploy's newest recorded check found its service serving\n an earlier deploy again, as its console page reads it. A later check\n that finds none clears it, while `regressed` keeps an earlier\n regression. Older responses omit it, which reads as false.",
+            "type": "boolean"
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DeployCoverageState"
+              }
+            ],
+            "description": "Where the deploy's verification stands."
+          },
+          "workflow_run_attempt": {
+            "description": "The attempt of that run that created the deployment addressing the\n deploy; above 1 for a rerun.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workflow_run_attempts": {
+            "description": "Each distinct attempt of that run that created one of the deploy's\n deployments, ascending. A retry of a job that failed belongs to the\n deploy it retried, and a re-run of a job that had already landed is a\n deploy of its own. Absent outside Actions and when no recorded\n deployment of the deploy names its attempt.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "workflow_run_id": {
+            "description": "The Actions run that created the deploy's deployments; absent outside\n Actions.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "environment_id",
+          "state",
+          "regressed",
+          "checkpoints",
+          "gaps"
+        ],
+        "type": "object"
+      },
+      "CommitDeployRollback": {
+        "description": "What a rollback deploy rolled back, and what it restored.",
+        "properties": {
+          "restores": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommitRollbackDeploy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The latest earlier deploy of this commit by the same task, before the\n deploys this one rolls back, within 30 days. Absent when the ledger\n holds none."
+          },
+          "rolls_back": {
+            "description": "Each deploy of the same task that landed a commit merged into this\n commit's branch after it, after `restores` and before this deploy,\n newest first.",
+            "items": {
+              "$ref": "#/components/schemas/CommitRollbackDeploy"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rolls_back"
+        ],
+        "type": "object"
+      },
+      "CommitDeployVerifications": {
+        "description": "The deploys of one commit that Proofline recorded, across the\n organization's environments.",
+        "properties": {
+          "deploys": {
+            "description": "Each recorded deploy, earliest landing first.",
+            "items": {
+              "$ref": "#/components/schemas/CommitDeploy"
+            },
+            "type": "array"
+          },
+          "recorded": {
+            "description": "Whether the ledger holds any deploy of the commit. `false` says only\n that none was recorded, never anything about a deploy.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "recorded",
+          "deploys"
+        ],
+        "type": "object"
+      },
       "CommitReviewRequest": {
         "additionalProperties": false,
         "description": "Pushed commits to review: the exact base the change is compared with and\n the exact head it ends at.",
@@ -798,6 +988,43 @@
           "existing"
         ],
         "type": "object"
+      },
+      "CommitRollbackDeploy": {
+        "description": "One deploy a rollback names.",
+        "properties": {
+          "commit_sha": {
+            "description": "The commit that deploy ran.",
+            "type": "string"
+          },
+          "deploy_url": {
+            "description": "The deploy's console page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "landed_at": {
+            "description": "When its last deployment first succeeded, or its AWS run ended.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit_sha",
+          "landed_at"
+        ],
+        "type": "object"
+      },
+      "CountedCause": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/IncompleteCause"
+          },
+          {
+            "$ref": "#/components/schemas/CreditRefusalCause"
+          }
+        ],
+        "description": "What a review is counted under: the cause its assessments recorded,\n `SPEND_LIMIT_REACHED` where an assessment recorded a spend limit's code, or\n `OUT_OF_CREDITS` where an assessment recorded the credit refusal. An\n assessment's detail names that refusal by the rule `public_reason_codes`\n applies; no other detail is read into the summary."
       },
       "CoverageRefused": {
         "description": "An upload refused for its content: a symbolic or unknown commit, or a\n report that cannot be read. Nothing is stored.",
@@ -892,6 +1119,21 @@
           "covered_lines"
         ],
         "type": "object"
+      },
+      "CreditRefusalCause": {
+        "description": "A funding refusal Billing repairs, named apart from the `NOT_CONFIGURED`\n it records. The public contract keeps the name it had when credits were\n its only refusal.",
+        "oneOf": [
+          {
+            "const": "OUT_OF_CREDITS",
+            "description": "The organization had no credits left, so the code lane refused to\n run its model.",
+            "type": "string"
+          },
+          {
+            "const": "SPEND_LIMIT_REACHED",
+            "description": "A monthly spend limit of the organization, a repository or a team was\n reached, so the assessment refused to start.",
+            "type": "string"
+          }
+        ]
       },
       "CustomerAssessment": {
         "properties": {
@@ -1224,7 +1466,7 @@
             ]
           },
           "reason_codes": {
-            "description": "Public causes of an `INCOMPLETE` code assessment: `OUT_OF_CREDITS`\n when credits refused its model. Absent otherwise; other recorded\n details stay private.",
+            "description": "Public causes of an `INCOMPLETE` code assessment: `OUT_OF_CREDITS`\n when credits refused its model, and `MODEL_ANSWER_WITHHELD` when the\n credential mask withheld its model's answer after the source was read.\n Absent otherwise; other recorded details stay private.",
             "items": {
               "type": "string"
             },
@@ -1296,7 +1538,7 @@
             "type": "string"
           },
           "label": {
-            "description": "The reference's display label, such as a path with its line range. A\n recorded read, a vendor documentation read or an unnamed World entity\n carries a fixed label, and a deterministic test carries its check's\n readable name.",
+            "description": "The reference's display label, such as a path with its line range. A\n recorded read, a vendor documentation read, a customer tool call, a\n static analysis result or an unnamed World entity carries a fixed\n label, and a deterministic test carries its check's readable name.",
             "type": "string"
           },
           "legacy_text": {
@@ -1635,6 +1877,13 @@
             },
             "type": "array"
           },
+          "audit_mode": {
+            "description": "The repository audit's mode, `CODE_ONLY` or `INFRASTRUCTURE_AWARE`,\n when this `REVISION_SCAN` is an audit. An audit's findings are in its\n audit report, not in `finding_count` or the review's assessments.\n Null for every other review.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "base_branch_commit_sha": {
             "description": "The base branch tip GitHub reported when the review was triggered,\n display metadata that differs from `base_commit_sha` when the base\n branch moved after the branch point.",
             "type": [
@@ -1718,6 +1967,17 @@
               "null"
             ]
           },
+          "cost_funding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewCostFunding"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What paid for `cost_microcredits`, read from each debit's own funding\n records. Present exactly when `cost_microcredits` is."
+          },
           "cost_microcredits": {
             "description": "The credits this run was charged so far, in microcredits, whoever\n paid: the plan, the free review month or the organization's credits.\n Null for a caller who is not a member of the organization.",
             "format": "int64",
@@ -1725,6 +1985,13 @@
               "integer",
               "null"
             ]
+          },
+          "counted_incomplete_causes": {
+            "description": "`incomplete_causes` as the Inbox and the reviews `cause:` search\n count them: `OUT_OF_CREDITS` or `SPEND_LIMIT_REACHED` in place of the\n `NOT_CONFIGURED` an assessment records when credits or a monthly spend\n limit refused it. Present exactly when\n `incomplete_causes` is.",
+            "items": {
+              "$ref": "#/components/schemas/CountedCause"
+            },
+            "type": "array"
           },
           "created_at": {
             "description": "When the review was created.",
@@ -1816,6 +2083,13 @@
             },
             "type": "array"
           },
+          "investigation_findings": {
+            "description": "The supported findings of each environment investigation this review\n published, by assessment in recorded order, including those the\n pull-request Check left off its list. Absent when there are none.",
+            "items": {
+              "$ref": "#/components/schemas/ReviewInvestigationFinding"
+            },
+            "type": "array"
+          },
           "is_deep_review": {
             "description": "Present and true when this run is a Deep Review.",
             "type": "boolean"
@@ -1823,6 +2097,17 @@
           "kind": {
             "description": "`PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, a review of local changes\n sent as a patch, `COMMIT`, a review of pushed commits, `FILES`,\n complete selected files at one pushed commit, `MERGE_GROUP`, the\n commit GitHub's merge queue built for a group of pull requests, or\n `REVISION_SCAN`, a scan of one captured commit.",
             "type": "string"
+          },
+          "linked_issues": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkedIssueCapture"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What this review's linked-issue receipt recorded, read from the\n receipt and never from current settings, so a later allowlist change\n does not alter it. Null when the review kept no receipt: a kind that\n reads no linked issues, a run that has not prepared its context yet,\n a run that predates receipts, or a receipt that does not decode. Null\n never means that no issue was captured."
           },
           "local_reverifications": {
             "description": "For a patch review requested with `verify_finding_ids`, each finding\n it re-verifies against the patch and the outcome. The outcome is\n local: the pull request's finding is unchanged whatever it is. Absent\n otherwise.",
@@ -1859,7 +2144,7 @@
                 "type": "null"
               }
             ],
-            "description": "What Proofline still has open for the reviewed head, counted from the\n current finding decisions. Absent while the review is `PENDING` or\n `RUNNING`."
+            "description": "What Proofline still has open for the reviewed head, counted from the\n current finding decisions. Absent while the review is `PENDING` or\n `RUNNING`, and for a repository audit, whose findings are in its\n report."
           },
           "open_items_observation": {
             "anyOf": [
@@ -1934,6 +2219,13 @@
               "null"
             ]
           },
+          "pull_request_draft": {
+            "description": "Whether the pull request is a draft, as provider state last reported\n it. Display state only: an open draft keeps `pull_request_state` `OPEN`.\n Absent when `pull_request_state` is.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "pull_request_number": {
             "description": "The pull request number. Absent for a deployment or patch review.",
             "format": "int64",
@@ -1962,6 +2254,17 @@
               "string",
               "null"
             ]
+          },
+          "questions_unavailable_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuestionsUnavailableReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why Proofline answers no question about this run: `FORK_PULL_REQUEST`\n when the pull request is recorded as coming from a fork, whose\n conversations the fork policy excludes whatever the run. Absent\n otherwise, which does not mean a question will be answered: each one\n is still checked for access and retained evidence."
           },
           "refresh": {
             "anyOf": [
@@ -2028,6 +2331,14 @@
               "null"
             ]
           },
+          "review_cost_microcredits": {
+            "description": "The review work within the total, excluding the separately billed PR\n walkthrough. Visible to the same callers as the total.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "review_retracted_at": {
             "description": "When a submitted pull request review was marked retracted, a marker\n only older versions set. Null otherwise.",
             "format": "date-time",
@@ -2043,6 +2354,17 @@
               "integer",
               "null"
             ]
+          },
+          "run_progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunProgress"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where an unfinished review's runs stand: running, queued for a worker,\n waiting for a scheduled step, or due again after an attempt that did\n not finish. Null once the review has ended."
           },
           "status": {
             "description": "The review's lifecycle status: `PENDING`, `RUNNING`, `COMPLETED`, `INCOMPLETE`, `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.",
@@ -2082,6 +2404,13 @@
             "description": "What this review covers: the revision under review and any companion\n repositories, workflow runs, artifacts or deployments.",
             "items": {
               "$ref": "#/components/schemas/SubjectView"
+            },
+            "type": "array"
+          },
+          "submitted_reviews": {
+            "description": "Every distinct review Proofline submitted on the pull request for this\n run, including the early code publisher's, oldest first. Absent when it\n submitted none.",
+            "items": {
+              "$ref": "#/components/schemas/SubmittedReview"
             },
             "type": "array"
           },
@@ -2179,6 +2508,297 @@
         ],
         "type": "string"
       },
+      "DeployCheckResult": {
+        "oneOf": [
+          {
+            "const": "HEALTHY",
+            "description": "The deployed revision runs, a completed change check covered it, and\n every signal the deploy compares was read in full and stayed within\n tolerance. A deploy whose task the delivery target maps to services\n compares only the signals that name no service and those that name\n one of its services in the signal's Cloud Run project, and in its\n location when it names one, or in the signal's ECS account and region,\n and in its cluster when it names one. Every other deploy compares\n every watched signal. With none watched, every ECS service's rollout\n completed instead.",
+            "type": "string"
+          },
+          {
+            "const": "REGRESSED",
+            "description": "The deploy stopped running after it landed, its own ECS rollout\n failed, or a signal moved past its tolerance in the worse direction.",
+            "type": "string"
+          },
+          {
+            "const": "SUPERSEDED",
+            "description": "A later deploy of another revision replaced this one.",
+            "type": "string"
+          },
+          {
+            "const": "INCOMPLETE",
+            "description": "Nothing regressed, and at least one gap leaves the check unproven.",
+            "type": "string"
+          }
+        ]
+      },
+      "DeployCheckpoint": {
+        "description": "One of the four checks of a deploy.",
+        "enum": [
+          "LANDING",
+          "MINUTES_20",
+          "HOUR_1",
+          "DAY_1"
+        ],
+        "type": "string"
+      },
+      "DeployCoverageCheckpoint": {
+        "description": "One checkpoint of a verified deploy.",
+        "properties": {
+          "checkpoint": {
+            "$ref": "#/components/schemas/DeployCheckpoint"
+          },
+          "due_at": {
+            "description": "When a missing check becomes overdue, allowing the workflow's read\n delay, landing inventory reread, successor wait and transient-read retries.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "gaps": {
+            "default": [],
+            "description": "The gaps this window's check recorded, beside its recorded result;\n empty while no check of this window is recorded. The deploy's `gaps`\n unite those that leave it unproven.",
+            "items": {
+              "$ref": "#/components/schemas/DeployVerificationGap"
+            },
+            "type": "array"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeployCheckResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The recorded result; absent while no check of this window is recorded."
+          }
+        },
+        "required": [
+          "checkpoint",
+          "due_at"
+        ],
+        "type": "object"
+      },
+      "DeployCoverageState": {
+        "description": "Where one deploy's verification stands. Each deploy has exactly one, so\n the counts add up to the population.",
+        "oneOf": [
+          {
+            "const": "VERIFIED",
+            "description": "All four checks recorded `HEALTHY` or `REGRESSED` and none names a\n gap, a change-check gap included.",
+            "type": "string"
+          },
+          {
+            "const": "VERIFIED_UNTIL_SUPERSEDED",
+            "description": "A later deploy of the same task replaced this one after its landing\n check, and every check before then recorded `HEALTHY` or `REGRESSED`\n and names no gap, a change-check gap included.\n The verification observed the deploy for as long as it\n ran; the next deploy's own verification covers the time after.",
+            "type": "string"
+          },
+          {
+            "const": "SUPERSEDED",
+            "description": "A later deploy replaced this one at its landing check, or a check\n before the replacement has no recorded result.",
+            "type": "string"
+          },
+          {
+            "const": "INCOMPLETE",
+            "description": "A check recorded `INCOMPLETE`, or a check other than `SUPERSEDED`\n names a gap, a change-check gap included, whatever it recorded.",
+            "type": "string"
+          },
+          {
+            "const": "UNRECORDED",
+            "description": "A check came due, or the verification run ended, with no result\n recorded for it.",
+            "type": "string"
+          },
+          {
+            "const": "NOT_YET_DUE",
+            "description": "The checks recorded so far established the revision and signals, and\n the next one is not due yet.",
+            "type": "string"
+          },
+          {
+            "const": "UNVERIFIED",
+            "description": "The deploy landed and no verification of it exists in this\n environment, as when it landed while deploy checks were off. A GitHub\n deploy with no verification whose deployments were all first received\n before the environment's link to its repository existed is not in the\n population at all.",
+            "type": "string"
+          },
+          {
+            "const": "FAILED",
+            "description": "The latest status of one of the deploy's GitHub deployments is\n `failure` or `error`, even after it landed; in an Actions run, the\n deployment of the latest attempt of one of its jobs.",
+            "type": "string"
+          },
+          {
+            "const": "INACTIVE",
+            "description": "The ledger holds only `inactive` statuses of the deploy's GitHub\n deployments: it never saw them land or fail.",
+            "type": "string"
+          }
+        ]
+      },
+      "DeployVerificationGap": {
+        "description": "A named reason a check could not establish part of what it compares.",
+        "oneOf": [
+          {
+            "const": "CHANGE_CHECK_MISSING",
+            "description": "No review covered the deployed revision.",
+            "type": "string"
+          },
+          {
+            "const": "CHANGE_CHECK_INCOMPLETE",
+            "description": "The change check that covered it did not complete.",
+            "type": "string"
+          },
+          {
+            "const": "ENVIRONMENT_NOT_CHECKED",
+            "description": "A completed review covered the deployed revision but did not assess\n this environment, as a pull request review does while environment\n checks are off. The review is cited; the environment stays unchecked.",
+            "type": "string"
+          },
+          {
+            "const": "RUNNING_REVISION_UNKNOWN",
+            "description": "The ledger shows no running revision for the deploy, or a late check's\n runtime read shows a later deployment of the same task that landed\n after the check came due, so it shows the present and not the window.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_TARGET_UNAVAILABLE",
+            "description": "The check found no runtime to read: the environment names no Cloud\n Run service, the deploy's task is mapped to no approved service, or\n the delivery target's ECS runtime has no connected AWS account. An\n AWS run whose delivery target names no ECS runtime records it too.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_CAPABILITY_UNQUALIFIED",
+            "description": "The AWS runtime was not read, because no serving artifact could yet\n be bound to a repository commit. Checks before AWS serving bindings\n recorded this for every AWS deploy; no check records it now.",
+            "type": "string"
+          },
+          {
+            "const": "AWS_TELEMETRY_CONNECTION_UNAVAILABLE",
+            "description": "No active AWS connection of the environment can read the `CloudWatch`\n signal, or, when every watched signal is a `CloudWatch` signal, any of\n them.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_INVENTORY_UNAVAILABLE",
+            "description": "The check could not read an inventory of the connection's Cloud Run\n services or ECS tasks: Kian retains none, or the read failed or timed\n out. Nothing shows what runs.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_INVENTORY_STALE",
+            "description": "The newest inventory is older than the reader accepts, or was\n observed before the deploy landed, so nothing is read from it.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_INVENTORY_INCOMPLETE",
+            "description": "The newest inventory's collection did not read every table the\n runtime read needs in full, so nothing is read from it.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_SERVICE_UNKNOWN",
+            "description": "The inventory holds no single record of a service the check reads.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_TRAFFIC_UNKNOWN",
+            "description": "A Cloud Run service's traffic shares do not add up to 100 percent,\n so what serves it is unknown.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_REVISION_UNKNOWN",
+            "description": "A serving Cloud Run route names no revision the inventory holds, or\n an ECS service has no running task, more tasks than the reader\n reads, or a running container without an image digest.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_ROLLOUT_UNSETTLED",
+            "description": "An ECS service's rollout has not settled: its primary deployment's\n rollout is not complete, it has more than one deployment, or it runs\n fewer tasks than it wants. When nothing else decides the runtime read,\n the check reads once more, after the next inventory collection, and\n records this only from that read. A failed rollout or a ledger\n successor decides the check at the first read, which records this\n beside it.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_COMMIT_BINDING_MISSING",
+            "description": "A serving revision or container shows no commit: neither a qualified\n attestation of a Cloud Run revision's image digest nor its\n `commit-sha` label names a commit, an ECS image has no single\n qualified attestation of its commit, or every running container was\n built elsewhere.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_ATTESTATIONS_PERMISSION_PENDING",
+            "description": "The running image's commit binding was not read because the\n repository's GitHub installation has not accepted the App's\n attestations permission. It replaces `RuntimeCommitBindingMissing`.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_IMAGE_BUILT_EARLIER",
+            "description": "A running ECS container binds to a commit the deployed revision\n descends from, and the images its ECR repository received after it were\n not all read or bound, so whether a later build at or before the\n deployed revision replaced it is unknown. The newest such build runs the\n deploy, and a replaced one is a mismatch.",
+            "type": "string"
+          },
+          {
+            "const": "RUNTIME_TASK_UNMAPPED",
+            "description": "The repository deploys several GitHub deployment tasks into the\n environment, and its delivery target's task map does not name this\n deploy's task. No other task's services stand for it.",
+            "type": "string"
+          },
+          {
+            "const": "TELEMETRY_CONNECTION_UNAVAILABLE",
+            "description": "Proofline holds no Cloud Monitoring read access for the environment.",
+            "type": "string"
+          },
+          {
+            "const": "TELEMETRY_CREDENTIAL_UNAVAILABLE",
+            "description": "The read credential could not be minted for this window.",
+            "type": "string"
+          },
+          {
+            "const": "NO_SIGNALS_CONFIGURED",
+            "description": "The environment watches no signal. A check whose every ECS service's\n rollout completed records it under the report's `suggestions`\n instead.",
+            "type": "string"
+          },
+          {
+            "const": "NO_SIGNALS_FOR_TASK_SERVICES",
+            "description": "The environment watches signals, but the deploy's task is mapped to\n services and every watched signal names a service the check does not\n compare, so it compared none. A mapped task's check compares a signal\n that names one of its services in the signal's Cloud Run project, and\n in its location when it names one, or in the signal's ECS account and\n region, and in its cluster when it names one.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_PROJECT_NOT_CONNECTED",
+            "description": "No verified Cloud Build connection of the environment reads the\n signal's project. A Cloud Run, GKE or other connection to the same\n project does not read its metrics.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_CONFIGURATION_INVALID",
+            "description": "The signal's descriptors or statistic do not form a valid query, the\n project has no such metric, or the statistic cannot apply to the\n metric's kind and value type.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_RESPONSE_INVALID",
+            "description": "Cloud Monitoring answered with something the reader refused.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_READ_PARTIAL",
+            "description": "The provider read covered only part of the window, for the reason\n the reading records.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_READ_UNAVAILABLE",
+            "description": "The provider read returned nothing for the window, for the reason\n the reading records, such as a refused permission.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_NO_DATA",
+            "description": "A complete read returned no point and the signal does not treat that\n as zero.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_NOT_SINGLE_SERIES",
+            "description": "The provider reduced the read to more than one series.",
+            "type": "string"
+          },
+          {
+            "const": "SIGNAL_BUCKET_UNEXPECTED",
+            "description": "The read returned more than one bucket for the window.",
+            "type": "string"
+          },
+          {
+            "const": "BASELINE_UNAVAILABLE",
+            "description": "The window has a value and its baseline before landing has none.",
+            "type": "string"
+          },
+          {
+            "const": "BELOW_TRAFFIC_FLOOR",
+            "description": "A compared service's traffic signal counted fewer requests than its\n floor in the check's window or in its baseline, so that service's\n other signals say too little to call the check healthy. Each of the\n service's signal reports names the floor, both windows and their\n counts under `traffic`.",
+            "type": "string"
+          },
+          {
+            "const": "BASELINE_HELD_REGRESSION",
+            "description": "An earlier deploy of the same task found the signal regressed in a\n check whose window overlaps the hour before this deploy started, and\n the baseline that check compared with is not usable: its window ended\n more than a day before this deploy started, or the signal would no\n longer send the query it cites. The regressed hour is never compared\n in its place, so the signal is not compared.",
+            "type": "string"
+          }
+        ]
+      },
       "DomainView": {
         "properties": {
           "domain": {
@@ -2227,6 +2847,13 @@
           "severity": {
             "description": "Severity used by the series count; the linked occurrence may be less severe.",
             "type": "string"
+          },
+          "title": {
+            "description": "The linked occurrence's title, which heads the series' GitHub thread.\n Absent when the occurrence has none or its review withheld a value\n from it, so no text that review kept off GitHub is shown here.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2245,6 +2872,10 @@
             "description": "The environment's display name.",
             "type": "string"
           },
+          "environment_external_key": {
+            "description": "The environment's key, which names its console pages.",
+            "type": "string"
+          },
           "reason": {
             "anyOf": [
               {
@@ -2254,7 +2885,11 @@
                 "type": "null"
               }
             ],
-            "description": "Why the environment was not checked or does not apply. Null when it\n was checked or its check is still running."
+            "description": "Why the environment was not checked or does not apply. Null when it\n was checked, its check is still running, or\n `reason_unrecorded` is true."
+          },
+          "reason_unrecorded": {
+            "description": "True when the review checked nothing in the environment but predates\n Proofline's record of the links its repository had when it was\n created: its repository links the environment by a link made before\n the review, and whether that link then asked for pull request reviews\n is unknown. Absent otherwise.",
+            "type": "boolean"
           },
           "state": {
             "allOf": [
@@ -2263,10 +2898,15 @@
               }
             ],
             "description": "Whether this review checked the environment."
+          },
+          "unfinished_inventory_incomplete": {
+            "description": "True when `reason` is `UNFINISHED` because the assessment's Kian pin\n lacked required inventory evidence, so the environment was not\n checked. Absent otherwise, including when the assessment recorded no\n cause.",
+            "type": "boolean"
           }
         },
         "required": [
           "environment_display_name",
+          "environment_external_key",
           "state"
         ],
         "type": "object"
@@ -2276,6 +2916,16 @@
           {
             "const": "NOT_COVERED",
             "description": "`NOT_CHECKED`: Proofline does not check this environment for pull\n requests, so the review assessed its code only.",
+            "type": "string"
+          },
+          {
+            "const": "NO_CLOUD_ACCOUNT",
+            "description": "`NOT_CHECKED`: no AWS account, Google Cloud project or Azure\n subscription is connected to the environment, so the review assessed\n its code only. The environment's Setup page connects one.",
+            "type": "string"
+          },
+          {
+            "const": "READS_REFUSED",
+            "description": "`NOT_CHECKED`: the environment's assessment is incomplete because the\n inventory it pinned lacks reads a connected account's role refused.\n The environment's Setup page names them.",
             "type": "string"
           },
           {
@@ -2358,6 +3008,21 @@
           "id"
         ],
         "type": "object"
+      },
+      "ExportFindingLane": {
+        "description": "The review lane whose assessment recorded a finding.",
+        "oneOf": [
+          {
+            "const": "ENVIRONMENT",
+            "description": "An environment assessment, which covers one environment.",
+            "type": "string"
+          },
+          {
+            "const": "CODE",
+            "description": "The code assessment of the review's repository, which covers no environment.",
+            "type": "string"
+          }
+        ]
       },
       "ExportFindingLifecycle": {
         "enum": [
@@ -2820,7 +3485,7 @@
             "description": "The dimension that defines this row's group."
           },
           "key": {
-            "description": "The grouping value: a repository or environment ID, a risk domain, a severity or a\n review kind, as `group_by` selects.",
+            "description": "The grouping value: a repository or environment ID, a risk domain, a severity or a\n review kind, as `group_by` selects. Grouped by environment, code-lane findings, which\n belong to no environment, share the key `code_review`.",
             "type": "string"
           },
           "limitations": {
@@ -2831,7 +3496,7 @@
             "type": "array"
           },
           "name": {
-            "description": "The group's display name: the repository's full name (or `Repository` and its ID when\n no name is recorded), the environment's display name, or otherwise `key`.",
+            "description": "The group's display name: the repository's full name (or `Repository` and its ID when\n no name is recorded), the environment's display name (`Code review` for the code-lane\n group), or otherwise `key`.",
             "type": "string"
           },
           "organization_id": {
@@ -3107,6 +3772,34 @@
         ],
         "type": "object"
       },
+      "FindingRuleIncidentView": {
+        "description": "The incident behind a cited prevention rule, as the finding's assessment\n pinned it.",
+        "properties": {
+          "check": {
+            "description": "What the assessment's pinned Kian view showed of that condition.",
+            "type": "string"
+          },
+          "commit_sha": {
+            "description": "The commit the incident's confirmed cause names.",
+            "type": "string"
+          },
+          "condition": {
+            "description": "What the incident needed in the environment.",
+            "type": "string"
+          },
+          "investigation_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "investigation_id",
+          "commit_sha",
+          "condition",
+          "check"
+        ],
+        "type": "object"
+      },
       "FindingRuleRefView": {
         "description": "One review rule a finding cites. It carries no rule text and no scope\n identifier; the review rules page shows those to its readers.",
         "properties": {
@@ -3130,6 +3823,17 @@
       },
       "FindingRuleRevisionView": {
         "properties": {
+          "incident": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FindingRuleIncidentView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The incident a prevention rule came from. Absent for every other rule."
+          },
           "revision": {
             "description": "The console revision. Null for a configuration-file or implicit rule.",
             "format": "int32",
@@ -3215,16 +3919,19 @@
             "type": "string"
           },
           "dataset_version": {
-            "description": "The row contract version, always `1`.",
+            "description": "The row contract version, always `2`.",
             "format": "uint16",
             "maximum": 65535,
             "minimum": 0,
             "type": "integer"
           },
           "environment_id": {
-            "description": "The environment of the assessment that recorded the finding.",
+            "description": "The environment of the assessment that recorded the finding, null for a code-lane\n finding.",
             "format": "uuid",
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "expires_at": {
             "description": "When the decision expires, null when it records no expiry.",
@@ -3238,6 +3945,14 @@
             "description": "The finding occurrence the validation applies to.",
             "format": "uuid",
             "type": "string"
+          },
+          "lane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExportFindingLane"
+              }
+            ],
+            "description": "The lane of the assessment that recorded the finding."
           },
           "organization_id": {
             "description": "The organization that owns the finding.",
@@ -3285,7 +4000,7 @@
           "validation_id",
           "finding_id",
           "review_id",
-          "environment_id",
+          "lane",
           "validation",
           "source",
           "created_at"
@@ -3296,7 +4011,7 @@
         "description": "One immutable finding occurrence. Reference payloads and evidence values stay private.",
         "properties": {
           "assessment_id": {
-            "description": "The environment assessment that recorded the finding.",
+            "description": "The environment or code assessment that recorded the finding; `lane` says which.",
             "format": "uuid",
             "type": "string"
           },
@@ -3310,16 +4025,19 @@
             "type": "string"
           },
           "dataset_version": {
-            "description": "The row contract version, always `1`.",
+            "description": "The row contract version, always `2`.",
             "format": "uint16",
             "maximum": 65535,
             "minimum": 0,
             "type": "integer"
           },
           "environment_id": {
-            "description": "The environment the assessment covers.",
+            "description": "The environment the assessment covers, null for a code-lane finding.",
             "format": "uuid",
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "evidence_refs": {
             "description": "The finding's evidence references in recorded order, each reduced to a kind and an\n opaque ID; an empty list means the finding records none.",
@@ -3336,6 +4054,14 @@
           "impact": {
             "description": "The finding's stated impact, with supported credential shapes masked.",
             "type": "string"
+          },
+          "lane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExportFindingLane"
+              }
+            ],
+            "description": "The lane of the assessment that recorded the finding."
           },
           "lifecycle_state": {
             "allOf": [
@@ -3397,7 +4123,7 @@
           "finding_id",
           "review_id",
           "assessment_id",
-          "environment_id",
+          "lane",
           "risk_domain",
           "severity",
           "lifecycle_state",
@@ -3439,6 +4165,69 @@
           }
         ]
       },
+      "KianFindingSource": {
+        "description": "What published a supported Kian finding.",
+        "oneOf": [
+          {
+            "const": "CONFIRMED_REQUIREMENT",
+            "description": "A service violates a confirmed gate requirement of its delivery\n target ([`requirements`]).",
+            "type": "string"
+          },
+          {
+            "const": "INVESTIGATION",
+            "description": "The environment investigation found it ([`kian_investigation`]).",
+            "type": "string"
+          },
+          {
+            "const": "SHARED_IDENTITY",
+            "description": "A workload loses access when a change removes or narrows a grant\n on its shared identity.",
+            "type": "string"
+          }
+        ]
+      },
+      "LinkedIssueCapture": {
+        "description": "The count and outcome of a review's linked-issue receipt. Issue numbers,\n titles and the receipt's gaps stay in the receipt.",
+        "properties": {
+          "captured_count": {
+            "description": "How many issues the review captured as context.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/LinkedIssueOutcome"
+          }
+        },
+        "required": [
+          "outcome",
+          "captured_count"
+        ],
+        "type": "object"
+      },
+      "LinkedIssueOutcome": {
+        "description": "What the review's linked-issue preparation found.",
+        "oneOf": [
+          {
+            "const": "NOT_CONFIGURED",
+            "description": "No issue source was connected for the review.",
+            "type": "string"
+          },
+          {
+            "const": "NO_REFERENCES",
+            "description": "The pull request referenced no issue.",
+            "type": "string"
+          },
+          {
+            "const": "PREPARED",
+            "description": "The pull request referenced issues and the source was read.",
+            "type": "string"
+          },
+          {
+            "const": "SOURCE_UNAVAILABLE",
+            "description": "The source could not be read, or the review's evaluation withheld\n linked issues.",
+            "type": "string"
+          }
+        ]
+      },
       "LocalReverification": {
         "description": "One finding a patch review re-verified against the patch. The outcome is\n local: the pull request's finding is unchanged whatever it is.",
         "properties": {
@@ -3462,6 +4251,17 @@
               }
             ],
             "description": "The local re-verification result; it does not change the original finding."
+          },
+          "stored_check": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LocalStoredCheck"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The check a code reproduction stored for the finding, which a pushed\n head runs again; run its command against the local changes before\n pushing. The patch review does not run it. Absent for a finding with\n no stored check."
           }
         },
         "required": [
@@ -3481,6 +4281,35 @@
           "PENDING"
         ],
         "type": "string"
+      },
+      "LocalStoredCheck": {
+        "description": "A finding's stored check and the newest result it gave. Its runs show\n what the code did under the conditions the test exercised in a sandbox,\n and establish no fact about a deployed environment.",
+        "properties": {
+          "check_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "command": {
+            "description": "The command the sandbox ran the test with, as the agent recorded it,\n with the reproducing review's protected values withheld, and withheld\n whole when that provenance is gone. Untrusted text: render it as text.",
+            "type": "string"
+          },
+          "last_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StoredCheckResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent only for a check with no recorded run."
+          }
+        },
+        "required": [
+          "check_id",
+          "command"
+        ],
+        "type": "object"
       },
       "MatchedLocalFinding": {
         "description": "A local occurrence with the same semantic fingerprint as this finding.",
@@ -3505,6 +4334,24 @@
           "review_id",
           "finding_id",
           "created_at"
+        ],
+        "type": "object"
+      },
+      "ModelWarning": {
+        "description": "Why a review started now would run without its model.",
+        "properties": {
+          "cause": {
+            "description": "Proofline's sentence naming the fix.",
+            "type": "string"
+          },
+          "reason_code": {
+            "description": "`MODEL_<cause>`, the same code a finished review's read carries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason_code",
+          "cause"
         ],
         "type": "object"
       },
@@ -3639,6 +4486,12 @@
                 "format": "date-time",
                 "type": "string"
               },
+              "open_finding_threads": {
+                "description": "The unresolved threads in `unresolved_count` that belong to a\n finding `open_findings` already counts. Absent when none does.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
               "status": {
                 "const": "KNOWN",
                 "type": "string"
@@ -3705,7 +4558,7 @@
             "type": "array"
           },
           "open_findings": {
-            "description": "Unresolved recorded finding series, including notification-suppressed\n findings, decisions whose dismissal or risk acceptance expired, and\n earlier published series of the pull request that this review did not\n find again.",
+            "description": "Unresolved recorded finding series, including notification-suppressed\n findings, decisions whose dismissal or risk acceptance expired, and\n earlier published series of the pull request that this review did not\n find again, and the supported findings its `KIAN` environment\n assessments published: each violated confirmed gate requirement the\n change does not set and each investigation finding, which have no\n severity.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
@@ -4175,6 +5028,12 @@
         ],
         "type": "object"
       },
+      "QuestionsUnavailableReason": {
+        "enum": [
+          "FORK_PULL_REQUEST"
+        ],
+        "type": "string"
+      },
       "RefreshView": {
         "description": "A recorded refresh decision, as the console shows it.",
         "properties": {
@@ -4426,6 +5285,32 @@
         ],
         "type": "object"
       },
+      "ReviewCostFunding": {
+        "description": "What paid for a run's credit cost, as Usage splits a day. The three parts\n add up to the cost.",
+        "properties": {
+          "free_review_microcredits": {
+            "description": "Paid by the free review month: the same organization's\n `free-review:{debit_id}` grants for the run's debits.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "organization_microcredits": {
+            "description": "Taken from the organization's shared credit balance.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "plan_microcredits": {
+            "description": "Paid by the workspace allowance or the author's seat.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_microcredits",
+          "free_review_microcredits",
+          "organization_microcredits"
+        ],
+        "type": "object"
+      },
       "ReviewDepth": {
         "description": "The depth the applied route plan read a file at.",
         "enum": [
@@ -4480,6 +5365,95 @@
           "repositories",
           "environments",
           "authors"
+        ],
+        "type": "object"
+      },
+      "ReviewInvestigationCitation": {
+        "description": "One environment evidence record a finding cites, as Proofline verified\n it.",
+        "properties": {
+          "collection_id": {
+            "description": "The evidence collection that holds the record.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "digest": {
+            "description": "The record's stored digest.",
+            "type": "string"
+          },
+          "record_id": {
+            "description": "The record's ID.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "table": {
+            "description": "The table that holds the record.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection_id",
+          "table",
+          "record_id",
+          "digest"
+        ],
+        "type": "object"
+      },
+      "ReviewInvestigationFinding": {
+        "description": "One supported finding of an environment investigation.",
+        "properties": {
+          "area": {
+            "description": "What the finding is about: `secrets`, `configuration`, `iam`,\n `network`, `capacity` or `other`.",
+            "type": "string"
+          },
+          "assessment_id": {
+            "description": "The environment assessment whose investigation recorded the finding.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "citations": {
+            "description": "The evidence records the finding cites, each verified, in the order\n the finding cites them.",
+            "items": {
+              "$ref": "#/components/schemas/ReviewInvestigationCitation"
+            },
+            "type": "array"
+          },
+          "detail": {
+            "description": "Model text with protected values withheld. Render it as plain text.",
+            "type": "string"
+          },
+          "requirement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRequirementTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The delivery target whose confirmed gate requirement the finding\n reports. Absent for an investigation's finding."
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KianFindingSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What published the finding: a confirmed gate requirement its\n delivery target's services violate, the environment investigation, or\n a workload that loses an access because the change narrows the grants\n of an identity it shares. Every listed finding carries it."
+          },
+          "title": {
+            "description": "Model text with protected values withheld. Render it as plain text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "assessment_id",
+          "area",
+          "title",
+          "detail",
+          "citations"
         ],
         "type": "object"
       },
@@ -4670,6 +5644,36 @@
         ],
         "type": "object"
       },
+      "ReviewRequirementTarget": {
+        "description": "The delivery target whose confirmed entry a finding reports, as its Gate\n requirements page addresses it.",
+        "properties": {
+          "delivery_target_id": {
+            "description": "The delivery target.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "environment_id": {
+            "description": "The environment of the assessment that asked the requirement.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "repository_full_name": {
+            "description": "The repository's `owner/name`, which names the target to a reader.",
+            "type": "string"
+          },
+          "repository_name": {
+            "description": "The repository's name, as the page's address names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "environment_id",
+          "repository_name",
+          "repository_full_name",
+          "delivery_target_id"
+        ],
+        "type": "object"
+      },
       "ReviewRoutingView": {
         "oneOf": [
           {
@@ -4747,6 +5751,13 @@
             "format": "int64",
             "type": "integer"
           },
+          "audit_mode": {
+            "description": "The repository audit's mode, `CODE_ONLY` or `INFRASTRUCTURE_AWARE`,\n when this `REVISION_SCAN` is an audit. An audit's findings are in its\n audit report, not in `finding_count` or the review's assessments.\n Null for every other review.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "completed_at": {
             "description": "When the review reached a terminal status. Absent while it is still pending or running.",
             "format": "date-time",
@@ -4754,6 +5765,13 @@
               "string",
               "null"
             ]
+          },
+          "counted_incomplete_causes": {
+            "description": "`incomplete_causes` as the Inbox and the reviews `cause:` search\n count them: `OUT_OF_CREDITS` or `SPEND_LIMIT_REACHED` in place of the\n `NOT_CONFIGURED` an assessment records when credits or a monthly spend\n limit refused it. Present exactly when\n `incomplete_causes` is.",
+            "items": {
+              "$ref": "#/components/schemas/CountedCause"
+            },
+            "type": "array"
           },
           "created_at": {
             "description": "When the review was created.",
@@ -4865,6 +5883,13 @@
             "description": "The author's profile on the deployment's GitHub host. Absent when no author login is known.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "pull_request_draft": {
+            "description": "Whether the pull request is a draft, as provider state last reported\n it. Display state only: an open draft keeps `pull_request_state` `OPEN`.\n Absent when `pull_request_state` is.",
+            "type": [
+              "boolean",
               "null"
             ]
           },
@@ -5426,6 +6451,17 @@
             "description": "True when this head already carried a review and that one is\n returned. Clicking twice does not run twice.",
             "type": "boolean"
           },
+          "model_warning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelWarning"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why this review runs without its model and checks fixed rules only,\n for a caller that started it without reading the offer's warning."
+          },
           "review_id": {
             "description": "The review that owns the live head, new or existing.",
             "format": "uuid",
@@ -5444,6 +6480,70 @@
           "automatic_reviews_paused"
         ],
         "type": "object"
+      },
+      "RunProgress": {
+        "description": "Where an unfinished review's runs stand.",
+        "properties": {
+          "attempts": {
+            "description": "Attempts begun by the run in `state`, counting worker claims.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "due_at": {
+            "description": "When the run in `state` is due: in the past for `QUEUED`, the next\n attempt for `RETRY_SCHEDULED` and the next check for `WAITING`. Null\n for `RUNNING`.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_progress_at": {
+            "description": "When any of the review's runs last recorded a completed step. Null\n before the first.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RunProgressState"
+              }
+            ],
+            "description": "The most telling state among the review's unfinished runs: a scheduled\n retry, then a running worker, then a queued run, then a wait."
+          }
+        },
+        "required": [
+          "state",
+          "attempts"
+        ],
+        "type": "object"
+      },
+      "RunProgressState": {
+        "description": "What an unfinished review's runs are doing now.",
+        "oneOf": [
+          {
+            "const": "WAITING",
+            "description": "A run waits for a scheduled step, such as a push's quiet period, a\n resource another run holds, or its assessments, and is checked again\n at `due_at`.",
+            "type": "string"
+          },
+          {
+            "const": "QUEUED",
+            "description": "A run is due and no worker has claimed it yet. It has been due since\n `due_at`.",
+            "type": "string"
+          },
+          {
+            "const": "RUNNING",
+            "description": "A worker is running one of the review's runs.",
+            "type": "string"
+          },
+          {
+            "const": "RETRY_SCHEDULED",
+            "description": "An attempt of a run ended without finishing, and the run starts again\n at `due_at`.",
+            "type": "string"
+          }
+        ]
       },
       "ScanRequestBody": {
         "additionalProperties": false,
@@ -5516,7 +6616,7 @@
         "type": "string"
       },
       "SpendExportRow": {
-        "description": "UTC daily debit totals using only the account and transport recorded at charge time.",
+        "description": "UTC daily debit totals using only the account and transport recorded at\n charge time, each split by what paid for it as Billing's Usage splits it.",
         "properties": {
           "account": {
             "description": "Recorded attribution, not a current credential label or inferred account.",
@@ -5550,6 +6650,12 @@
             "format": "int64",
             "type": "integer"
           },
+          "free_review_microcredits": {
+            "default": 0,
+            "description": "The part the free review month paid: this organization's\n `free-review:{debit}` grants for the row's debits.",
+            "format": "int64",
+            "type": "integer"
+          },
           "microcredits": {
             "description": "Exact integer charge units; one credit contains one million microcredits.",
             "format": "int64",
@@ -5559,6 +6665,24 @@
             "description": "The organization charged.",
             "format": "uuid",
             "type": "string"
+          },
+          "organization_microcredits": {
+            "default": 0,
+            "description": "The part the organization's shared credit balance paid.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "own_key_microcredits": {
+            "default": 0,
+            "description": "The part run on this organization's own provider key: a tariff\n equivalent its provider bills, not credit spend. The four funding\n columns add up to `microcredits`.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "plan_microcredits": {
+            "default": 0,
+            "description": "The part of `microcredits` the workspace allowance or the author's seat paid.",
+            "format": "int64",
+            "type": "integer"
           },
           "transport": {
             "description": "The model transport recorded at charge time, null when the debit records none.",
@@ -5630,6 +6754,57 @@
           "stopped_at"
         ],
         "type": "object"
+      },
+      "StoredCheckOutcome": {
+        "description": "What the test did: `FAILED` as at the reproduction or otherwise,\n `DID_NOT_FAIL` when it exited cleanly, which shows only that this test\n did not fail under the conditions it exercised, or `UNAVAILABLE` when it\n could not answer.",
+        "enum": [
+          "FAILED",
+          "DID_NOT_FAIL",
+          "UNAVAILABLE"
+        ],
+        "type": "string"
+      },
+      "StoredCheckResult": {
+        "description": "The newest result of a stored check: its newest settled rerun at a later\n pull request head, or the reproduction's own head run when it has not\n run again.",
+        "properties": {
+          "commit_sha": {
+            "description": "The commit the check ran at, or would have run at when a rerun could\n not start.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why a rerun did not pass, such as `STILL_FAILS` or\n `SERVICE_NOT_STARTED`. Absent for a pass and for the reproduction.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": {
+            "$ref": "#/components/schemas/StoredCheckOutcome"
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StoredCheckResultSource"
+              }
+            ],
+            "description": "`RERUN` or `REPRODUCTION`."
+          }
+        },
+        "required": [
+          "source",
+          "result"
+        ],
+        "type": "object"
+      },
+      "StoredCheckResultSource": {
+        "enum": [
+          "REPRODUCTION",
+          "RERUN"
+        ],
+        "type": "string"
       },
       "SubjectAuthorization": {
         "description": "One assessment's authorization of one subject, by identity.\n\n The display name is not the answer on its own: an environment's external key\n is unique within its organization and a display name is mutable metadata,\n so two environments of one review can carry the same one.\n Collapsing to it would leave a reader unable to tell which assessment\n authorized the subject and which one gapped, which is the confusion this\n field exists to remove.",
@@ -5766,6 +6941,25 @@
           "kind",
           "role",
           "release_authorizations"
+        ],
+        "type": "object"
+      },
+      "SubmittedReview": {
+        "description": "One review Proofline submitted on the pull request.",
+        "properties": {
+          "commit_sha": {
+            "description": "The commit the review was submitted for.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
         ],
         "type": "object"
       },
@@ -6040,7 +7234,7 @@
   },
   "info": {
     "title": "Proofline Review API",
-    "version": "5.7.0"
+    "version": "9.3.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -6103,7 +7297,7 @@
     },
     "/api/v1/organizations/{org_id}/exports/{dataset}": {
       "get": {
-        "description": "Returns one page of a version-1 export dataset (`reviews`, `finding_outcomes`, `finding_validations`, `spend` or `findings`) for an RFC3339 window of at most 31 days, as NDJSON by default or CSV. Rows respect the token's repository restriction.",
+        "description": "Returns one page of an export dataset (`reviews`, `finding_outcomes`, `finding_validations`, `spend` or `findings`) for an RFC3339 window of at most 31 days, as NDJSON by default or CSV. Each dataset has its own row version, which the `X-Proofline-Export-Version` response header states on every page, including a page with no rows. Rows respect the token's repository restriction.",
         "operationId": "export_reviews",
         "parameters": [
           {
@@ -6233,7 +7427,7 @@
                 "style": "simple"
               },
               "X-Proofline-Export-Version": {
-                "description": "Dataset version 1.",
+                "description": "The row version of the selected dataset, sent on every page, including a page with no rows: `reviews` 1, `finding_outcomes` 1, `finding_validations` 2, `spend` 1, `findings` 2.",
                 "required": true,
                 "schema": {
                   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6323,7 +7517,7 @@
     },
     "/api/v1/organizations/{org_id}/findings/{finding_id}/agent-session-prompt": {
       "get": {
-        "description": "Returns the exact prompt and target a coding-agent session on this pull request finding would send, with every protected value withheld, and the prompt digest a start names. Requires access to every repository in the review.",
+        "description": "Returns the exact prompt and target a coding-agent session on this pull request finding would send, with every protected value withheld, the prompt digest a start names, and the ID and vendor of each active connection that allowlists the target repository. Requires access to every repository in the review.",
         "operationId": "get_agent_session_prompt",
         "parameters": [
           {
@@ -6578,6 +7772,74 @@
         ],
         "summary": "Review pushed commits",
         "x-proofline-token-scope": "reviews:request"
+      }
+    },
+    "/api/v1/organizations/{org_id}/repositories/{repo_id}/commits/{commit_sha}/deploy-verifications": {
+      "get": {
+        "description": "Returns each deploy of one exact commit in the repository that Proofline recorded, across the organization's environments: its environment ID, GitHub Environment, task, workflow run and attempt, where its verification stands, whether a check regressed, each check's result and due time, the gaps that leave it unproven and its console page. `commit_sha` must be a full 40-character lowercase commit SHA; a branch, tag or abbreviated SHA gets 400. A commit with no recorded deploy returns `recorded: false` and no deploys, which is never a result about a deploy. A repository outside the token's repository restriction or organization returns 404.",
+        "operationId": "get_commit_deploy_verifications",
+        "parameters": [
+          {
+            "description": "The full 40-character lowercase commit SHA the job deployed. A branch,\n tag or abbreviated SHA is refused.",
+            "in": "path",
+            "name": "commit_sha",
+            "required": true,
+            "schema": {
+              "description": "The full 40-character lowercase commit SHA the job deployed. A branch,\n tag or abbreviated SHA is refused.",
+              "type": "string"
+            },
+            "style": "simple"
+          },
+          {
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "style": "simple"
+          },
+          {
+            "in": "path",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "style": "simple"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitDeployVerifications"
+                }
+              }
+            },
+            "description": "The deploys of one commit that Proofline recorded, across the\n organization's environments."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An RFC 9457 problem; the HTTP status remains authoritative."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get a commit's deploy verifications",
+        "x-proofline-token-scope": "reviews:read"
       }
     },
     "/api/v1/organizations/{org_id}/repositories/{repo_id}/coverage-reports": {
@@ -7114,9 +8376,24 @@
             "style": "form"
           },
           {
+            "description": "`only` lists repository audits; `none` leaves them out, so\n `kind=REVISION_SCAN&audits=none` lists plain revision scans.",
+            "in": "query",
+            "name": "audits",
+            "schema": {
+              "description": "`only` lists repository audits; `none` leaves them out, so\n `kind=REVISION_SCAN&audits=none` lists plain revision scans.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "style": "form"
+          },
+          {
+            "description": "`mine` for the caller's own pull requests, or a GitHub user ID. `mine`\n needs a person's sign-in or token.",
             "in": "query",
             "name": "author",
             "schema": {
+              "description": "`mine` for the caller's own pull requests, or a GitHub user ID. `mine`\n needs a person's sign-in or token.",
               "type": [
                 "string",
                 "null"
@@ -7148,9 +8425,11 @@
             "style": "form"
           },
           {
+            "description": "`present` lists reviews with at least one finding; `none` lists reviews\n with no finding.",
             "in": "query",
             "name": "findings",
             "schema": {
+              "description": "`present` lists reviews with at least one finding; `none` lists reviews\n with no finding.",
               "type": [
                 "string",
                 "null"
@@ -7159,9 +8438,11 @@
             "style": "form"
           },
           {
+            "description": "One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, `COMMIT`,\n `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.",
             "in": "query",
             "name": "kind",
             "schema": {
+              "description": "One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, `COMMIT`,\n `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.",
               "type": [
                 "string",
                 "null"
@@ -7218,9 +8499,11 @@
             "style": "form"
           },
           {
+            "description": "One review status: `PENDING`, `RUNNING`, `COMPLETED`, `INCOMPLETE`,\n `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.",
             "in": "query",
             "name": "status",
             "schema": {
+              "description": "One review status: `PENDING`, `RUNNING`, `COMPLETED`, `INCOMPLETE`,\n `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.",
               "type": [
                 "string",
                 "null"
@@ -7378,9 +8661,24 @@
             "style": "form"
           },
           {
+            "description": "`only` lists repository audits; `none` leaves them out, so\n `kind=REVISION_SCAN&audits=none` lists plain revision scans.",
+            "in": "query",
+            "name": "audits",
+            "schema": {
+              "description": "`only` lists repository audits; `none` leaves them out, so\n `kind=REVISION_SCAN&audits=none` lists plain revision scans.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "style": "form"
+          },
+          {
+            "description": "`mine` for the caller's own pull requests, or a GitHub user ID. `mine`\n needs a person's sign-in or token.",
             "in": "query",
             "name": "author",
             "schema": {
+              "description": "`mine` for the caller's own pull requests, or a GitHub user ID. `mine`\n needs a person's sign-in or token.",
               "type": [
                 "string",
                 "null"
@@ -7412,9 +8710,11 @@
             "style": "form"
           },
           {
+            "description": "`present` lists reviews with at least one finding; `none` lists reviews\n with no finding.",
             "in": "query",
             "name": "findings",
             "schema": {
+              "description": "`present` lists reviews with at least one finding; `none` lists reviews\n with no finding.",
               "type": [
                 "string",
                 "null"
@@ -7423,9 +8723,11 @@
             "style": "form"
           },
           {
+            "description": "One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, `COMMIT`,\n `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.",
             "in": "query",
             "name": "kind",
             "schema": {
+              "description": "One review kind: `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, `COMMIT`,\n `FILES`, `MERGE_GROUP` or `REVISION_SCAN`.",
               "type": [
                 "string",
                 "null"
@@ -7482,9 +8784,11 @@
             "style": "form"
           },
           {
+            "description": "One review status: `PENDING`, `RUNNING`, `COMPLETED`, `INCOMPLETE`,\n `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.",
             "in": "query",
             "name": "status",
             "schema": {
+              "description": "One review status: `PENDING`, `RUNNING`, `COMPLETED`, `INCOMPLETE`,\n `FAILED`, `SUPERSEDED`, `STOPPED` or `EXCLUDED`.",
               "type": [
                 "string",
                 "null"
@@ -7728,7 +9032,7 @@
     },
     "/api/v1/organizations/{org_id}/reviews/{review_id}/rerun": {
       "post": {
-        "description": "Creates a new run of the review's original immutable code subject and leaves earlier runs unchanged. A local patch review is not rerun. Requires live GitHub write access; a repeated request can create another run, so clients make one attempt.",
+        "description": "Creates a new run of the review's original immutable code subject and leaves earlier runs unchanged. Local patch, commit, named-file, merge-group and deployment reviews, repository audits and on-demand scans are not rerun and return 400. Requires live GitHub write access; a repeated request can create another run, so clients make one attempt.",
         "operationId": "rerun_review",
         "parameters": [
           {
@@ -7842,7 +9146,7 @@
     },
     "/api/v1/organizations/{org_id}/reviews/{review_id}/stop": {
       "post": {
-        "description": "Stops the holder's own pending or running withheld patch, commit or named-file review. Requires a personal or CLI device token with live GitHub read access to the review's repository. Organization, CI job and MCP OAuth tokens cannot stop reviews. The stopped review retains its findings and exact code identity; requesting the same input returns that stopped review.",
+        "description": "Stops the holder's own pending or running withheld patch, commit or named-file review. Requires a personal or CLI device token with live GitHub read access to the review's repository. Organization, CI job and MCP OAuth tokens cannot stop reviews. A repository audit is refused on this route: only a person with live GitHub write access stops it, through the audit stop, and no token or platform authority does. The stopped review retains its findings and exact code identity; requesting the same input returns that stopped review.",
         "operationId": "stop_review",
         "parameters": [
           {

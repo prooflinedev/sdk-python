@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 from attrs import define as _attrs_define
@@ -22,9 +22,9 @@ class FindingValidationsExportRow:
 
        Attributes:
            created_at (datetime.datetime): When the validation was recorded; the export window filters on this time.
-           dataset_version (int): The row contract version, always `1`.
-           environment_id (UUID): The environment of the assessment that recorded the finding.
+           dataset_version (int): The row contract version, always `2`.
            finding_id (UUID): The finding occurrence the validation applies to.
+           lane (Literal['CODE'] | Literal['ENVIRONMENT']): The review lane whose assessment recorded a finding.
            organization_id (UUID): The organization that owns the finding.
            review_id (UUID): The review whose assessment recorded the finding.
            source (ExportValidationSource):
@@ -36,14 +36,17 @@ class FindingValidationsExportRow:
                none was
                 captured.
            actor_user_id (None | Unset | UUID): The Proofline user captured as the actor, null when none was captured.
+           environment_id (None | Unset | UUID): The environment of the assessment that recorded the finding, null for a
+               code-lane
+                finding.
            expires_at (datetime.datetime | None | Unset): When the decision expires, null when it records no expiry.
            repository_id (None | Unset | UUID): The review's primary repository, null when the review records none.
     """
 
     created_at: datetime.datetime
     dataset_version: int
-    environment_id: UUID
     finding_id: UUID
+    lane: Literal["CODE"] | Literal["ENVIRONMENT"]
     organization_id: UUID
     review_id: UUID
     source: ExportValidationSource
@@ -52,6 +55,7 @@ class FindingValidationsExportRow:
     actor_github_user_id: int | None | Unset = UNSET
     actor_login: None | str | Unset = UNSET
     actor_user_id: None | Unset | UUID = UNSET
+    environment_id: None | Unset | UUID = UNSET
     expires_at: datetime.datetime | None | Unset = UNSET
     repository_id: None | Unset | UUID = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -61,9 +65,10 @@ class FindingValidationsExportRow:
 
         dataset_version = self.dataset_version
 
-        environment_id = str(self.environment_id)
-
         finding_id = str(self.finding_id)
+
+        lane: Literal["CODE"] | Literal["ENVIRONMENT"]
+        lane = self.lane
 
         organization_id = str(self.organization_id)
 
@@ -95,6 +100,14 @@ class FindingValidationsExportRow:
         else:
             actor_user_id = self.actor_user_id
 
+        environment_id: None | str | Unset
+        if isinstance(self.environment_id, Unset):
+            environment_id = UNSET
+        elif isinstance(self.environment_id, UUID):
+            environment_id = str(self.environment_id)
+        else:
+            environment_id = self.environment_id
+
         expires_at: None | str | Unset
         if isinstance(self.expires_at, Unset):
             expires_at = UNSET
@@ -117,8 +130,8 @@ class FindingValidationsExportRow:
             {
                 "created_at": created_at,
                 "dataset_version": dataset_version,
-                "environment_id": environment_id,
                 "finding_id": finding_id,
+                "lane": lane,
                 "organization_id": organization_id,
                 "review_id": review_id,
                 "source": source,
@@ -132,6 +145,8 @@ class FindingValidationsExportRow:
             field_dict["actor_login"] = actor_login
         if actor_user_id is not UNSET:
             field_dict["actor_user_id"] = actor_user_id
+        if environment_id is not UNSET:
+            field_dict["environment_id"] = environment_id
         if expires_at is not UNSET:
             field_dict["expires_at"] = expires_at
         if repository_id is not UNSET:
@@ -146,9 +161,30 @@ class FindingValidationsExportRow:
 
         dataset_version = d.pop("dataset_version")
 
-        environment_id = UUID(d.pop("environment_id"))
-
         finding_id = UUID(d.pop("finding_id"))
+
+        def _parse_lane(data: object) -> Literal["CODE"] | Literal["ENVIRONMENT"]:
+            try:
+                if not (type(data) is str and data == "ENVIRONMENT"):
+                    raise TypeError()
+                componentsschemas_export_finding_lane_type_0 = cast(Literal["ENVIRONMENT"], data)
+                if componentsschemas_export_finding_lane_type_0 != "ENVIRONMENT":
+                    raise ValueError(
+                        f"/components/schemas/ExportFindingLane_type_0 must match const 'ENVIRONMENT', got '{componentsschemas_export_finding_lane_type_0}'"
+                    )
+                return componentsschemas_export_finding_lane_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            if not (type(data) is str and data == "CODE"):
+                raise TypeError()
+            componentsschemas_export_finding_lane_type_1 = cast(Literal["CODE"], data)
+            if componentsschemas_export_finding_lane_type_1 != "CODE":
+                raise ValueError(
+                    f"/components/schemas/ExportFindingLane_type_1 must match const 'CODE', got '{componentsschemas_export_finding_lane_type_1}'"
+                )
+            return componentsschemas_export_finding_lane_type_1
+
+        lane = _parse_lane(d.pop("lane"))
 
         organization_id = UUID(d.pop("organization_id"))
 
@@ -195,6 +231,23 @@ class FindingValidationsExportRow:
 
         actor_user_id = _parse_actor_user_id(d.pop("actor_user_id", UNSET))
 
+        def _parse_environment_id(data: object) -> None | Unset | UUID:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                environment_id_type_0 = UUID(data)
+
+                return environment_id_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UUID, data)
+
+        environment_id = _parse_environment_id(d.pop("environment_id", UNSET))
+
         def _parse_expires_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -232,8 +285,8 @@ class FindingValidationsExportRow:
         finding_validations_export_row = cls(
             created_at=created_at,
             dataset_version=dataset_version,
-            environment_id=environment_id,
             finding_id=finding_id,
+            lane=lane,
             organization_id=organization_id,
             review_id=review_id,
             source=source,
@@ -242,6 +295,7 @@ class FindingValidationsExportRow:
             actor_github_user_id=actor_github_user_id,
             actor_login=actor_login,
             actor_user_id=actor_user_id,
+            environment_id=environment_id,
             expires_at=expires_at,
             repository_id=repository_id,
         )

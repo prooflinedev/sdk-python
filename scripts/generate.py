@@ -13,8 +13,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-VERSION = "0.29.1"
-RUFF_VERSION = "0.14.3"
+VERSION = "0.30.0"
+RUFF_VERSION = "0.17.5"
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENT = ROOT / "openapi.public.json"
 OUTPUT = ROOT / "proofline" / "_generated"
@@ -86,6 +86,25 @@ def generate(destination: Path) -> None:
     if importlib.metadata.version("ruff") != RUFF_VERSION:
         raise SystemExit(f"Generation requires ruff=={RUFF_VERSION}.")
     document = json.loads(DOCUMENT.read_text())
+    # The 7.2 SDK accepts (checkpoint, due_at, result) positionally. The
+    # generator emits optional constructor arguments in schema property order.
+    checkpoint = document["components"]["schemas"]["DeployCoverageCheckpoint"]
+    properties = checkpoint["properties"]
+    checkpoint["properties"] = {"result": properties["result"], **properties}
+    # The 7.3 SDK accepts (scope, source, revision) positionally; incident
+    # came later, so it follows them.
+    revision = document["components"]["schemas"]["FindingRuleRevisionView"]
+    revision["properties"] = {
+        **{k: v for k, v in revision["properties"].items() if k != "incident"},
+        "incident": revision["properties"]["incident"],
+    }
+    # CommitDeploy's optional arguments up to workflow_run_id are positional
+    # in the 7.4 SDK; rolled_back came later, so it follows them.
+    deploy = document["components"]["schemas"]["CommitDeploy"]
+    deploy["properties"] = {
+        **{k: v for k, v in deploy["properties"].items() if k != "rolled_back"},
+        "rolled_back": deploy["properties"]["rolled_back"],
+    }
     with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
         json_document = Path(temporary) / "openapi.json"
         json_document.write_text(json.dumps(json_operations(document)))
@@ -108,12 +127,12 @@ def generate_json(destination: Path, document: Path) -> None:
     from openapi_python_client.config import ConfigFile
 
     config = Config.from_sources(
-        ConfigFile.load_from_path(ROOT / "generator.json"),
-        MetaType.NONE,
-        document,
-        "utf-8",
-        False,
-        destination,
+        config_file=ConfigFile.load_from_path(ROOT / "generator.json"),
+        meta_type=MetaType.NONE,
+        document_source=document,
+        file_encoding="utf-8",
+        overwrite=False,
+        output_path=destination,
     )
     data = GeneratorData.from_dict(json.loads(document.read_bytes()), config=config)
     if isinstance(data, GeneratorError):

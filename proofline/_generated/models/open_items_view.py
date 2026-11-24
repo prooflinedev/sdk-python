@@ -28,7 +28,10 @@ class OpenItemsView:
            open_findings (int): Unresolved recorded finding series, including notification-suppressed
                 findings, decisions whose dismissal or risk acceptance expired, and
                 earlier published series of the pull request that this review did not
-                find again.
+                find again, and the supported findings its `KIAN` environment
+                assessments published: each violated confirmed gate requirement the
+                change does not set and each investigation finding, which have no
+                severity.
            serious_findings (int): The `SERIOUS` findings among `open_findings`.
            earlier_findings (list[EarlierOpenFinding] | Unset): Exact published occurrences of earlier unresolved
                environment findings.

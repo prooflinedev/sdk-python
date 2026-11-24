@@ -20,9 +20,9 @@ class CustomerEvidenceRef:
              `recorded_read`, `sandbox_experiment`, `vendor_documentation` or
              `text`.
         label (str): The reference's display label, such as a path with its line range. A
-             recorded read, a vendor documentation read or an unnamed World entity
-             carries a fixed label, and a deterministic test carries its check's
-             readable name.
+             recorded read, a vendor documentation read, a customer tool call, a
+             static analysis result or an unnamed World entity carries a fixed
+             label, and a deterministic test carries its check's readable name.
         provenance_status (str): How the reference was obtained: `VERIFIED_REPOSITORY_READ`,
              `PINNED_WORLD_ENTITY`, `EXECUTED_DETERMINISTIC_TEST`,
              `EXECUTED_SANDBOX_EXPERIMENT`, `PROVIDER_REFERENCE`, `RECORDED_READ`

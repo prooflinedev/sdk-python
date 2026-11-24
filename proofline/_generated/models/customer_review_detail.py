@@ -10,6 +10,7 @@ from attrs import field as _attrs_field
 
 from ..models.incomplete_cause_type_0 import IncompleteCauseType0
 from ..models.patch_trigger_source import PatchTriggerSource
+from ..models.questions_unavailable_reason import QuestionsUnavailableReason
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from ..models.customer_code_assessment import CustomerCodeAssessment
     from ..models.deep_review_escalation import DeepReviewEscalation
     from ..models.environment_check import EnvironmentCheck
+    from ..models.linked_issue_capture import LinkedIssueCapture
     from ..models.local_reverification import LocalReverification
     from ..models.open_items_view import OpenItemsView
     from ..models.provider_wait import ProviderWait
@@ -27,9 +29,13 @@ if TYPE_CHECKING:
     from ..models.refresh_view import RefreshView
     from ..models.related_review import RelatedReview
     from ..models.review_actions import ReviewActions
+    from ..models.review_cost_funding import ReviewCostFunding
     from ..models.review_diff_stats import ReviewDiffStats
+    from ..models.review_investigation_finding import ReviewInvestigationFinding
     from ..models.review_open_items import ReviewOpenItems
+    from ..models.run_progress import RunProgress
     from ..models.subject_view import SubjectView
+    from ..models.submitted_review import SubmittedReview
     from ..models.walkthrough_view import WalkthroughView
 
 
@@ -68,6 +74,10 @@ class CustomerReviewDetail:
              repositories, workflow runs, artifacts or deployments.
         trigger_origin (str): Who asked for this review: `AUTOMATIC`, `COMMAND`, `RERUN`, `MANUAL`,
              or `UNKNOWN` for a trigger key this build does not recognise.
+        audit_mode (None | str | Unset): The repository audit's mode, `CODE_ONLY` or `INFRASTRUCTURE_AWARE`,
+             when this `REVISION_SCAN` is an audit. An audit's findings are in its
+             audit report, not in `finding_count` or the review's assessments.
+             Null for every other review.
         base_branch_commit_sha (None | str | Unset): The base branch tip GitHub reported when the review was triggered,
              display metadata that differs from `base_commit_sha` when the base
              branch moved after the branch point.
@@ -99,9 +109,19 @@ class CustomerReviewDetail:
              head GitHub does not have.
         completed_at (datetime.datetime | None | Unset): When the review reached a terminal status. Absent while it is
             still pending or running.
+        cost_funding (None | ReviewCostFunding | Unset): What paid for `cost_microcredits`, read from each debit's own
+            funding
+             records. Present exactly when `cost_microcredits` is.
         cost_microcredits (int | None | Unset): The credits this run was charged so far, in microcredits, whoever
              paid: the plan, the free review month or the organization's credits.
              Null for a caller who is not a member of the organization.
+        counted_incomplete_causes (list[IncompleteCauseType0 | Literal['OUT_OF_CREDITS'] |
+            Literal['SPEND_LIMIT_REACHED'] | Literal['UNKNOWN']] | Unset): `incomplete_causes` as the Inbox and the reviews
+            `cause:` search
+             count them: `OUT_OF_CREDITS` or `SPEND_LIMIT_REACHED` in place of the
+             `NOT_CONFIGURED` an assessment records when credits or a monthly spend
+             limit refused it. Present exactly when
+             `incomplete_causes` is.
         current_head_commit_sha (None | str | Unset): The pull request's head commit as the latest provider projection
             reports it, which can differ from `head_commit_sha`. Set only on a single-review read, and absent for a
             deployment review or a pull request with no projection.
@@ -130,7 +150,18 @@ class CustomerReviewDetail:
              assessments recorded it, in name order. `UNKNOWN` alone when none
              recorded a cause. Absent for every other status, and on reads other
              than the reviews list and a single review.
+        investigation_findings (list[ReviewInvestigationFinding] | Unset): The supported findings of each environment
+            investigation this review
+             published, by assessment in recorded order, including those the
+             pull-request Check left off its list. Absent when there are none.
         is_deep_review (bool | Unset): Present and true when this run is a Deep Review.
+        linked_issues (LinkedIssueCapture | None | Unset): What this review's linked-issue receipt recorded, read from
+            the
+             receipt and never from current settings, so a later allowlist change
+             does not alter it. Null when the review kept no receipt: a kind that
+             reads no linked issues, a run that has not prepared its context yet,
+             a run that predates receipts, or a receipt that does not decode. Null
+             never means that no issue was captured.
         local_reverifications (list[LocalReverification] | Unset): For a patch review requested with
             `verify_finding_ids`, each finding
              it re-verifies against the patch and the outcome. The outcome is
@@ -145,7 +176,8 @@ class CustomerReviewDetail:
              Proofline has read the group's members.
         open_items (None | OpenItemsView | Unset): What Proofline still has open for the reviewed head, counted from the
              current finding decisions. Absent while the review is `PENDING` or
-             `RUNNING`.
+             `RUNNING`, and for a repository audit, whose findings are in its
+             report.
         open_items_observation (None | ReviewOpenItems | Unset): Dated PR counts with head, evaluated-scope and bounded
             thread proof.
              Absent when that observation is unavailable; scalar counts remain separate.
@@ -166,6 +198,9 @@ class CustomerReviewDetail:
              is the fallback. Display metadata, never identity.
         pull_request_author_url (None | str | Unset): The author's profile on the deployment's GitHub host. Absent when
             no author login is known.
+        pull_request_draft (bool | None | Unset): Whether the pull request is a draft, as provider state last reported
+             it. Display state only: an open draft keeps `pull_request_state` `OPEN`.
+             Absent when `pull_request_state` is.
         pull_request_number (int | None | Unset): The pull request number. Absent for a deployment or patch review.
         pull_request_state (None | str | Unset): Current provider state of the pull request: `OPEN`, `CLOSED`, or
              `MERGED`. Absent for deployment reviews or a missing projection.
@@ -174,6 +209,12 @@ class CustomerReviewDetail:
              renderers must treat it as text, never markup.
         pull_request_url (None | str | Unset): The pull request on GitHub. Absent for a deployment review or when the
             repository is unknown.
+        questions_unavailable_reason (None | QuestionsUnavailableReason | Unset): Why Proofline answers no question
+            about this run: `FORK_PULL_REQUEST`
+             when the pull request is recorded as coming from a fork, whose
+             conversations the fork policy excludes whatever the run. Absent
+             otherwise, which does not mean a question will be answered: each one
+             is still checked for access and retained evidence.
         refresh (None | RefreshView | Unset): How this review decided what it reviews after a push or a full-review
              request. Absent for a review that refreshes nothing, and while a
              refresh has not decided yet.
@@ -191,15 +232,26 @@ class CustomerReviewDetail:
              automatic reviews, and on reviews recorded before requesters were.
         review_comment_url (None | str | Unset): The pull request review Proofline submitted for this review. Null when
              it submitted none.
+        review_cost_microcredits (int | None | Unset): The review work within the total, excluding the separately billed
+            PR
+             walkthrough. Visible to the same callers as the total.
         review_retracted_at (datetime.datetime | None | Unset): When a submitted pull request review was marked
             retracted, a marker
              only older versions set. Null otherwise.
         run_number (int | None | Unset): One-based, append-only ordinal within one repository pull request.
+        run_progress (None | RunProgress | Unset): Where an unfinished review's runs stand: running, queued for a
+            worker,
+             waiting for a scheduled step, or due again after an attempt that did
+             not finish. Null once the review has ended.
         stopped_at (datetime.datetime | None | Unset): When the review was stopped. Null unless it was stopped.
         stopped_by (ActorView | None | Unset): Who stopped this review, for a `STOPPED` review whose stop recorded its
              actor. Null otherwise.
         stopped_from (None | str | Unset): Where the review was stopped: `PROOFLINE` or `PULL_REQUEST`. Null unless
              the stop recorded it.
+        submitted_reviews (list[SubmittedReview] | Unset): Every distinct review Proofline submitted on the pull request
+            for this
+             run, including the early code publisher's, oldest first. Absent when it
+             submitted none.
         superseded_by_review_id (None | Unset | UUID): The newer review that superseded this one. Null when none did or
             the
              caller cannot see it.
@@ -228,6 +280,7 @@ class CustomerReviewDetail:
     stoppable: bool
     subjects: list[SubjectView]
     trigger_origin: str
+    audit_mode: None | str | Unset = UNSET
     base_branch_commit_sha: None | str | Unset = UNSET
     base_commit_sha: None | str | Unset = UNSET
     base_commit_url: None | str | Unset = UNSET
@@ -238,7 +291,17 @@ class CustomerReviewDetail:
     code_assessment: CustomerCodeAssessment | None | Unset = UNSET
     compare_url: None | str | Unset = UNSET
     completed_at: datetime.datetime | None | Unset = UNSET
+    cost_funding: None | ReviewCostFunding | Unset = UNSET
     cost_microcredits: int | None | Unset = UNSET
+    counted_incomplete_causes: (
+        list[
+            IncompleteCauseType0
+            | Literal["OUT_OF_CREDITS"]
+            | Literal["SPEND_LIMIT_REACHED"]
+            | Literal["UNKNOWN"]
+        ]
+        | Unset
+    ) = UNSET
     current_head_commit_sha: None | str | Unset = UNSET
     deep_review_escalation: DeepReviewEscalation | None | Unset = UNSET
     diff_stats: None | ReviewDiffStats | Unset = UNSET
@@ -248,7 +311,9 @@ class CustomerReviewDetail:
     head_commit_url: None | str | Unset = UNSET
     head_ref: None | str | Unset = UNSET
     incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
+    investigation_findings: list[ReviewInvestigationFinding] | Unset = UNSET
     is_deep_review: bool | Unset = UNSET
+    linked_issues: LinkedIssueCapture | None | Unset = UNSET
     local_reverifications: list[LocalReverification] | Unset = UNSET
     merge_gate: None | PullRequestMergeGate | Unset = UNSET
     merge_group_pull_request_numbers: list[int] | Unset = UNSET
@@ -261,10 +326,12 @@ class CustomerReviewDetail:
     pull_request_author_login: None | str | Unset = UNSET
     pull_request_author_name: None | str | Unset = UNSET
     pull_request_author_url: None | str | Unset = UNSET
+    pull_request_draft: bool | None | Unset = UNSET
     pull_request_number: int | None | Unset = UNSET
     pull_request_state: None | str | Unset = UNSET
     pull_request_title: None | str | Unset = UNSET
     pull_request_url: None | str | Unset = UNSET
+    questions_unavailable_reason: None | QuestionsUnavailableReason | Unset = UNSET
     refresh: None | RefreshView | Unset = UNSET
     repository_full_name: None | str | Unset = UNSET
     repository_id: None | Unset | UUID = UNSET
@@ -272,11 +339,14 @@ class CustomerReviewDetail:
     repository_url: None | str | Unset = UNSET
     requested_by: ActorView | None | Unset = UNSET
     review_comment_url: None | str | Unset = UNSET
+    review_cost_microcredits: int | None | Unset = UNSET
     review_retracted_at: datetime.datetime | None | Unset = UNSET
     run_number: int | None | Unset = UNSET
+    run_progress: None | RunProgress | Unset = UNSET
     stopped_at: datetime.datetime | None | Unset = UNSET
     stopped_by: ActorView | None | Unset = UNSET
     stopped_from: None | str | Unset = UNSET
+    submitted_reviews: list[SubmittedReview] | Unset = UNSET
     superseded_by_review_id: None | Unset | UUID = UNSET
     trigger_source: None | PatchTriggerSource | Unset = UNSET
     walkthrough: None | Unset | WalkthroughView = UNSET
@@ -288,12 +358,15 @@ class CustomerReviewDetail:
         from ..models.change_summary import ChangeSummary  # noqa: PLC0415
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
+        from ..models.linked_issue_capture import LinkedIssueCapture  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
         from ..models.provider_wait import ProviderWait  # noqa: PLC0415
         from ..models.pull_request_merge_gate import PullRequestMergeGate  # noqa: PLC0415
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
+        from ..models.review_cost_funding import ReviewCostFunding  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
+        from ..models.run_progress import RunProgress  # noqa: PLC0415
         from ..models.walkthrough_view import WalkthroughView  # noqa: PLC0415
 
         actions = self.actions.to_dict()
@@ -334,6 +407,12 @@ class CustomerReviewDetail:
             subjects.append(subjects_item)
 
         trigger_origin = self.trigger_origin
+
+        audit_mode: None | str | Unset
+        if isinstance(self.audit_mode, Unset):
+            audit_mode = UNSET
+        else:
+            audit_mode = self.audit_mode
 
         base_branch_commit_sha: None | str | Unset
         if isinstance(self.base_branch_commit_sha, Unset):
@@ -403,11 +482,43 @@ class CustomerReviewDetail:
         else:
             completed_at = self.completed_at
 
+        cost_funding: dict[str, Any] | None | Unset
+        if isinstance(self.cost_funding, Unset):
+            cost_funding = UNSET
+        elif isinstance(self.cost_funding, ReviewCostFunding):
+            cost_funding = self.cost_funding.to_dict()
+        else:
+            cost_funding = self.cost_funding
+
         cost_microcredits: int | None | Unset
         if isinstance(self.cost_microcredits, Unset):
             cost_microcredits = UNSET
         else:
             cost_microcredits = self.cost_microcredits
+
+        counted_incomplete_causes: (
+            list[
+                Literal["OUT_OF_CREDITS"]
+                | Literal["SPEND_LIMIT_REACHED"]
+                | Literal["UNKNOWN"]
+                | str
+            ]
+            | Unset
+        ) = UNSET
+        if not isinstance(self.counted_incomplete_causes, Unset):
+            counted_incomplete_causes = []
+            for counted_incomplete_causes_item_data in self.counted_incomplete_causes:
+                counted_incomplete_causes_item: (
+                    Literal["OUT_OF_CREDITS"]
+                    | Literal["SPEND_LIMIT_REACHED"]
+                    | Literal["UNKNOWN"]
+                    | str
+                )
+                if isinstance(counted_incomplete_causes_item_data, IncompleteCauseType0):
+                    counted_incomplete_causes_item = counted_incomplete_causes_item_data.value
+                else:
+                    counted_incomplete_causes_item = counted_incomplete_causes_item_data
+                counted_incomplete_causes.append(counted_incomplete_causes_item)
 
         current_head_commit_sha: None | str | Unset
         if isinstance(self.current_head_commit_sha, Unset):
@@ -469,7 +580,22 @@ class CustomerReviewDetail:
                     incomplete_causes_item = incomplete_causes_item_data
                 incomplete_causes.append(incomplete_causes_item)
 
+        investigation_findings: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.investigation_findings, Unset):
+            investigation_findings = []
+            for investigation_findings_item_data in self.investigation_findings:
+                investigation_findings_item = investigation_findings_item_data.to_dict()
+                investigation_findings.append(investigation_findings_item)
+
         is_deep_review = self.is_deep_review
+
+        linked_issues: dict[str, Any] | None | Unset
+        if isinstance(self.linked_issues, Unset):
+            linked_issues = UNSET
+        elif isinstance(self.linked_issues, LinkedIssueCapture):
+            linked_issues = self.linked_issues.to_dict()
+        else:
+            linked_issues = self.linked_issues
 
         local_reverifications: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.local_reverifications, Unset):
@@ -550,6 +676,12 @@ class CustomerReviewDetail:
         else:
             pull_request_author_url = self.pull_request_author_url
 
+        pull_request_draft: bool | None | Unset
+        if isinstance(self.pull_request_draft, Unset):
+            pull_request_draft = UNSET
+        else:
+            pull_request_draft = self.pull_request_draft
+
         pull_request_number: int | None | Unset
         if isinstance(self.pull_request_number, Unset):
             pull_request_number = UNSET
@@ -573,6 +705,14 @@ class CustomerReviewDetail:
             pull_request_url = UNSET
         else:
             pull_request_url = self.pull_request_url
+
+        questions_unavailable_reason: None | str | Unset
+        if isinstance(self.questions_unavailable_reason, Unset):
+            questions_unavailable_reason = UNSET
+        elif isinstance(self.questions_unavailable_reason, QuestionsUnavailableReason):
+            questions_unavailable_reason = self.questions_unavailable_reason.value
+        else:
+            questions_unavailable_reason = self.questions_unavailable_reason
 
         refresh: dict[str, Any] | None | Unset
         if isinstance(self.refresh, Unset):
@@ -622,6 +762,12 @@ class CustomerReviewDetail:
         else:
             review_comment_url = self.review_comment_url
 
+        review_cost_microcredits: int | None | Unset
+        if isinstance(self.review_cost_microcredits, Unset):
+            review_cost_microcredits = UNSET
+        else:
+            review_cost_microcredits = self.review_cost_microcredits
+
         review_retracted_at: None | str | Unset
         if isinstance(self.review_retracted_at, Unset):
             review_retracted_at = UNSET
@@ -635,6 +781,14 @@ class CustomerReviewDetail:
             run_number = UNSET
         else:
             run_number = self.run_number
+
+        run_progress: dict[str, Any] | None | Unset
+        if isinstance(self.run_progress, Unset):
+            run_progress = UNSET
+        elif isinstance(self.run_progress, RunProgress):
+            run_progress = self.run_progress.to_dict()
+        else:
+            run_progress = self.run_progress
 
         stopped_at: None | str | Unset
         if isinstance(self.stopped_at, Unset):
@@ -657,6 +811,13 @@ class CustomerReviewDetail:
             stopped_from = UNSET
         else:
             stopped_from = self.stopped_from
+
+        submitted_reviews: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.submitted_reviews, Unset):
+            submitted_reviews = []
+            for submitted_reviews_item_data in self.submitted_reviews:
+                submitted_reviews_item = submitted_reviews_item_data.to_dict()
+                submitted_reviews.append(submitted_reviews_item)
 
         superseded_by_review_id: None | str | Unset
         if isinstance(self.superseded_by_review_id, Unset):
@@ -703,6 +864,8 @@ class CustomerReviewDetail:
                 "trigger_origin": trigger_origin,
             }
         )
+        if audit_mode is not UNSET:
+            field_dict["audit_mode"] = audit_mode
         if base_branch_commit_sha is not UNSET:
             field_dict["base_branch_commit_sha"] = base_branch_commit_sha
         if base_commit_sha is not UNSET:
@@ -723,8 +886,12 @@ class CustomerReviewDetail:
             field_dict["compare_url"] = compare_url
         if completed_at is not UNSET:
             field_dict["completed_at"] = completed_at
+        if cost_funding is not UNSET:
+            field_dict["cost_funding"] = cost_funding
         if cost_microcredits is not UNSET:
             field_dict["cost_microcredits"] = cost_microcredits
+        if counted_incomplete_causes is not UNSET:
+            field_dict["counted_incomplete_causes"] = counted_incomplete_causes
         if current_head_commit_sha is not UNSET:
             field_dict["current_head_commit_sha"] = current_head_commit_sha
         if deep_review_escalation is not UNSET:
@@ -743,8 +910,12 @@ class CustomerReviewDetail:
             field_dict["head_ref"] = head_ref
         if incomplete_causes is not UNSET:
             field_dict["incomplete_causes"] = incomplete_causes
+        if investigation_findings is not UNSET:
+            field_dict["investigation_findings"] = investigation_findings
         if is_deep_review is not UNSET:
             field_dict["is_deep_review"] = is_deep_review
+        if linked_issues is not UNSET:
+            field_dict["linked_issues"] = linked_issues
         if local_reverifications is not UNSET:
             field_dict["local_reverifications"] = local_reverifications
         if merge_gate is not UNSET:
@@ -769,6 +940,8 @@ class CustomerReviewDetail:
             field_dict["pull_request_author_name"] = pull_request_author_name
         if pull_request_author_url is not UNSET:
             field_dict["pull_request_author_url"] = pull_request_author_url
+        if pull_request_draft is not UNSET:
+            field_dict["pull_request_draft"] = pull_request_draft
         if pull_request_number is not UNSET:
             field_dict["pull_request_number"] = pull_request_number
         if pull_request_state is not UNSET:
@@ -777,6 +950,8 @@ class CustomerReviewDetail:
             field_dict["pull_request_title"] = pull_request_title
         if pull_request_url is not UNSET:
             field_dict["pull_request_url"] = pull_request_url
+        if questions_unavailable_reason is not UNSET:
+            field_dict["questions_unavailable_reason"] = questions_unavailable_reason
         if refresh is not UNSET:
             field_dict["refresh"] = refresh
         if repository_full_name is not UNSET:
@@ -791,16 +966,22 @@ class CustomerReviewDetail:
             field_dict["requested_by"] = requested_by
         if review_comment_url is not UNSET:
             field_dict["review_comment_url"] = review_comment_url
+        if review_cost_microcredits is not UNSET:
+            field_dict["review_cost_microcredits"] = review_cost_microcredits
         if review_retracted_at is not UNSET:
             field_dict["review_retracted_at"] = review_retracted_at
         if run_number is not UNSET:
             field_dict["run_number"] = run_number
+        if run_progress is not UNSET:
+            field_dict["run_progress"] = run_progress
         if stopped_at is not UNSET:
             field_dict["stopped_at"] = stopped_at
         if stopped_by is not UNSET:
             field_dict["stopped_by"] = stopped_by
         if stopped_from is not UNSET:
             field_dict["stopped_from"] = stopped_from
+        if submitted_reviews is not UNSET:
+            field_dict["submitted_reviews"] = submitted_reviews
         if superseded_by_review_id is not UNSET:
             field_dict["superseded_by_review_id"] = superseded_by_review_id
         if trigger_source is not UNSET:
@@ -819,6 +1000,7 @@ class CustomerReviewDetail:
         from ..models.customer_code_assessment import CustomerCodeAssessment  # noqa: PLC0415
         from ..models.deep_review_escalation import DeepReviewEscalation  # noqa: PLC0415
         from ..models.environment_check import EnvironmentCheck  # noqa: PLC0415
+        from ..models.linked_issue_capture import LinkedIssueCapture  # noqa: PLC0415
         from ..models.local_reverification import LocalReverification  # noqa: PLC0415
         from ..models.open_items_view import OpenItemsView  # noqa: PLC0415
         from ..models.provider_wait import ProviderWait  # noqa: PLC0415
@@ -826,9 +1008,13 @@ class CustomerReviewDetail:
         from ..models.refresh_view import RefreshView  # noqa: PLC0415
         from ..models.related_review import RelatedReview  # noqa: PLC0415
         from ..models.review_actions import ReviewActions  # noqa: PLC0415
+        from ..models.review_cost_funding import ReviewCostFunding  # noqa: PLC0415
         from ..models.review_diff_stats import ReviewDiffStats  # noqa: PLC0415
+        from ..models.review_investigation_finding import ReviewInvestigationFinding  # noqa: PLC0415
         from ..models.review_open_items import ReviewOpenItems  # noqa: PLC0415
+        from ..models.run_progress import RunProgress  # noqa: PLC0415
         from ..models.subject_view import SubjectView  # noqa: PLC0415
+        from ..models.submitted_review import SubmittedReview  # noqa: PLC0415
         from ..models.walkthrough_view import WalkthroughView  # noqa: PLC0415
 
         d = dict(src_dict)
@@ -876,6 +1062,15 @@ class CustomerReviewDetail:
             subjects.append(subjects_item)
 
         trigger_origin = d.pop("trigger_origin")
+
+        def _parse_audit_mode(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        audit_mode = _parse_audit_mode(d.pop("audit_mode", UNSET))
 
         def _parse_base_branch_commit_sha(data: object) -> None | str | Unset:
             if data is None:
@@ -1001,6 +1196,23 @@ class CustomerReviewDetail:
 
         completed_at = _parse_completed_at(d.pop("completed_at", UNSET))
 
+        def _parse_cost_funding(data: object) -> None | ReviewCostFunding | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                cost_funding_type_0 = ReviewCostFunding.from_dict(data)
+
+                return cost_funding_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | ReviewCostFunding | Unset, data)
+
+        cost_funding = _parse_cost_funding(d.pop("cost_funding", UNSET))
+
         def _parse_cost_microcredits(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -1009,6 +1221,77 @@ class CustomerReviewDetail:
             return cast(int | None | Unset, data)
 
         cost_microcredits = _parse_cost_microcredits(d.pop("cost_microcredits", UNSET))
+
+        _counted_incomplete_causes = d.pop("counted_incomplete_causes", UNSET)
+        counted_incomplete_causes: (
+            list[
+                IncompleteCauseType0
+                | Literal["OUT_OF_CREDITS"]
+                | Literal["SPEND_LIMIT_REACHED"]
+                | Literal["UNKNOWN"]
+            ]
+            | Unset
+        ) = UNSET
+        if _counted_incomplete_causes is not UNSET:
+            counted_incomplete_causes = []
+            for counted_incomplete_causes_item_data in _counted_incomplete_causes:
+
+                def _parse_counted_incomplete_causes_item(
+                    data: object,
+                ) -> (
+                    IncompleteCauseType0
+                    | Literal["OUT_OF_CREDITS"]
+                    | Literal["SPEND_LIMIT_REACHED"]
+                    | Literal["UNKNOWN"]
+                ):
+                    try:
+                        if not isinstance(data, str):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_0 = IncompleteCauseType0(data)
+
+                        return componentsschemas_incomplete_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    try:
+                        if not (type(data) is str and data == "UNKNOWN"):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_1 = cast(Literal["UNKNOWN"], data)
+                        if componentsschemas_incomplete_cause_type_1 != "UNKNOWN":
+                            raise ValueError(
+                                f"/components/schemas/IncompleteCause_type_1 must match const 'UNKNOWN', got '{componentsschemas_incomplete_cause_type_1}'"
+                            )
+                        return componentsschemas_incomplete_cause_type_1
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    try:
+                        if not (type(data) is str and data == "OUT_OF_CREDITS"):
+                            raise TypeError()
+                        componentsschemas_credit_refusal_cause_type_0 = cast(
+                            Literal["OUT_OF_CREDITS"], data
+                        )
+                        if componentsschemas_credit_refusal_cause_type_0 != "OUT_OF_CREDITS":
+                            raise ValueError(
+                                f"/components/schemas/CreditRefusalCause_type_0 must match const 'OUT_OF_CREDITS', got '{componentsschemas_credit_refusal_cause_type_0}'"
+                            )
+                        return componentsschemas_credit_refusal_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not (type(data) is str and data == "SPEND_LIMIT_REACHED"):
+                        raise TypeError()
+                    componentsschemas_credit_refusal_cause_type_1 = cast(
+                        Literal["SPEND_LIMIT_REACHED"], data
+                    )
+                    if componentsschemas_credit_refusal_cause_type_1 != "SPEND_LIMIT_REACHED":
+                        raise ValueError(
+                            f"/components/schemas/CreditRefusalCause_type_1 must match const 'SPEND_LIMIT_REACHED', got '{componentsschemas_credit_refusal_cause_type_1}'"
+                        )
+                    return componentsschemas_credit_refusal_cause_type_1
+
+                counted_incomplete_causes_item = _parse_counted_incomplete_causes_item(
+                    counted_incomplete_causes_item_data
+                )
+
+                counted_incomplete_causes.append(counted_incomplete_causes_item)
 
         def _parse_current_head_commit_sha(data: object) -> None | str | Unset:
             if data is None:
@@ -1125,7 +1408,35 @@ class CustomerReviewDetail:
 
                 incomplete_causes.append(incomplete_causes_item)
 
+        _investigation_findings = d.pop("investigation_findings", UNSET)
+        investigation_findings: list[ReviewInvestigationFinding] | Unset = UNSET
+        if _investigation_findings is not UNSET:
+            investigation_findings = []
+            for investigation_findings_item_data in _investigation_findings:
+                investigation_findings_item = ReviewInvestigationFinding.from_dict(
+                    investigation_findings_item_data
+                )
+
+                investigation_findings.append(investigation_findings_item)
+
         is_deep_review = d.pop("is_deep_review", UNSET)
+
+        def _parse_linked_issues(data: object) -> LinkedIssueCapture | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                linked_issues_type_0 = LinkedIssueCapture.from_dict(data)
+
+                return linked_issues_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(LinkedIssueCapture | None | Unset, data)
+
+        linked_issues = _parse_linked_issues(d.pop("linked_issues", UNSET))
 
         _local_reverifications = d.pop("local_reverifications", UNSET)
         local_reverifications: list[LocalReverification] | Unset = UNSET
@@ -1276,6 +1587,15 @@ class CustomerReviewDetail:
             d.pop("pull_request_author_url", UNSET)
         )
 
+        def _parse_pull_request_draft(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        pull_request_draft = _parse_pull_request_draft(d.pop("pull_request_draft", UNSET))
+
         def _parse_pull_request_number(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -1311,6 +1631,27 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         pull_request_url = _parse_pull_request_url(d.pop("pull_request_url", UNSET))
+
+        def _parse_questions_unavailable_reason(
+            data: object,
+        ) -> None | QuestionsUnavailableReason | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                questions_unavailable_reason_type_0 = QuestionsUnavailableReason(data)
+
+                return questions_unavailable_reason_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | QuestionsUnavailableReason | Unset, data)
+
+        questions_unavailable_reason = _parse_questions_unavailable_reason(
+            d.pop("questions_unavailable_reason", UNSET)
+        )
 
         def _parse_refresh(data: object) -> None | RefreshView | Unset:
             if data is None:
@@ -1399,6 +1740,17 @@ class CustomerReviewDetail:
 
         review_comment_url = _parse_review_comment_url(d.pop("review_comment_url", UNSET))
 
+        def _parse_review_cost_microcredits(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        review_cost_microcredits = _parse_review_cost_microcredits(
+            d.pop("review_cost_microcredits", UNSET)
+        )
+
         def _parse_review_retracted_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -1424,6 +1776,23 @@ class CustomerReviewDetail:
             return cast(int | None | Unset, data)
 
         run_number = _parse_run_number(d.pop("run_number", UNSET))
+
+        def _parse_run_progress(data: object) -> None | RunProgress | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                run_progress_type_0 = RunProgress.from_dict(data)
+
+                return run_progress_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | RunProgress | Unset, data)
+
+        run_progress = _parse_run_progress(d.pop("run_progress", UNSET))
 
         def _parse_stopped_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -1467,6 +1836,15 @@ class CustomerReviewDetail:
             return cast(None | str | Unset, data)
 
         stopped_from = _parse_stopped_from(d.pop("stopped_from", UNSET))
+
+        _submitted_reviews = d.pop("submitted_reviews", UNSET)
+        submitted_reviews: list[SubmittedReview] | Unset = UNSET
+        if _submitted_reviews is not UNSET:
+            submitted_reviews = []
+            for submitted_reviews_item_data in _submitted_reviews:
+                submitted_reviews_item = SubmittedReview.from_dict(submitted_reviews_item_data)
+
+                submitted_reviews.append(submitted_reviews_item)
 
         def _parse_superseded_by_review_id(data: object) -> None | Unset | UUID:
             if data is None:
@@ -1537,6 +1915,7 @@ class CustomerReviewDetail:
             stoppable=stoppable,
             subjects=subjects,
             trigger_origin=trigger_origin,
+            audit_mode=audit_mode,
             base_branch_commit_sha=base_branch_commit_sha,
             base_commit_sha=base_commit_sha,
             base_commit_url=base_commit_url,
@@ -1547,7 +1926,9 @@ class CustomerReviewDetail:
             code_assessment=code_assessment,
             compare_url=compare_url,
             completed_at=completed_at,
+            cost_funding=cost_funding,
             cost_microcredits=cost_microcredits,
+            counted_incomplete_causes=counted_incomplete_causes,
             current_head_commit_sha=current_head_commit_sha,
             deep_review_escalation=deep_review_escalation,
             diff_stats=diff_stats,
@@ -1557,7 +1938,9 @@ class CustomerReviewDetail:
             head_commit_url=head_commit_url,
             head_ref=head_ref,
             incomplete_causes=incomplete_causes,
+            investigation_findings=investigation_findings,
             is_deep_review=is_deep_review,
+            linked_issues=linked_issues,
             local_reverifications=local_reverifications,
             merge_gate=merge_gate,
             merge_group_pull_request_numbers=merge_group_pull_request_numbers,
@@ -1570,10 +1953,12 @@ class CustomerReviewDetail:
             pull_request_author_login=pull_request_author_login,
             pull_request_author_name=pull_request_author_name,
             pull_request_author_url=pull_request_author_url,
+            pull_request_draft=pull_request_draft,
             pull_request_number=pull_request_number,
             pull_request_state=pull_request_state,
             pull_request_title=pull_request_title,
             pull_request_url=pull_request_url,
+            questions_unavailable_reason=questions_unavailable_reason,
             refresh=refresh,
             repository_full_name=repository_full_name,
             repository_id=repository_id,
@@ -1581,11 +1966,14 @@ class CustomerReviewDetail:
             repository_url=repository_url,
             requested_by=requested_by,
             review_comment_url=review_comment_url,
+            review_cost_microcredits=review_cost_microcredits,
             review_retracted_at=review_retracted_at,
             run_number=run_number,
+            run_progress=run_progress,
             stopped_at=stopped_at,
             stopped_by=stopped_by,
             stopped_from=stopped_from,
+            submitted_reviews=submitted_reviews,
             superseded_by_review_id=superseded_by_review_id,
             trigger_source=trigger_source,
             walkthrough=walkthrough,

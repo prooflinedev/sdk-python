@@ -3,7 +3,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
-import httpx
+import httpx2
 
 from ...client import AuthenticatedClient, Client
 from ...models.agent_session_prompt_type_0 import AgentSessionPromptType0
@@ -16,6 +16,7 @@ def _get_kwargs(
     org_id: UUID,
     finding_id: UUID,
 ) -> dict[str, Any]:
+
     _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/api/v1/organizations/{org_id}/findings/{finding_id}/agent-session-prompt".format(
@@ -28,7 +29,7 @@ def _get_kwargs(
 
 
 def _parse_response(
-    *, client: AuthenticatedClient | Client, response: httpx.Response
+    *, client: AuthenticatedClient | Client, response: httpx2.Response
 ) -> AgentSessionPromptType0 | AgentSessionPromptType1 | Problem:
     if response.status_code == 200:
 
@@ -59,7 +60,7 @@ def _parse_response(
 
 
 def _build_response(
-    *, client: AuthenticatedClient | Client, response: httpx.Response
+    *, client: AuthenticatedClient | Client, response: httpx2.Response
 ) -> Response[AgentSessionPromptType0 | AgentSessionPromptType1 | Problem]:
     return Response(
         status_code=HTTPStatus(response.status_code),
@@ -78,8 +79,9 @@ def sync_detailed(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):
@@ -87,7 +89,7 @@ def sync_detailed(
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         Response[AgentSessionPromptType0 | AgentSessionPromptType1 | Problem]
@@ -114,8 +116,9 @@ def sync(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):
@@ -123,7 +126,7 @@ def sync(
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         AgentSessionPromptType0 | AgentSessionPromptType1 | Problem
@@ -145,8 +148,9 @@ async def asyncio_detailed(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):
@@ -154,7 +158,7 @@ async def asyncio_detailed(
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         Response[AgentSessionPromptType0 | AgentSessionPromptType1 | Problem]
@@ -179,8 +183,9 @@ async def asyncio(
     """Preview a coding-agent session
 
      Returns the exact prompt and target a coding-agent session on this pull request finding would send,
-    with every protected value withheld, and the prompt digest a start names. Requires access to every
-    repository in the review.
+    with every protected value withheld, the prompt digest a start names, and the ID and vendor of each
+    active connection that allowlists the target repository. Requires access to every repository in the
+    review.
 
     Args:
         org_id (UUID):
@@ -188,7 +193,7 @@ async def asyncio(
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
+        httpx2.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
         AgentSessionPromptType0 | AgentSessionPromptType1 | Problem

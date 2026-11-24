@@ -1,4 +1,4 @@
-"""Use uv 0.10.12, verifying the official release archive before execution."""
+"""Use uv 0.13.7, verifying the official release archive before execution."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ import tarfile
 from pathlib import Path
 from urllib.request import urlopen
 
-VERSION = "0.10.12"
-# https://github.com/astral-sh/uv/releases/tag/0.10.12
+VERSION = "0.13.7"
+# https://github.com/astral-sh/uv/releases/tag/0.13.7
 CHECKSUMS = {
-    "aarch64-apple-darwin": "ae738b5661a900579ec621d3918c0ef17bdec0da2a8a6d8b161137cd15f25414",
-    "x86_64-apple-darwin": "17443e293f2ae407bb2d8d34b875ebfe0ae01cf1296de5647e69e7b2e2b428f0",
-    "aarch64-unknown-linux-gnu": "0ed7d20f49f6b9b60d45fdfcac28f3ac01a671a6ef08672401ed2833423fea2a",
-    "x86_64-unknown-linux-gnu": "ec72570c9d1f33021aa80b176d7baba390de2cfeb1abcbefca346d563bf17484",
+    "aarch64-apple-darwin": "81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731",
+    "x86_64-apple-darwin": "20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7",
+    "aarch64-unknown-linux-gnu": "71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc",
+    "x86_64-unknown-linux-gnu": "c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83",
 }
 
 
@@ -41,7 +41,7 @@ def executable(tools: Path) -> Path:
     system = {"Darwin": "apple-darwin", "Linux": "unknown-linux-gnu"}.get(platform.system())
     target = f"{architecture}-{system}"
     if target not in CHECKSUMS:
-        raise SystemExit("Install uv 0.10.12 to run the gate on this bootstrap platform.")
+        raise SystemExit("Install uv 0.13.7 to run the gate on this bootstrap platform.")
     tools.mkdir(parents=True, exist_ok=True)
     archive = tools / f"uv-{VERSION}-{target}.tar.gz"
     if not archive.exists():
