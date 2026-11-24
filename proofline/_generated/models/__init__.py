@@ -95,6 +95,7 @@ from .local_reverification import LocalReverification
 from .local_reverification_outcome import LocalReverificationOutcome
 from .local_stored_check import LocalStoredCheck
 from .matched_local_finding import MatchedLocalFinding
+from .model_warning import ModelWarning
 from .not_assessed_view import NotAssessedView
 from .open_finding_counts import OpenFindingCounts
 from .open_item_environment import OpenItemEnvironment
@@ -277,6 +278,7 @@ __all__ = (
     "LocalReverificationOutcome",
     "LocalStoredCheck",
     "MatchedLocalFinding",
+    "ModelWarning",
     "NotAssessedView",
     "OpenFindingCounts",
     "OpenItemEnvironment",
