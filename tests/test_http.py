@@ -1323,14 +1323,17 @@ async def test_wait_ends_on_the_read_that_names_another_head(
             first_cb_event = asyncio.Event()
             second_cb_reached = asyncio.Event()
             cb_gate = asyncio.Event()
+            cb_completed = False
             waiter_task: asyncio.Task[Any] | None = None
 
             async def async_mismatch_cb(r: Any) -> None:
+                nonlocal cb_completed
                 if len(polled_reviews) == 1:
                     assert waiter_task is not None
                     assert not waiter_task.done()
                     second_cb_reached.set()
                     await cb_gate.wait()
+                    cb_completed = True
                 captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
                 polled_reviews.append((r, len(server.requests)))
                 r.status = "MUTATED"
@@ -1394,22 +1397,22 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                         if not gate_waiter.done():
                             gate_waiter.cancel()
 
-                    await asyncio.sleep(0.01)
+                    assert not cb_completed
                     assert not waiter_task.done()
+                    assert getattr(waiter_task, "_fut_waiter", None) is not None
+                    assert not waiter_task._fut_waiter.done()
                     cb_gate.set()
                     done_w, _ = await asyncio.wait({waiter_task}, timeout=5.0)
                     if waiter_task not in done_w:
                         pytest.fail("waiter_task did not complete in 5.0s")
                     result = waiter_task.result()
+                    assert cb_completed
                 finally:
                     cb_gate.set()
                     if waiter_task is not None and not waiter_task.done():
                         waiter_task.cancel()
                     if waiter_task is not None:
-                        try:
-                            await asyncio.wait({waiter_task}, timeout=1.0)
-                        except (asyncio.CancelledError, BaseException):
-                            pass
+                        await asyncio.wait({waiter_task}, timeout=1.0)
             else:
                 result = await call(
                     client,
@@ -2759,7 +2762,10 @@ async def test_wait_for_review_invokes_on_poll_callback(
 
     # Assert async client also works with regular synchronous callbacks returning None
     if mode == "async":
-        with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async_nested_responses = [dict(responses[0]), dict(responses[1])]
+        for resp in async_nested_responses:
+            resp["nested_meta"] = {"key": "original", "tags": ["a", "b"]}
+        with Server(lambda request, index: Reply(body=async_nested_responses[index])) as server:
             sync_calls: list[tuple[str, int]] = []
 
             def inline_sync_cb(r: Any) -> None:
@@ -2770,6 +2776,8 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 assert len(r.assessments) > 0
                 assert r.assessments[0].checks.receipt_recorded is True
                 r.assessments[0].checks.receipt_recorded = False
+                r.additional_properties["nested_meta"]["key"] = "mutated"
+                r.additional_properties["nested_meta"]["tags"].append("c")
 
             async with session("async", server.url) as client:
                 result = await call(
@@ -2786,6 +2794,8 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 assert result.review.actions.publish is False
                 assert "mutated" not in result.review.additional_properties
                 assert result.review.assessments[0].checks.receipt_recorded is True
+                assert result.review.additional_properties["nested_meta"]["key"] == "original"
+                assert result.review.additional_properties["nested_meta"]["tags"] == ["a", "b"]
 
         # Assert callback TimeoutError before deadline propagates
         async def failing_callback(r: Any) -> None:
@@ -2829,31 +2839,20 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 except BaseException:
                     pass
 
-        # Assert pending future failing at exact deadline is detached and returns outcome
+        # Assert already-failed future returned at exact fake-clock deadline preserves COMPLETED
         failed_at_deadline_futs: list[asyncio.Future[None]] = []
         call_start = clock.now
 
-        class PendingDeadlineFuture(asyncio.Future[None]):
-            def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
-                def wrapped_fn(f: Any) -> None:
-                    clock.now = call_start + 10.0
-                    fn(f)
-
-                super().add_done_callback(wrapped_fn, context=context)
-
-        async def fail_pending_at_deadline(f: asyncio.Future[None]) -> None:
-            await asyncio.sleep(0.01)
-            f.set_exception(ValueError("pending future error exactly at deadline"))
-
         def failed_future_at_deadline_callback(r: Any) -> asyncio.Future[None]:
+            clock.now = call_start + 10.0
             loop = asyncio.get_running_loop()
-            fut: asyncio.Future[None] = PendingDeadlineFuture(loop=loop)
+            fut: asyncio.Future[None] = loop.create_future()
+            fut.set_exception(ValueError("already-failed future exactly at deadline"))
             failed_at_deadline_futs.append(fut)
-            asyncio.create_task(fail_pending_at_deadline(fut))
             return fut
 
         try:
-            with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
                 async with session("async", server.url) as client:
                     outcome_at_dl = await client.wait_for_review(
                         ORG,
@@ -2861,7 +2860,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
                         timeout=10,
                         on_poll=failed_future_at_deadline_callback,
                     )
-                    assert outcome_at_dl.status == "TIMED_OUT"
+                    assert outcome_at_dl.status == "COMPLETED"
         finally:
             for ff in failed_at_deadline_futs:
                 try:
@@ -3726,18 +3725,16 @@ async def main() -> None:
                     pass
             assert not polling_waiter_task.done()
             clock.advance(1.0)
-            res_7 = await polling_waiter_task
+            done_7_res, _ = await asyncio.wait({polling_waiter_task}, timeout=1.0)
+            assert polling_waiter_task in done_7_res, "polling_waiter_task deadlocked on callback"
+            res_7 = polling_waiter_task.result()
             assert res_7.status == "TIMED_OUT"
-            await asyncio.wait_for(callback_completed_7.wait(), timeout=1.0)
+            done_cb7, _ = await asyncio.wait(
+                {asyncio.create_task(callback_completed_7.wait())}, timeout=1.0
+            )
+            assert callback_completed_7.is_set()
         finally:
             sleep_forbidden = False
-            if polling_waiter_task is not None and not polling_waiter_task.done():
-                polling_waiter_task.cancel()
-            if polling_waiter_task is not None:
-                try:
-                    await polling_waiter_task
-                except (asyncio.CancelledError, BaseException):
-                    pass
 
 asyncio.run(main())
 """
@@ -3753,6 +3750,8 @@ asyncio.run(main())
 
     # Assert callback modifying review does not mutate returned review in both sync and async
     mutated_count = 0
+    resp_with_nested = dict(responses[1])
+    resp_with_nested["nested_meta"] = {"key": "original", "tags": ["a", "b"]}
 
     def sync_mutating_callback(r: Any) -> None:
         nonlocal mutated_count
@@ -3763,6 +3762,8 @@ asyncio.run(main())
         assert len(r.assessments) > 0
         assert r.assessments[0].checks.receipt_recorded is True
         r.assessments[0].checks.receipt_recorded = False
+        r.additional_properties["nested_meta"]["key"] = "mutated"
+        r.additional_properties["nested_meta"]["tags"].append("c")
 
     async def async_mutating_callback(r: Any) -> None:
         nonlocal mutated_count
@@ -3774,8 +3775,10 @@ asyncio.run(main())
         assert len(r.assessments) > 0
         assert r.assessments[0].checks.receipt_recorded is True
         r.assessments[0].checks.receipt_recorded = False
+        r.additional_properties["nested_meta"]["key"] = "mutated"
+        r.additional_properties["nested_meta"]["tags"].append("c")
 
-    with Server(lambda request, index: Reply(body=responses[1])) as server:
+    with Server(lambda request, index: Reply(body=resp_with_nested)) as server:
         async with session(mode, server.url) as client:
             mut_cb = async_mutating_callback if mode == "async" else sync_mutating_callback
             res = await call(
@@ -3791,6 +3794,8 @@ asyncio.run(main())
             assert res.review.actions.publish is False
             assert "mutated" not in res.review.additional_properties
             assert res.review.assessments[0].checks.receipt_recorded is True
+            assert res.review.additional_properties["nested_meta"]["key"] == "original"
+            assert res.review.additional_properties["nested_meta"]["tags"] == ["a", "b"]
 
     # Test snapshot directly with an in-memory deep extension and custom tuple to bypass HTTP JSON
     deep_container: dict[str, Any] = {}
@@ -4650,14 +4655,16 @@ asyncio.run(main())
     assert copied_arr is not c_arr
     assert copied_mv.obj is not c_arr
     assert copied_bytes.obj is not c_arr
-    # Write through cloned byte view and verify sibling view and cloned array see the change
-    # while source bytes stay unchanged:
-    copied_bytes[0] = 99
-    assert copied_arr[0] != 1
-    assert bytes(copied_mv)[0] == 99
-    assert c_arr[0] == 1
-    assert bytes(mv_ctypes)[0] == 1
-    assert mv_ctypes_bytes[0] == 1
+    # Write through cloned byte view at the second element and assert that the reversed slice
+    # reflects the write while the source stays unchanged:
+    copied_bytes[4] = 99
+    assert copied_arr[1] == 99
+    assert bytes(copied_mv)[4] == 99
+    assert bytes(copied_slice)[0] == 99
+    assert c_arr[1] == 2
+    assert bytes(mv_ctypes)[4] == 2
+    assert bytes(mv_ctypes_slice)[0] == 2
+    assert mv_ctypes_bytes[4] == 2
 
     class MutableArray(ctypes.c_int32 * 4):
         pass

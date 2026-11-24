@@ -399,9 +399,14 @@ _SAFE_SPECIAL_ATTRS: set[str] = {
 }
 
 
-def _is_pointer_bearing_ctypes_type(t: Any) -> bool:
+def _is_pointer_bearing_ctypes_type(t: Any, seen: set[type] | None = None) -> bool:
     if not isinstance(t, type):
         return True
+    if seen is None:
+        seen = set()
+    if t in seen:
+        return False
+    seen.add(t)
     if issubclass(
         t,
         (
@@ -417,7 +422,17 @@ def _is_pointer_bearing_ctypes_type(t: Any) -> bool:
     if code in ("O", "P", "z", "Z", "u"):
         return True
     if issubclass(t, ctypes.Array):
-        return _is_pointer_bearing_ctypes_type(getattr(t, "_type_", None))
+        elem_t = getattr(t, "_type_", None)
+        return _is_pointer_bearing_ctypes_type(elem_t, seen)
+    if issubclass(t, (ctypes.Structure, ctypes.Union)):
+        for base in t.__mro__:
+            fields = getattr(base, "_fields_", None)
+            if fields:
+                for field_spec in fields:
+                    if len(field_spec) >= 2:
+                        field_type = field_spec[1]
+                        if _is_pointer_bearing_ctypes_type(field_type, seen):
+                            return True
     return False
 
 
@@ -1016,25 +1031,28 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                     except BaseException:
                         pass
                 resolved_mv: Any
-                if isinstance(exporter, ctypes.Array):
+                if isinstance(exporter, (ctypes.Array, ctypes.Structure, ctypes.Union)):
                     exp_cls = type(exporter)
-                    exp_elem_type = getattr(exp_cls, "_type_", None)
-                    exp_len = getattr(exp_cls, "_length_", None)
-                    if not (isinstance(exp_elem_type, type) or hasattr(exp_elem_type, "_type_")):
+                    if _is_pointer_bearing_ctypes_type(exp_cls):
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
                             f"{exp_cls.__name__}"
                         )
-                    if _is_pointer_bearing_ctypes_type(exp_elem_type):
-                        raise TypeError(
-                            "Unsupported mutable value in review extension data: "
-                            f"{exp_cls.__name__}"
-                        )
-                    if not isinstance(exp_len, int) or exp_len < 0:
-                        raise TypeError(
-                            "Unsupported mutable value in review extension data: "
-                            f"{exp_cls.__name__}"
-                        )
+                    if isinstance(exporter, ctypes.Array):
+                        exp_elem_type = getattr(exp_cls, "_type_", None)
+                        exp_len = getattr(exp_cls, "_length_", None)
+                        if not (
+                            isinstance(exp_elem_type, type) or hasattr(exp_elem_type, "_type_")
+                        ):
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{exp_cls.__name__}"
+                            )
+                        if not isinstance(exp_len, int) or exp_len < 0:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{exp_cls.__name__}"
+                            )
                     if _has_mutable_class_attrs(exp_cls):
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
@@ -1117,10 +1135,13 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                 last = offset + (shape - 1) * stride
                                 stop = None if (last + stride < 0) else (last + stride)
                                 resolved_mv = full_bytes[offset:stop:stride]
+                        elif val_shape is not None and val.ndim > 1:
+                            full_bytes_slice: Any = full_bytes[offset : offset + val.nbytes]
+                            resolved_mv = full_bytes_slice.cast("B", shape=val_shape)
                         elif val.c_contiguous:
                             resolved_mv = full_bytes[offset : offset + val.nbytes]
                         elif val_shape is not None:
-                            full_bytes_slice: Any = full_bytes[offset : offset + val.nbytes]
+                            full_bytes_slice = full_bytes[offset : offset + val.nbytes]
                             resolved_mv = full_bytes_slice.cast("B", shape=val_shape)
                         else:
                             resolved_mv = full_bytes[offset : offset + val.nbytes]
@@ -1136,31 +1157,33 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                 shape = val_shape[0]
                                 stride = val_strides[0]
                                 itemsize = val.itemsize
-                                elem_stride = stride // itemsize
-                                min_byte = (
-                                    offset if stride >= 0 else (offset + (shape - 1) * stride)
-                                )
-                                max_byte = (
-                                    (offset + shape * stride)
-                                    if stride >= 0
-                                    else (offset + itemsize)
-                                )
-                                span_bytes: Any = full_bytes[min_byte:max_byte]
-                                span_cast: Any = span_bytes.cast(val.format)
-                                local_offset = (offset - min_byte) // itemsize
                                 if shape == 0:
-                                    resolved_mv = span_cast[0:0]
-                                elif elem_stride > 0:
-                                    resolved_mv = span_cast[
-                                        local_offset : local_offset
-                                        + shape * elem_stride : elem_stride
-                                    ]
+                                    empty_bytes: Any = full_bytes[0:0]
+                                    resolved_mv = empty_bytes.cast(val.format)
                                 else:
-                                    last = local_offset + (shape - 1) * elem_stride
-                                    stop = (
-                                        None if (last + elem_stride < 0) else (last + elem_stride)
-                                    )
-                                    resolved_mv = span_cast[local_offset:stop:elem_stride]
+                                    elem_stride = stride // itemsize
+                                    if stride >= 0:
+                                        min_byte = offset
+                                        max_byte = offset + (shape - 1) * stride + itemsize
+                                    else:
+                                        min_byte = offset + (shape - 1) * stride
+                                        max_byte = offset + itemsize
+                                    span_bytes: Any = full_bytes[min_byte:max_byte]
+                                    span_cast: Any = span_bytes.cast(val.format)
+                                    local_offset = (offset - min_byte) // itemsize
+                                    if elem_stride > 0:
+                                        resolved_mv = span_cast[
+                                            local_offset : local_offset
+                                            + shape * elem_stride : elem_stride
+                                        ]
+                                    else:
+                                        last = local_offset + (shape - 1) * elem_stride
+                                        stop = (
+                                            None
+                                            if (last + elem_stride < 0)
+                                            else (last + elem_stride)
+                                        )
+                                        resolved_mv = span_cast[local_offset:stop:elem_stride]
                             else:
                                 full_bytes_slice = full_bytes[offset : offset + val.nbytes]
                                 if val_shape is not None:
@@ -1492,7 +1515,7 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {val_cls.__name__}"
                     )
-                if _is_pointer_bearing_ctypes_type(val_elem_type):
+                if _is_pointer_bearing_ctypes_type(val_cls):
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {val_cls.__name__}"
                     )
