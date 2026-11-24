@@ -101,6 +101,8 @@ _REVIEW_ROUTING_MODELS: _ReviewRoutingModels = (
     ReviewRoutingViewType1,
     ReviewRoutingViewType2,
 )
+# Socket timeouts on Windows can complete a fraction of a second early due to timer resolution.
+_DEADLINE_TOLERANCE_SECONDS = 0.025
 
 
 class ReviewFilters(TypedDict, total=False):
@@ -568,7 +570,10 @@ class ProoflineClient(Operations):
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    if (
+                        error.status == 0
+                        and (_transport.remaining() or 0) <= _DEADLINE_TOLERANCE_SECONDS
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
@@ -954,7 +959,10 @@ class AsyncProoflineClient(AsyncOperations):
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    if (
+                        error.status == 0
+                        and (_transport.remaining() or 0) <= _DEADLINE_TOLERANCE_SECONDS
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
