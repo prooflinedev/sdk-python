@@ -49,6 +49,7 @@ from inspect import (
 from inspect import (
     signature as inspect_signature,
 )
+from enum import Enum
 from string import hexdigits
 from time import monotonic, sleep
 from types import (
@@ -326,6 +327,8 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     t = type(val)
     if t in _IMMUTABLE_TYPES:
         return True
+    if isinstance(val, Enum):
+        return True
     if t is datetime.datetime:
         tz = val.tzinfo
         return tz is None or type(tz) is datetime.timezone
@@ -490,10 +493,16 @@ def _assign_target(target: Any, key: Any, is_attr: bool, val: Any) -> None:
         if is_desc:
             try:
                 slot_or_name.__set__(target, val)
-            except AttributeError:
+            except (AttributeError, TypeError):
                 pass
         else:
-            setattr(target, slot_or_name, val)
+            try:
+                setattr(target, slot_or_name, val)
+            except (AttributeError, TypeError):
+                try:
+                    object.__setattr__(target, slot_or_name, val)
+                except Exception:
+                    pass
     else:
         if isinstance(target, deque):
             deque.__setitem__(target, key, val)
@@ -552,8 +561,11 @@ def _install_cloned_dict(
                 if new_obj is not None:
                     try:
                         new_obj.__dict__ = cloned_dict
-                    except AttributeError:
-                        pass
+                    except (AttributeError, TypeError):
+                        try:
+                            object.__setattr__(new_obj, "__dict__", cloned_dict)
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -699,9 +711,40 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                     pending_assignments.setdefault(val_id, []).append((target, key, is_attr))
                 continue
             if isinstance(val, UUID):
-                cloned_uuid = UUID(int=val.int)
+                uuid_cls: Any = type(val)
+                if uuid_cls is UUID:
+                    cloned_uuid = UUID(int=val.int, is_safe=val.is_safe)
+                else:
+                    if _has_mutable_class_attrs(uuid_cls):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{uuid_cls.__name__}"
+                        )
+                    try:
+                        cloned_uuid = uuid_cls(int=val.int, is_safe=val.is_safe)
+                    except Exception:
+                        try:
+                            cloned_uuid = UUID.__new__(uuid_cls)
+                            object.__setattr__(cloned_uuid, "int", val.int)
+                            object.__setattr__(cloned_uuid, "is_safe", val.is_safe)
+                        except Exception:
+                            raise TypeError(
+                                "Unsupported mutable value in review extension data: "
+                                f"{uuid_cls.__name__}"
+                            )
                 memo[val_id] = cloned_uuid
                 _assign_target(target, key, is_attr, cloned_uuid)
+                if uuid_cls is not UUID:
+                    if hasattr(val, "__dict__"):
+                        _install_cloned_dict(val, cloned_uuid, memo, stack)
+                    attrs = list(_get_obj_attrs(val))
+                    custom_attrs = [
+                        (desc, is_desc, v)
+                        for (desc, is_desc, v) in attrs
+                        if getattr(desc, "__name__", "") not in ("int", "is_safe")
+                    ]
+                    if custom_attrs:
+                        stack.append((_OBJ_EXPAND, cloned_uuid, iter(custom_attrs)))
                 continue
             if type(val) is dict:
                 new_dict: dict[Any, Any] = {}
@@ -1141,26 +1184,25 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                 stop = None if (last + stride < 0) else (last + stride)
                                 resolved_mv = full_bytes[offset:stop:stride]
                         elif val_shape is not None and val.ndim > 1:
-                            if val.ndim == 2 and val_strides is not None:
-                                rows, cols = val_shape[0], val_shape[1]
-                                row_stride, col_stride = val_strides[0], val_strides[1]
-                                min_r = 0 if row_stride >= 0 else (rows - 1)
-                                min_c = 0 if col_stride >= 0 else (cols - 1)
-                                min_byte = offset + min_r * row_stride + min_c * col_stride
-                                max_r = (rows - 1) if row_stride >= 0 else 0
-                                max_c = (cols - 1) if col_stride >= 0 else 0
-                                max_byte = (
-                                    offset + max_r * row_stride + max_c * col_stride + val.itemsize
+                            if val_strides is not None:
+                                d_0 = val_shape[0]
+                                s_0 = val_strides[0]
+                                plane_bytes = val.itemsize
+                                for d in val_shape[1:]:
+                                    plane_bytes *= d
+                                min_p = 0 if s_0 >= 0 else (d_0 - 1)
+                                max_p = (d_0 - 1) if s_0 >= 0 else 0
+                                min_byte = offset + min_p * s_0
+                                max_byte = offset + max_p * s_0 + plane_bytes
+                                span_bytes_nd: Any = full_bytes[min_byte:max_byte]
+                                physical_planes = (
+                                    len(span_bytes_nd) // plane_bytes if plane_bytes > 0 else d_0
                                 )
-                                span_bytes_2d: Any = full_bytes[min_byte:max_byte]
-                                row_bytes = cols * val.itemsize
-                                physical_rows = (
-                                    len(span_bytes_2d) // row_bytes if row_bytes > 0 else rows
-                                )
-                                span_2d: Any = span_bytes_2d.cast("B", shape=(physical_rows, cols))
-                                abs_step = abs(row_stride) // row_bytes if row_bytes > 0 else 1
+                                physical_shape = (physical_planes,) + val_shape[1:]
+                                span_nd: Any = span_bytes_nd.cast("B", shape=physical_shape)
+                                abs_step = abs(s_0) // plane_bytes if plane_bytes > 0 else 1
                                 resolved_mv = (
-                                    span_2d[::-abs_step] if row_stride < 0 else span_2d[::abs_step]
+                                    span_nd[::-abs_step] if s_0 < 0 else span_nd[::abs_step]
                                 )
                             else:
                                 full_bytes_slice: Any = full_bytes[offset : offset + val.nbytes]
@@ -1212,24 +1254,32 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                         )
                                         resolved_mv = span_cast[local_offset:stop:elem_stride]
                             elif (
-                                val.ndim == 2
+                                val.ndim > 1
                                 and val_shape is not None
                                 and val_strides is not None
                                 and val.itemsize > 0
                             ):
-                                rows, cols = val_shape[0], val_shape[1]
-                                row_stride, col_stride = val_strides[0], val_strides[1]
-                                min_r = 0 if row_stride >= 0 else (rows - 1)
-                                min_c = 0 if col_stride >= 0 else (cols - 1)
-                                min_byte = offset + min_r * row_stride + min_c * col_stride
-                                max_r = (rows - 1) if row_stride >= 0 else 0
-                                max_c = (cols - 1) if col_stride >= 0 else 0
-                                max_byte = (
-                                    offset + max_r * row_stride + max_c * col_stride + val.itemsize
+                                d_0 = val_shape[0]
+                                s_0 = val_strides[0]
+                                plane_bytes = val.itemsize
+                                for d in val_shape[1:]:
+                                    plane_bytes *= d
+                                min_p = 0 if s_0 >= 0 else (d_0 - 1)
+                                max_p = (d_0 - 1) if s_0 >= 0 else 0
+                                min_byte = offset + min_p * s_0
+                                max_byte = offset + max_p * s_0 + plane_bytes
+                                span_bytes_fmt: Any = full_bytes[min_byte:max_byte]
+                                physical_planes = (
+                                    len(span_bytes_fmt) // plane_bytes if plane_bytes > 0 else d_0
                                 )
-                                span_bytes_2d = full_bytes[min_byte:max_byte]
-                                span_2d = span_bytes_2d.cast(val.format, shape=(rows, cols))
-                                resolved_mv = span_2d[::-1] if row_stride < 0 else span_2d
+                                physical_shape = (physical_planes,) + val_shape[1:]
+                                span_fmt: Any = span_bytes_fmt.cast(
+                                    val.format, shape=physical_shape
+                                )
+                                abs_step = abs(s_0) // plane_bytes if plane_bytes > 0 else 1
+                                resolved_mv = (
+                                    span_fmt[::-abs_step] if s_0 < 0 else span_fmt[::abs_step]
+                                )
                             else:
                                 full_bytes_slice = full_bytes[offset : offset + val.nbytes]
                                 if val_shape is not None:
@@ -3487,7 +3537,6 @@ class AsyncProoflineClient(AsyncOperations):
                             res = on_poll(snapshot)
                         finally:
                             _transport.DEADLINE.reset(deadline_token)
-                        cb_return_time = monotonic()
                         if waiter_task is not None:
                             is_task_cancelled = False
                             try:
@@ -3533,9 +3582,10 @@ class AsyncProoflineClient(AsyncOperations):
                                 except BaseException:
                                     is_done = False
                                 if is_done:
+                                    done_observed_time = monotonic()
                                     deadline_val = _transport.DEADLINE.get()
                                     cb_returned_in_budget = (
-                                        deadline_val is None or cb_return_time < deadline_val
+                                        deadline_val is None or done_observed_time < deadline_val
                                     )
                                     if cb_returned_in_budget:
                                         if hasattr(res, "result"):

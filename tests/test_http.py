@@ -1407,17 +1407,45 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                         if not signal_waiter.done():
                             signal_waiter.cancel()
 
-                    # Assert that the waiter is awaiting the callback's completion signal
-                    # before opening the gate:
+                    # Assert that the waiter's pending wait is tied to the callback
+                    # completion future before resolving it:
                     registered_cbs = [
                         cb_item[0] if isinstance(cb_item, tuple) else cb_item
                         for cb_item in (getattr(cb_signal_fut, "_callbacks", None) or [])
                     ]
-                    assert any(
-                        getattr(cb_item, "__name__", "") == "_on_future_done"
+                    done_cbs = [
+                        cb_item
                         for cb_item in registered_cbs
+                        if getattr(cb_item, "__name__", "") == "_on_future_done"
+                    ]
+                    assert done_cbs, "Callback completion signal _on_future_done not found"
+                    target_cb = done_cbs[0]
+                    closure_vars = {
+                        name: cell.cell_contents
+                        for name, cell in zip(
+                            target_cb.__code__.co_freevars, target_cb.__closure__ or ()
+                        )
+                    }
+                    comp_fut = closure_vars.get("completion_fut")
+                    assert comp_fut is not None, "completion_fut missing from callback closure"
+                    assert not comp_fut.done(), "completion_fut already settled"
+                    on_comp_cbs = [
+                        c[0] if isinstance(c, tuple) else c
+                        for c in (getattr(comp_fut, "_callbacks", None) or [])
+                    ]
+                    assert on_comp_cbs, "No completion waiter registered on completion_fut"
+                    on_comp_closure = {
+                        name: cell.cell_contents
+                        for name, cell in zip(
+                            on_comp_cbs[0].__code__.co_freevars,
+                            on_comp_cbs[0].__closure__ or (),
+                        )
+                    }
+                    comp_waiter = on_comp_closure.get("waiter")
+                    assert getattr(waiter_task, "_fut_waiter", None) is comp_waiter, (
+                        "waiter_task is not awaiting callback completion_fut"
                     )
-                    assert getattr(waiter_task, "_fut_waiter", None) is not None
+                    assert comp_waiter is not None and not comp_waiter.done()
                     assert not cb_completed
                     assert not waiter_task.done()
 
@@ -4254,12 +4282,24 @@ asyncio.run(main())
                         token="test_token", base_url="https://api.proofline.sh"
                     ) as client:
                         client.get_review = fake_sync_cancel_running  # type: ignore
-                        res_sync_cancel = await client.wait_for_review(
-                            ORG,
-                            REVIEW,
-                            timeout=0.1,
-                            on_poll=sync_cancel_on_poll,
+                        poll_task = asyncio.create_task(
+                            client.wait_for_review(
+                                ORG,
+                                REVIEW,
+                                timeout=0.1,
+                                on_poll=sync_cancel_on_poll,
+                            )
                         )
+                        done_poll, _ = await asyncio.wait({poll_task}, timeout=5.0)
+                        if poll_task not in done_poll:
+                            if not fut_sync_cancel.done():
+                                fut_sync_cancel.set_result(None)
+                            poll_task.cancel()
+                            await asyncio.wait({poll_task}, timeout=1.0)
+                            pytest.fail(
+                                "wait_for_review hung on overdue future instead of detaching it"
+                            )
+                        res_sync_cancel = poll_task.result()
                         assert res_sync_cancel.status == "TIMED_OUT"
                         await asyncio.sleep(0)
                         assert fut_sync_cancel.cancel_called is False
@@ -4714,16 +4754,35 @@ asyncio.run(main())
     assert bytes(mv_ctypes_slice) == b"\x04\x00\x00\x00\x02\x00\x00\x00"
     assert mv_ctypes_bytes[4] == 2
 
-    # UUID instances are cloned and memoized so mutations cannot alter the original
+    # UUID instances are cloned and memoized preserving is_safe and subclass instance state
+    from uuid import SafeUUID
+
+    class CustomReviewUUID(UUID):
+        pass
+
     detail_uuid = CustomerReviewDetail.from_dict(responses[1])
-    orig_uuid = detail_uuid.id
+    orig_uuid = UUID(int=detail_uuid.id.int, is_safe=SafeUUID.safe)
+    detail_uuid.id = orig_uuid
+    subclass_uuid = CustomReviewUUID(int=orig_uuid.int, is_safe=SafeUUID.safe)
+    object.__setattr__(subclass_uuid, "custom_tag", "isolated_tag")
+    detail_uuid.additional_properties["subclass_uuid"] = subclass_uuid
+
     snap_uuid = _snapshot_review(detail_uuid)
     assert snap_uuid is not None
     assert snap_uuid.id is not orig_uuid
     assert snap_uuid.id == orig_uuid
+    assert snap_uuid.id.is_safe == orig_uuid.is_safe == SafeUUID.safe
     object.__setattr__(snap_uuid.id, "int", 999999)
     assert snap_uuid.id.int == 999999
     assert orig_uuid.int != 999999
+
+    cloned_subclass = snap_uuid.additional_properties["subclass_uuid"]
+    assert type(cloned_subclass) is CustomReviewUUID
+    assert cloned_subclass is not subclass_uuid
+    assert cloned_subclass.is_safe == SafeUUID.safe
+    assert cloned_subclass.custom_tag == "isolated_tag"
+    object.__setattr__(cloned_subclass, "custom_tag", "mutated_tag")
+    assert subclass_uuid.custom_tag == "isolated_tag"
 
     # 2D memoryview bounding span cast to physical rows and row sliced
     c_arr_2d = (ctypes.c_uint8 * 8)(10, 11, 20, 21, 30, 31, 40, 41)
@@ -4736,6 +4795,18 @@ asyncio.run(main())
     assert copied_2d.shape == mv_2d_slice.shape == (2, 2)
     assert copied_2d.strides == mv_2d_slice.strides == (4, 1)
     assert copied_2d.tobytes() == mv_2d_slice.tobytes()
+
+    # 3D memoryview reversed first axis reconstructed from physical span
+    c_arr_3d = (ctypes.c_uint8 * 24)(*range(24))
+    mv_3d_rev = memoryview(c_arr_3d).cast("B", shape=(2, 3, 4))[::-1]
+    detail_3d = CustomerReviewDetail.from_dict(responses[1])
+    detail_3d.additional_properties["ctypes_3d"] = mv_3d_rev
+    snap_3d = _snapshot_review(detail_3d)
+    assert snap_3d is not None
+    copied_3d = snap_3d.additional_properties["ctypes_3d"]
+    assert copied_3d.shape == mv_3d_rev.shape == (2, 3, 4)
+    assert copied_3d.strides == mv_3d_rev.strides == (-12, 4, 1)
+    assert copied_3d.tobytes() == mv_3d_rev.tobytes()
 
     class MutableArray(ctypes.c_int32 * 4):
         pass
