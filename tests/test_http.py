@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
+import httpcore2
 import httpx2
 import pytest
 from pydantic import SecretStr
@@ -1675,24 +1676,127 @@ def test_sync_transport_connects_to_each_resolved_address_under_the_original_hos
 
     original = socket.getaddrinfo
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
+
     with Server(lambda request, index: Reply(body=finding())) as server:
         port = server.url.rsplit(":", 1)[1]
+
         with httpx2.Client(transport=_sync_http.Transport()) as client:
             response = client.get(f"http://service.proofline.invalid:{port}/finding")
             assert response.json()["id"] == str(FINDING)
-            assert server.requests[0].headers["Host"] == f"service.proofline.invalid:{port}"
+            assert server.requests[0].headers["Host"] == (f"service.proofline.invalid:{port}")
             assert ("service.proofline.invalid", "proofline-dns") in lookups
+
             response = client.get(f"http://scoped.proofline.invalid:{port}/finding")
             assert response.json()["id"] == str(FINDING)
-            assert server.requests[1].headers["Host"] == f"scoped.proofline.invalid:{port}"
+            assert server.requests[1].headers["Host"] == (f"scoped.proofline.invalid:{port}")
             assert ("scoped.proofline.invalid", "proofline-dns") in lookups
             assert scoped_connections == ["fe80::1%41", "fe80::1%42"]
+
             with pytest.raises(httpx2.TransportError) as raised:
                 client.get(f"http://missing.proofline.invalid:{port}/finding")
             assert not isinstance(raised.value, httpx2.TimeoutException)
+
             with pytest.raises(httpx2.TransportError):
                 client.get(f"http://127.0.0.1:{closed_port}/finding")
+
         assert len(server.requests) == 2
+
+
+def test_sync_transport_stops_address_retries_when_deadline_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    attempted_addresses: list[str] = []
+
+    monkeypatch.setattr(
+        _sync_http,
+        "resolve",
+        lambda host, port, timeout: [
+            "192.0.2.1",
+            "192.0.2.2",
+            "192.0.2.3",
+        ],
+    )
+
+    def connect_tcp(
+        backend: Any,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> Any:
+        attempted_addresses.append(host)
+
+        # Simulate the first connection attempt consuming the deadline.
+        clock.now += 2
+        raise httpcore2.ConnectError("Connection failed.")
+
+    monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect_tcp)
+
+    token = _sync_http.IO_DEADLINE.set(clock.now + 1)
+    try:
+        with pytest.raises(httpcore2.ConnectTimeout):
+            _sync_http.NetworkBackend().connect_tcp(
+                "service.proofline.invalid",
+                443,
+                timeout=10,
+            )
+    finally:
+        _sync_http.IO_DEADLINE.reset(token)
+
+    # Only the first address should be attempted.
+    assert attempted_addresses == ["192.0.2.1"]
+
+
+@pytest.mark.parametrize(
+    ("caller_offset", "internal_offset", "expected"),
+    [
+        (1, 10, True),  # Caller deadline expires first.
+        (10, 1, False),  # Internal deadline expires first.
+    ],
+)
+def test_sync_body_read_preserves_deadline_provenance(
+    caller_offset: float,
+    internal_offset: float,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class FailingSocket:
+        def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            raise httpcore2.ReadTimeout("Simulated socket read timeout.")
+
+    class FailingBody:
+        def __iter__(self) -> Any:
+            with _sync_http.mapped_errors():
+                _sync_http.NetworkStream(FailingSocket()).read(
+                    1024,
+                    timeout=10,
+                )
+            yield b""
+
+    caller_deadline = clock.now + caller_offset
+    internal_deadline = clock.now + internal_offset
+
+    token = _transport.DEADLINE.set(caller_deadline)
+
+    try:
+        stream = _transport.DeadlineStream(
+            inner=FailingBody(),
+            status=200,
+            deadline=internal_deadline,
+            read_bounded=False,
+        )
+
+        with pytest.raises(ProoflineError) as raised:
+            list(stream)
+
+        assert _transport.is_deadline_timeout(raised.value) is expected
+
+    finally:
+        _transport.DEADLINE.reset(token)
 
 
 @MODES
@@ -2617,7 +2721,7 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
         yield b""
 
     async def stalled_async_body() -> Any:
-        raise httpx2.ReadTimeout("stalled async body read timeout")
+        raise httpx2.ReadTimeout("stalled body read timeout")
         yield b""
 
     def stalled_sync_iter(self: _transport.DeadlineStream) -> Any:
@@ -2625,7 +2729,9 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
         assert caller_deadline is not None
         assert self._deadline > caller_deadline
 
+        # The caller's deadline is still slightly in the future.
         clock.now = caller_deadline - 0.0002
+
         original_inner = self._inner
         self._inner = stalled_body()
 
@@ -2639,7 +2745,9 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
         assert caller_deadline is not None
         assert self._deadline > caller_deadline
 
+        # The caller's deadline is still slightly in the future.
         clock.now = caller_deadline - 0.0002
+
         original_inner = self._inner
         self._inner = stalled_async_body()
 
@@ -2663,3 +2771,41 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
                 with pytest.raises(ProoflineError) as raised:
                     await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
                 assert raised.value.status == 403
+
+    # Additional regression scenario:
+    # The caller's deadline expires BEFORE AsyncDeadlineStream starts reading.
+    # Restore the original iterator so the earlier test wrapper
+    # does not modify the clock in this independent scenario.
+    monkeypatch.setattr(
+        _transport.AsyncDeadlineStream,
+        "__aiter__",
+        async_aiter,
+    )
+
+    class EmptyStream(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> Any:
+            if False:
+                yield b""
+
+    caller_deadline = clock.now + 1
+    internal_deadline = clock.now + 10
+
+    token = _transport.DEADLINE.set(caller_deadline)
+    try:
+        stream = _transport.AsyncDeadlineStream(
+            inner=EmptyStream(),
+            status=200,
+            deadline=internal_deadline,
+            read_bounded=False,
+        )
+
+        # Expire the caller's deadline before iteration starts.
+        clock.now = caller_deadline + 1
+
+        with pytest.raises(ProoflineError) as raised:
+            async for _ in stream:
+                pass
+
+        assert _transport.is_deadline_timeout(raised.value)
+    finally:
+        _transport.DEADLINE.reset(token)

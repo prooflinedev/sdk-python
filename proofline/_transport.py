@@ -35,7 +35,7 @@ from ._generated.models import (
     RunNowRefused,
 )
 from ._generated.types import Unset
-from ._sync_http import IO_DEADLINE
+from ._sync_http import CALLER_DEADLINE, IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
 
 VERSION = "9.3.0"
@@ -469,18 +469,33 @@ class DeadlineStream(httpx2.SyncByteStream):
     def __iter__(self) -> Iterator[bytes]:
         size = 0
         deadline = IO_DEADLINE.set(io_deadline(self._deadline))
+        caller_deadline = CALLER_DEADLINE.set(DEADLINE.get())
         bounded = frozenset({"read"}) if self._read_bounded else frozenset()
+
         try:
             for chunk in self._inner:
                 size += len(chunk)
                 check_stream(size, self._status, self._deadline)
                 yield chunk
+
             check_stream(size, self._status, self._deadline)
+
         except httpx2.TimeoutException as error:
             if not (200 <= self._status < 300 or self._status in (429, 503)):
                 raise unreadable_problem(self._status) from None
-            raise network_error(error, bounded_phases=bounded) from None
+
+            read_bounded = getattr(error, "_deadline_bounded", None)
+
+            if read_bounded is None:
+                read_bounded = "read" in bounded
+
+            raise network_error(
+                error,
+                bounded_phases=(frozenset({"read"}) if read_bounded else frozenset()),
+            ) from None
+
         finally:
+            CALLER_DEADLINE.reset(caller_deadline)
             IO_DEADLINE.reset(deadline)
 
     def close(self) -> None:
@@ -505,9 +520,26 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
         size = 0
         iterator = self._inner.__aiter__()
         bounded = frozenset({"read"}) if self._read_bounded else frozenset()
+
         while True:
+            # Calculate the budget before entering the timeout scope.
+            # io_budget() can raise immediately if a deadline has expired.
             try:
-                with anyio.fail_after(io_budget(self._deadline)):
+                budget = io_budget(self._deadline)
+            except httpx2.ReadTimeout as error:
+                if not (200 <= self._status < 300 or self._status in (429, 503)):
+                    raise unreadable_problem(self._status) from None
+
+                caller = DEADLINE.get()
+                deadline_bounded = caller is not None and caller <= self._deadline
+                current_bounded = frozenset({"read"}) if deadline_bounded else frozenset()
+                raise network_error(
+                    error,
+                    bounded_phases=current_bounded,
+                ) from None
+
+            try:
+                with anyio.fail_after(budget):
                     chunk = await anext(iterator)
             except StopAsyncIteration:
                 break
@@ -522,9 +554,11 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
                 if not (200 <= self._status < 300 or self._status in (429, 503)):
                     raise unreadable_problem(self._status) from None
                 raise network_error(error, bounded_phases=bounded) from None
+
             size += len(chunk)
             check_stream(size, self._status, self._deadline)
             yield chunk
+
         check_stream(size, self._status, self._deadline)
 
     async def aclose(self) -> None:

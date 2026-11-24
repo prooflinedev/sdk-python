@@ -21,6 +21,10 @@ import httpcore2
 import httpx2
 
 IO_DEADLINE: ContextVar[float | None] = ContextVar("proofline_io_deadline", default=None)
+CALLER_DEADLINE: ContextVar[float | None] = ContextVar(
+    "proofline_caller_deadline",
+    default=None,
+)
 
 _CORE_TIMEOUT_MAP: tuple[
     tuple[type[httpcore2.TimeoutException], type[httpx2.TimeoutException]], ...
@@ -39,9 +43,11 @@ def bounded_timeout(
     deadline = IO_DEADLINE.get()
     if deadline is None:
         return timeout
+
     remaining = deadline - monotonic()
     if remaining <= 0:
         raise timeout_exc("The request deadline expired.")
+
     return remaining if timeout is None else min(timeout, remaining)
 
 
@@ -80,8 +86,13 @@ def resolve(host: str, port: int, timeout: float | None) -> list[str]:
         ipaddress.ip_address(host)
     except ValueError:
         lookup = Lookup(host, port)
-        threading.Thread(target=lookup.run, name="proofline-dns", daemon=True).start()
+        threading.Thread(
+            target=lookup.run,
+            name="proofline-dns",
+            daemon=True,
+        ).start()
         return lookup.addresses(timeout)
+
     return [host]
 
 
@@ -90,10 +101,33 @@ class NetworkStream(httpcore2.NetworkStream):
         self._inner = inner
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        return self._inner.read(max_bytes, bounded_timeout(timeout, httpcore2.ReadTimeout))
+        deadline = IO_DEADLINE.get()
+        caller = CALLER_DEADLINE.get()
+
+        remaining = None if deadline is None else deadline - monotonic()
+
+        caller_bounded = (
+            caller is not None
+            and deadline is not None
+            and caller <= deadline
+            and remaining is not None
+            and (timeout is None or remaining <= timeout)
+        )
+
+        try:
+            return self._inner.read(
+                max_bytes,
+                bounded_timeout(timeout, httpcore2.ReadTimeout),
+            )
+        except httpcore2.ReadTimeout as error:
+            setattr(error, "_deadline_bounded", caller_bounded)
+            raise
 
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        self._inner.write(buffer, bounded_timeout(timeout, httpcore2.WriteTimeout))
+        self._inner.write(
+            buffer,
+            bounded_timeout(timeout, httpcore2.WriteTimeout),
+        )
 
     def close(self) -> None:
         self._inner.close()
@@ -127,12 +161,18 @@ class NetworkBackend(httpcore2.SyncBackend):
     ) -> httpcore2.NetworkStream:
         failure: httpcore2.ConnectError | httpcore2.ConnectTimeout | None = None
         connect_timeout = bounded_timeout(timeout, httpcore2.ConnectTimeout)
+
         for address in resolve(host, port, connect_timeout):
+            # Calculate this outside the try block so an expired shared
+            # deadline escapes instead of being treated as a retryable
+            # connection failure for the next address.
+            address_timeout = bounded_timeout(timeout, httpcore2.ConnectTimeout)
+
             try:
                 stream = super().connect_tcp(
                     address,
                     port,
-                    bounded_timeout(timeout, httpcore2.ConnectTimeout),
+                    address_timeout,
                     local_address,
                     socket_options,
                 )
@@ -140,6 +180,7 @@ class NetworkBackend(httpcore2.SyncBackend):
                 failure = error
             else:
                 return NetworkStream(stream)
+
         raise failure or httpcore2.ConnectError("The host name did not resolve.")
 
 
@@ -152,7 +193,15 @@ def mapped_errors() -> Iterator[None]:
             (httpx_cls for core_cls, httpx_cls in _CORE_TIMEOUT_MAP if isinstance(error, core_cls)),
             httpx2.TimeoutException,
         )
-        raise mapped_cls("The request deadline expired.") from None
+
+        mapped_error = mapped_cls("The request deadline expired.")
+        setattr(
+            mapped_error,
+            "_deadline_bounded",
+            getattr(error, "_deadline_bounded", False),
+        )
+        raise mapped_error from None
+
     except (httpcore2.NetworkError, httpcore2.ProtocolError):
         raise httpx2.TransportError("The HTTP transport failed.") from None
 
@@ -183,6 +232,7 @@ class Transport(httpx2.BaseTransport):
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         if not isinstance(request.stream, httpx2.SyncByteStream):
             raise httpx2.TransportError("The synchronous request has an invalid stream.")
+
         core_request = httpcore2.Request(
             method=request.method,
             url=httpcore2.URL(
@@ -195,8 +245,10 @@ class Transport(httpx2.BaseTransport):
             content=request.stream,
             extensions=request.extensions,
         )
+
         with mapped_errors():
             response = self._pool.handle_request(core_request)
+
         return httpx2.Response(
             response.status,
             headers=response.headers,
