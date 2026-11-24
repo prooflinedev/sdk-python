@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import os
 from asyncio import sleep as async_sleep
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from functools import partial
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -12,6 +14,7 @@ from typing import Any, Self, TypedDict, TypeVar, Unpack, cast
 from urllib.parse import quote
 from uuid import UUID
 
+import anyio
 import httpx2
 from pydantic import SecretStr
 
@@ -57,6 +60,7 @@ from ._generated.models.finding_fix_prompt_type_0 import FindingFixPromptType0
 from ._generated.models.finding_fix_prompt_type_1 import FindingFixPromptType1
 from ._generated.models.patch_review_request import PatchReviewRequest
 from ._generated.models.patch_review_response import PatchReviewResponse
+from ._generated.models.patch_trigger_source import PatchTriggerSource
 from ._generated.models.repository_guidance import RepositoryGuidance
 from ._generated.models.repository_names import RepositoryNames
 from ._generated.models.rerun_response import RerunResponse
@@ -75,6 +79,7 @@ from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
+from .local_changes import LocalSelection, patch_review_request_from_git
 from .outcomes import ReviewOutcome, outcome
 
 T = TypeVar("T")
@@ -468,6 +473,38 @@ class ProoflineClient(Operations):
             body=body,
         )
 
+    def request_patch_review_from_git(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        *,
+        cwd: str | os.PathLike[str] = ".",
+        base: str | None = None,
+        head: str | None = None,
+        selection: LocalSelection = "tracked",
+        remote: str = "origin",
+        allow_paths: Sequence[str] = (),
+        verify_finding_ids: Sequence[UUID] = (),
+        trigger_source: PatchTriggerSource | None = None,
+    ) -> PatchReviewResponse:
+        """Review a checkout's local changes the way `proofline review` does.
+
+        Reads one Git snapshot under fixed options, refuses binary, symlink, submodule,
+        conflicted, non-UTF-8 and oversized changes, and refuses `.env` paths and known
+        credential shapes on any uploaded line, all before a request. Nothing is pushed.
+        """
+        body = patch_review_request_from_git(
+            cwd,
+            base=base,
+            head=head,
+            selection=selection,
+            remote=remote,
+            allow_paths=allow_paths,
+            verify_finding_ids=verify_finding_ids,
+            trigger_source=trigger_source,
+        )
+        return self.request_patch_review(organization_id, repository_id, body=body)
+
     def upload_coverage_reports(
         self, organization_id: UUID, repository_id: UUID, *, body: CoverageUploadRequest
     ) -> CoverageUploadResponse:
@@ -858,6 +895,40 @@ class AsyncProoflineClient(AsyncOperations):
             repository_id,
             body=body,
         )
+
+    async def request_patch_review_from_git(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        *,
+        cwd: str | os.PathLike[str] = ".",
+        base: str | None = None,
+        head: str | None = None,
+        selection: LocalSelection = "tracked",
+        remote: str = "origin",
+        allow_paths: Sequence[str] = (),
+        verify_finding_ids: Sequence[UUID] = (),
+        trigger_source: PatchTriggerSource | None = None,
+    ) -> PatchReviewResponse:
+        """Review a checkout's local changes the way `proofline review` does.
+
+        Git runs in a worker thread, so the event loop is never blocked. The same local
+        refusals as the synchronous client apply before any request.
+        """
+        body = await anyio.to_thread.run_sync(
+            partial(
+                patch_review_request_from_git,
+                cwd,
+                base=base,
+                head=head,
+                selection=selection,
+                remote=remote,
+                allow_paths=allow_paths,
+                verify_finding_ids=verify_finding_ids,
+                trigger_source=trigger_source,
+            )
+        )
+        return await self.request_patch_review(organization_id, repository_id, body=body)
 
     async def upload_coverage_reports(
         self, organization_id: UUID, repository_id: UUID, *, body: CoverageUploadRequest

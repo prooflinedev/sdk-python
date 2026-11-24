@@ -36,6 +36,16 @@ from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
+from .local_changes import (
+    LocalChangesError,
+    LocalPatch,
+    LocalSelection,
+    NoLocalChanges,
+    PatchPath,
+    SecretInPatch,
+    check_secrets,
+    read_local_changes,
+)
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
 
 __all__ = [
@@ -57,6 +67,11 @@ __all__ = [
     "FileReviewRequest",
     "FileReviewResponse",
     "KnowledgeResult",
+    "LocalChangesError",
+    "LocalPatch",
+    "LocalSelection",
+    "NoLocalChanges",
+    "PatchPath",
     "PatchReviewRequest",
     "PatchReviewResponse",
     "PatchTriggerSource",
@@ -74,10 +89,13 @@ __all__ = [
     "RunNowResponse",
     "ScanRequestBody",
     "ScanResponse",
+    "SecretInPatch",
     "SecretStr",
     "StartSession",
     "StopResponse",
     "UploadedReport",
     "__version__",
+    "check_secrets",
     "models",
+    "read_local_changes",
 ]
