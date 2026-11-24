@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from string import hexdigits
 from time import monotonic, sleep
@@ -13,6 +12,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 import httpx2
+from anyio import sleep as async_sleep
 from pydantic import SecretStr
 
 from . import _transport

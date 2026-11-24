@@ -38,6 +38,7 @@ dev = [
     "mypy==2.4.1",
     "pytest==9.2.0",
     "pytest-asyncio==1.4.1",
+    "trio==0.35.0",
     "build==1.6.1",
     "hatchling==1.33.0",
 ]

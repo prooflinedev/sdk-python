@@ -20,7 +20,7 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output.
 
-With `AsyncProoflineClient`, use `await` for a single result, such as `await client.list_reviews(organization_id)` for one page. Use `async for` with `iter_reviews` to read individual reviews across pages, or with `iter_export_pages` to read export pages.
+`AsyncProoflineClient` runs on asyncio or Trio. With `AsyncProoflineClient`, use `await` for a single result, such as `await client.list_reviews(organization_id)` for one page. Use `async for` with `iter_reviews` to read individual reviews across pages, or with `iter_export_pages` to read export pages.
 
 ```python
 import asyncio
