@@ -76,6 +76,27 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Pull request reviews
+
+`iter_pull_request_reviews` yields every review of one pull request, following continuation cursors the same way `iter_reviews` does. It keeps the organization, repository, and filters on every request, and it accepts the same `page_size`, `max_pages`, and `max_items` bounds. A cursor that repeats or is missing while the page is truncated raises `urn:proofline:sdk:invalid-pagination`. If a bound is reached while more reviews remain, the iterator raises `urn:proofline:sdk:pagination-limit`, so a partial listing never looks complete. Finishing exactly at a bound is a normal end.
+
+```python
+import os
+from uuid import UUID
+from proofline import ProoflineClient
+
+with ProoflineClient() as client:
+    for review in client.iter_pull_request_reviews(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        "owner/name",
+        12,
+        filters={"status": "COMPLETED"},
+    ):
+        print(review.id)
+```
+
+Use `async for` with `AsyncProoflineClient`. `list_pull_request_reviews` still returns a single page.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.

@@ -1739,6 +1739,100 @@ async def test_cursor_pagination_preserves_filters_and_refuses_cycles_or_bounds(
             assert raised.value.type == "urn:proofline:sdk:pagination-limit"
 
 
+FIRST_PAGE_REVIEW = UUID(int=101)
+SECOND_PAGE_REVIEW = UUID(int=102)
+
+
+@MODES
+async def test_pull_request_review_iterator_follows_cursor_and_refuses_cycles_or_bounds(
+    mode: str,
+) -> None:
+    async def collect_pull_request(client: Client, **kwargs: Any) -> list[Any]:
+        iterator = client.iter_pull_request_reviews(ORG, "repo/name", 42, **kwargs)
+        if hasattr(iterator, "__aiter__"):
+            return [item async for item in iterator]
+        return list(iterator)
+
+    def respond(request: Request, index: int) -> Reply:
+        parsed = urlsplit(request.path)
+        assert parsed.path == f"/api/v1/organizations/{ORG}/reviews/pr/repo%2Fname/42"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        query = parse_qs(parsed.query)
+        assert query["limit"] == ["2"]
+        assert query["status"] == ["COMPLETED"]
+        if index == 0:
+            assert "cursor" not in query
+        else:
+            assert query["cursor"] == ["pr+cursor"]
+        body = page(cursor="pr+cursor" if index == 0 else None, truncated=index == 0)
+        body["items"][0]["id"] = str(FIRST_PAGE_REVIEW if index == 0 else SECOND_PAGE_REVIEW)
+        return Reply(body=body)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            items = await collect_pull_request(
+                client,
+                page_size=2,
+                max_pages=2,
+                max_items=2,
+                filters={"status": "COMPLETED"},
+            )
+            assert [item.id for item in items] == [FIRST_PAGE_REVIEW, SECOND_PAGE_REVIEW]
+        assert len(server.requests) == 2
+
+    for cursor in ["repeated", None]:
+        with Server(
+            lambda request, index: Reply(body=page(cursor=cursor, truncated=True))
+        ) as server:
+            async with session(mode, server.url) as client:
+                with pytest.raises(ProoflineError) as raised:
+                    await collect_pull_request(client)
+                assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+            # A repeated cursor is refused on its second page; a missing one on the first.
+            assert len(server.requests) == (2 if cursor == "repeated" else 1)
+            if cursor == "repeated":
+                second = parse_qs(urlsplit(server.requests[1].path).query)
+                assert second["cursor"] == ["repeated"]
+
+    with Server(
+        lambda request, index: Reply(body=page(cursor=str(index), truncated=True))
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await collect_pull_request(client, max_pages=2)
+            assert raised.value.type == "urn:proofline:sdk:pagination-limit"
+        assert len(server.requests) == 2
+
+    # One review per page: the budget is spent on the first page, which is truncated.
+    with Server(
+        lambda request, index: Reply(
+            body=page(cursor="pr+cursor" if index == 0 else None, truncated=index == 0)
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await collect_pull_request(client, max_items=1)
+            assert raised.value.type == "urn:proofline:sdk:pagination-limit"
+        # The budget is spent on the first page, so the second page is never requested.
+        assert len(server.requests) == 1
+
+    two_items = page()
+    two_items["items"].append(dict(two_items["items"][0]))
+    with Server(lambda request, index: Reply(body=two_items)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await collect_pull_request(client, max_items=1)
+            assert raised.value.type == "urn:proofline:sdk:pagination-limit"
+
+    with Server(lambda request, index: Reply(body=page())) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError):
+                await collect_pull_request(client, page_size=0)
+            with pytest.raises(ValueError):
+                await collect_pull_request(client, max_pages=1.5)
+        assert server.requests == []
+
+
 def test_token_environment_and_https_origin_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROOFLINE_TOKEN", TOKEN)
     with ProoflineClient() as client:

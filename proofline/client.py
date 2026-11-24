@@ -147,6 +147,9 @@ def _review_url(base_url: str, organization_id: UUID, review_id: UUID) -> str:
 
 
 def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
+    for value in (page_size, max_pages, max_items):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Pagination bounds must be integers.")
     if not 1 <= page_size <= 100 or not 1 <= max_pages <= 1_000 or not 1 <= max_items <= 100_000:
         raise ValueError(
             "Pagination requires page_size 1..100, max_pages 1..1000, max_items 1..100000."
@@ -358,6 +361,46 @@ class ProoflineClient(Operations):
             **params,
         )
 
+    def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int = 100,
+        max_items: int = 10_000,
+        filters: ReviewFilters | None = None,
+    ) -> Iterator[ReviewSummary]:
+        """Yield every review of one pull request across pages, bounded like iter_reviews."""
+        _page_limits(page_size, max_pages, max_items)
+        params: ReviewFilters = {}
+        if filters:
+            params.update(filters)
+        params["limit"] = page_size
+        seen: set[str] = set()
+        cursor = params.get("cursor")
+        if cursor:
+            seen.add(cursor)
+        count = 0
+        for _ in range(max_pages):
+            page = self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=params
+            )
+            for item in page.items:
+                if count == max_items:
+                    raise _pagination_limit()
+                yield item
+                count += 1
+            cursor = _next_cursor(page, seen)
+            if cursor is None:
+                return
+            if count == max_items:
+                # More reviews exist and the item budget is spent: stop without another request.
+                raise _pagination_limit()
+            params["cursor"] = cursor
+        raise _pagination_limit()
+
     def get_pull_request_review(
         self, organization_id: UUID, repository: str, pull_request_number: int, run_number: int
     ) -> CustomerReviewDetail:
@@ -536,6 +579,9 @@ class ProoflineClient(Operations):
             cursor = _next_cursor(page, seen)
             if cursor is None:
                 return
+            if count == max_items:
+                # More reviews exist and the item budget is spent: stop without another request.
+                raise _pagination_limit()
             params["cursor"] = cursor
         raise _pagination_limit()
 
@@ -731,6 +777,46 @@ class AsyncProoflineClient(AsyncOperations):
             pull_request_number,
             **params,
         )
+
+    async def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int = 100,
+        max_items: int = 10_000,
+        filters: ReviewFilters | None = None,
+    ) -> AsyncIterator[ReviewSummary]:
+        """Yield every review of one pull request across pages, bounded like iter_reviews."""
+        _page_limits(page_size, max_pages, max_items)
+        params: ReviewFilters = {}
+        if filters:
+            params.update(filters)
+        params["limit"] = page_size
+        seen: set[str] = set()
+        cursor = params.get("cursor")
+        if cursor:
+            seen.add(cursor)
+        count = 0
+        for _ in range(max_pages):
+            page = await self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=params
+            )
+            for item in page.items:
+                if count == max_items:
+                    raise _pagination_limit()
+                yield item
+                count += 1
+            cursor = _next_cursor(page, seen)
+            if cursor is None:
+                return
+            if count == max_items:
+                # More reviews exist and the item budget is spent: stop without another request.
+                raise _pagination_limit()
+            params["cursor"] = cursor
+        raise _pagination_limit()
 
     async def get_pull_request_review(
         self, organization_id: UUID, repository: str, pull_request_number: int, run_number: int
@@ -931,6 +1017,9 @@ class AsyncProoflineClient(AsyncOperations):
             cursor = _next_cursor(page, seen)
             if cursor is None:
                 return
+            if count == max_items:
+                # More reviews exist and the item budget is spent: stop without another request.
+                raise _pagination_limit()
             params["cursor"] = cursor
         raise _pagination_limit()
 
