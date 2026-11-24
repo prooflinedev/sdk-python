@@ -28,16 +28,10 @@ def _refused() -> ProoflineError:
     return ProoflineError(0, "urn:proofline:sdk:mcp", "Invalid or refused MCP response.")
 
 
-def _serialize_mcp_value(val: Any) -> Any:
-    if isinstance(val, UUID):
-        return str(val)
-    if isinstance(val, list):
-        return [_serialize_mcp_value(x) for x in val]
-    if isinstance(val, tuple):
-        return [_serialize_mcp_value(x) for x in val]
-    if isinstance(val, dict):
-        return {key: _serialize_mcp_value(v) for key, v in val.items()}
-    return val
+def _json_default(obj: Any) -> Any:
+    if isinstance(obj, UUID):
+        return str(obj)
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
 def _body(method: str, params: dict[str, Any] | None, identity: int | None) -> bytes:
@@ -45,8 +39,8 @@ def _body(method: str, params: dict[str, Any] | None, identity: int | None) -> b
     if identity is not None:
         value["id"] = identity
     if params is not None:
-        value["params"] = _serialize_mcp_value(params)
-    data = json.dumps(value).encode("utf-8")
+        value["params"] = params
+    data = json.dumps(value, default=_json_default).encode("utf-8")
     if len(data) > 8192:
         raise ValueError("MCP request exceeds 8192 bytes.")
     return data
@@ -112,12 +106,7 @@ class McpTools:
         self, name: str, args: dict[str, Any], *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         if organization_id is not None:
-            args = {
-                **args,
-                "organization_id": (
-                    str(organization_id) if isinstance(organization_id, UUID) else organization_id
-                ),
-            }
+            args = {**args, "organization_id": organization_id}
         call = _body("tools/call", {"name": name, "arguments": args}, 2)
         frames = [
             (
@@ -166,12 +155,7 @@ class AsyncMcpTools:
         self, name: str, args: dict[str, Any], *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         if organization_id is not None:
-            args = {
-                **args,
-                "organization_id": (
-                    str(organization_id) if isinstance(organization_id, UUID) else organization_id
-                ),
-            }
+            args = {**args, "organization_id": organization_id}
         call = _body("tools/call", {"name": name, "arguments": args}, 2)
         frames = [
             (

@@ -50,40 +50,30 @@ class KnowledgeClient(McpTools):
     def get_architecture_document(
         self, environment_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
-        env_id = str(environment_id) if isinstance(environment_id, UUID) else environment_id
         return self._call(
             "get_architecture_document",
-            {"environment_id": env_id},
+            {"environment_id": environment_id},
             organization_id=organization_id,
         )
 
     def get_plan(
         self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
-        return self._call(
-            "get_plan",
-            {"plan_id": str(plan_id) if isinstance(plan_id, UUID) else plan_id},
-            organization_id=organization_id,
-        )
+        return self._call("get_plan", {"plan_id": plan_id}, organization_id=organization_id)
 
     def start_plan_implementation(
         self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return self._call(
-            "start_plan_implementation",
-            {"plan_id": str(plan_id) if isinstance(plan_id, UUID) else plan_id},
-            organization_id=organization_id,
+            "start_plan_implementation", {"plan_id": plan_id}, organization_id=organization_id
         )
 
     def get_plan_implementation(
         self, implementation_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
-        impl_id = (
-            str(implementation_id) if isinstance(implementation_id, UUID) else implementation_id
-        )
         return self._call(
             "get_plan_implementation",
-            {"implementation_id": impl_id},
+            {"implementation_id": implementation_id},
             organization_id=organization_id,
         )
 
@@ -131,39 +121,29 @@ class AsyncKnowledgeClient(AsyncMcpTools):
     async def get_architecture_document(
         self, environment_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
-        env_id = str(environment_id) if isinstance(environment_id, UUID) else environment_id
         return await self._call(
             "get_architecture_document",
-            {"environment_id": env_id},
+            {"environment_id": environment_id},
             organization_id=organization_id,
         )
 
     async def get_plan(
         self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
-        return await self._call(
-            "get_plan",
-            {"plan_id": str(plan_id) if isinstance(plan_id, UUID) else plan_id},
-            organization_id=organization_id,
-        )
+        return await self._call("get_plan", {"plan_id": plan_id}, organization_id=organization_id)
 
     async def start_plan_implementation(
         self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return await self._call(
-            "start_plan_implementation",
-            {"plan_id": str(plan_id) if isinstance(plan_id, UUID) else plan_id},
-            organization_id=organization_id,
+            "start_plan_implementation", {"plan_id": plan_id}, organization_id=organization_id
         )
 
     async def get_plan_implementation(
         self, implementation_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
-        impl_id = (
-            str(implementation_id) if isinstance(implementation_id, UUID) else implementation_id
-        )
         return await self._call(
             "get_plan_implementation",
-            {"implementation_id": impl_id},
+            {"implementation_id": implementation_id},
             organization_id=organization_id,
         )

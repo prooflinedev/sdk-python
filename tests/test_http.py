@@ -2704,6 +2704,19 @@ async def test_mcp_uuid_parameters_serialize(mode: str) -> None:
         ),
         (
             "fixes",
+            "request_reverification",
+            (REVIEW, (FINDING,), "a" * 40),
+            {"note": "fixed", "organization_id": ORG},
+            {
+                "review_id": str(REVIEW),
+                "finding_ids": [str(FINDING)],
+                "commit_sha": "a" * 40,
+                "note": "fixed",
+                "organization_id": str(ORG),
+            },
+        ),
+        (
+            "fixes",
             "get_reverification",
             (REVIEW,),
             {"organization_id": ORG},
@@ -2744,3 +2757,27 @@ async def test_mcp_unserializable_object_raises_type_error(mode: str) -> None:
 
             with pytest.raises(TypeError, match="is not JSON serializable"):
                 await invoke("knowledge", "get_plan", CustomObject(), organization_id=ORG)  # type: ignore[arg-type]
+
+            # Passing a set for finding_ids still raises TypeError
+            with pytest.raises(TypeError, match="is not JSON serializable"):
+                await invoke(
+                    "fixes",
+                    "request_reverification",
+                    REVIEW,
+                    {FINDING},  # type: ignore[arg-type]
+                    "a" * 40,
+                    organization_id=ORG,
+                )
+
+            # Cyclic containers still raise ValueError
+            cyclic: list[Any] = []
+            cyclic.append(cyclic)
+            with pytest.raises(ValueError, match="Circular reference detected"):
+                await invoke(
+                    "fixes",
+                    "request_reverification",
+                    REVIEW,
+                    cyclic,
+                    "a" * 40,
+                    organization_id=ORG,
+                )
