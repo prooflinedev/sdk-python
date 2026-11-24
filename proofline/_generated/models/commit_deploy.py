@@ -75,6 +75,11 @@ class CommitDeploy:
              of one commit, GitHub Environment and task read apart by this ID.
              Every listed deploy holds one; a server from before the field existed
              omits it.
+        verification_ended (bool | Unset): Whether the deploy's verification ended. A check with no `result`
+             then will never be recorded, while a running verification can still
+             record one that is overdue; `state` reads `UNRECORDED` for both.
+             False without a verification, which `state` reads as `UNVERIFIED`.
+             Older responses omit it, which reads as false. Default: False.
     """
 
     checkpoints: list[DeployCoverageCheckpoint]
@@ -137,6 +142,7 @@ class CommitDeploy:
     workflow_run_id: int | None | Unset = UNSET
     rolled_back: bool | Unset = False
     github_deployment_ids: list[int] | Unset = UNSET
+    verification_ended: bool | Unset = False
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -254,6 +260,8 @@ class CommitDeploy:
         if not isinstance(self.github_deployment_ids, Unset):
             github_deployment_ids = self.github_deployment_ids
 
+        verification_ended = self.verification_ended
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -283,6 +291,8 @@ class CommitDeploy:
             field_dict["rolled_back"] = rolled_back
         if github_deployment_ids is not UNSET:
             field_dict["github_deployment_ids"] = github_deployment_ids
+        if verification_ended is not UNSET:
+            field_dict["verification_ended"] = verification_ended
 
         return field_dict
 
@@ -1095,6 +1105,8 @@ class CommitDeploy:
 
         github_deployment_ids = cast(list[int], d.pop("github_deployment_ids", UNSET))
 
+        verification_ended = d.pop("verification_ended", UNSET)
+
         commit_deploy = cls(
             checkpoints=checkpoints,
             environment_id=environment_id,
@@ -1110,6 +1122,7 @@ class CommitDeploy:
             workflow_run_id=workflow_run_id,
             rolled_back=rolled_back,
             github_deployment_ids=github_deployment_ids,
+            verification_ended=verification_ended,
         )
 
         commit_deploy.additional_properties = d

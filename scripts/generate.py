@@ -99,10 +99,10 @@ def generate(destination: Path) -> None:
         "incident": revision["properties"]["incident"],
     }
     # CommitDeploy's optional arguments up to workflow_run_id are positional
-    # in the 7.4 SDK; rolled_back and then github_deployment_ids came later,
-    # so they follow them in that order.
+    # in the 7.4 SDK; rolled_back, github_deployment_ids and then
+    # verification_ended came later, so they follow them in that order.
     deploy = document["components"]["schemas"]["CommitDeploy"]
-    later = ("rolled_back", "github_deployment_ids")
+    later = ("rolled_back", "github_deployment_ids", "verification_ended")
     deploy["properties"] = {
         **{k: v for k, v in deploy["properties"].items() if k not in later},
         **{k: deploy["properties"][k] for k in later},
@@ -112,6 +112,14 @@ def generate(destination: Path) -> None:
     # read as not established, instead of failing the whole deploy read.
     for name in ("DeployVerificationGap", "DeployCoverageState", "DeployCheckResult"):
         document["components"]["schemas"][name]["oneOf"].append({"type": "string"})
+    # A major version can add a review cause, and one review carrying it
+    # would fail a whole review page. The string comes last, so a known
+    # cause still parses as its own value.
+    schemas = document["components"]["schemas"]
+    schemas["CountedCause"]["anyOf"].append({"type": "string"})
+    for name in ("ReviewSummary", "CustomerReviewDetail"):
+        causes = schemas[name]["properties"]["incomplete_causes"]
+        causes["items"] = {"anyOf": [causes["items"], {"type": "string"}]}
     with tempfile.TemporaryDirectory(prefix="proofline-json-contract-") as temporary:
         json_document = Path(temporary) / "openapi.json"
         json_document.write_text(json.dumps(json_operations(document)))

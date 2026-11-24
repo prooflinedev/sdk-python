@@ -39,6 +39,28 @@ def test_checkpoint_keeps_its_positional_result() -> None:
     assert (deploy.state, deploy.gaps) == ("LATER_STATE", ["LATER_GAP", "CHANGE_CHECK_MISSING"])
     later = deploy.checkpoints[0]
     assert (later.result, later.gaps) == ("LATER_RESULT", ["LATER_GAP"])
+    # So does a later review cause, which would otherwise fail a whole review page.
+    review = models.ReviewSummary.from_dict(
+        {
+            "id": "00000000-0000-4000-8000-000000000004",
+            "public_key": "rev_00000000000040008000000000000004",
+            "kind": "PULL_REQUEST",
+            "status": "INCOMPLETE",
+            "assessment_count": 0,
+            "environment_display_names": [],
+            "finding_count": 0,
+            "trigger_origin": "AUTOMATIC",
+            "publication": "PUBLISHED",
+            "created_at": "2026-11-01T00:00:00Z",
+            "incomplete_causes": ["LATER_CAUSE", "EVIDENCE_UNAVAILABLE"],
+            "counted_incomplete_causes": ["LATER_CAUSE", "GITHUB_REFUSED"],
+        }
+    )
+    assert review.incomplete_causes == [
+        "LATER_CAUSE",
+        models.IncompleteCauseType0.EVIDENCE_UNAVAILABLE,
+    ]
+    assert review.counted_incomplete_causes == ["LATER_CAUSE", "GITHUB_REFUSED"]
 
 
 def test_new_public_operation(tmp_path: Path) -> None:

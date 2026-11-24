@@ -50,8 +50,8 @@ class ReviewSummary:
         completed_at (datetime.datetime | None | Unset): When the review reached a terminal status. Absent while it is
             still pending or running.
         counted_incomplete_causes (list[IncompleteCauseType0 | Literal['GITHUB_REFUSED'] | Literal['OUT_OF_CREDITS'] |
-            Literal['SPEND_LIMIT_REACHED'] | Literal['UNKNOWN']] | Unset): `incomplete_causes` as the Inbox and the reviews
-            `cause:` search
+            Literal['SPEND_LIMIT_REACHED'] | Literal['UNKNOWN'] | str] | Unset): `incomplete_causes` as the Inbox and the
+            reviews `cause:` search
              count them: `OUT_OF_CREDITS` or `SPEND_LIMIT_REACHED` in place of the
              `NOT_CONFIGURED` an assessment records when credits or a monthly spend
              limit refused it, and `GITHUB_REFUSED` in place of the
@@ -66,8 +66,8 @@ class ReviewSummary:
              which is not a commit. Absent when the review recorded none.
         head_commit_url (None | str | Unset): The exact revision reviewed. A commit URL, never a branch URL: the
              branch moves, the reviewed input does not. Absent for a patch review.
-        incomplete_causes (list[IncompleteCauseType0 | Literal['UNKNOWN']] | Unset): Why an `INCOMPLETE` review ended
-            incomplete, as its incomplete
+        incomplete_causes (list[IncompleteCauseType0 | Literal['UNKNOWN'] | str] | Unset): Why an `INCOMPLETE` review
+            ended incomplete, as its incomplete
              assessments recorded it, in name order. `UNKNOWN` alone when none
              recorded a cause. Absent for every other status, and on reads other
              than the reviews list and a single review.
@@ -137,13 +137,14 @@ class ReviewSummary:
             | Literal["OUT_OF_CREDITS"]
             | Literal["SPEND_LIMIT_REACHED"]
             | Literal["UNKNOWN"]
+            | str
         ]
         | Unset
     ) = UNSET
     current_head_commit_sha: None | str | Unset = UNSET
     head_commit_sha: None | str | Unset = UNSET
     head_commit_url: None | str | Unset = UNSET
-    incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
+    incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"] | str] | Unset = UNSET
     merge_group_pull_request_numbers: list[int] | Unset = UNSET
     publication_detail: None | str | Unset = UNSET
     pull_request_author_avatar_url: None | str | Unset = UNSET
@@ -507,6 +508,7 @@ class ReviewSummary:
                 | Literal["OUT_OF_CREDITS"]
                 | Literal["SPEND_LIMIT_REACHED"]
                 | Literal["UNKNOWN"]
+                | str
             ]
             | Unset
         ) = UNSET
@@ -522,6 +524,7 @@ class ReviewSummary:
                     | Literal["OUT_OF_CREDITS"]
                     | Literal["SPEND_LIMIT_REACHED"]
                     | Literal["UNKNOWN"]
+                    | str
                 ):
                     try:
                         if not isinstance(data, str):
@@ -568,16 +571,28 @@ class ReviewSummary:
                         return componentsschemas_credit_refusal_cause_type_1
                     except (TypeError, ValueError, AttributeError, KeyError):
                         pass
-                    if not (type(data) is str and data == "GITHUB_REFUSED"):
-                        raise TypeError()
-                    componentsschemas_installation_refusal_cause_type_0 = cast(
-                        Literal["GITHUB_REFUSED"], data
-                    )
-                    if componentsschemas_installation_refusal_cause_type_0 != "GITHUB_REFUSED":
-                        raise ValueError(
-                            f"/components/schemas/InstallationRefusalCause_type_0 must match const 'GITHUB_REFUSED', got '{componentsschemas_installation_refusal_cause_type_0}'"
+                    try:
+                        if not (type(data) is str and data == "GITHUB_REFUSED"):
+                            raise TypeError()
+                        componentsschemas_installation_refusal_cause_type_0 = cast(
+                            Literal["GITHUB_REFUSED"], data
                         )
-                    return componentsschemas_installation_refusal_cause_type_0
+                        if componentsschemas_installation_refusal_cause_type_0 != "GITHUB_REFUSED":
+                            raise ValueError(
+                                f"/components/schemas/InstallationRefusalCause_type_0 must match const 'GITHUB_REFUSED', got '{componentsschemas_installation_refusal_cause_type_0}'"
+                            )
+                        return componentsschemas_installation_refusal_cause_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    return cast(
+                        IncompleteCauseType0
+                        | Literal["GITHUB_REFUSED"]
+                        | Literal["OUT_OF_CREDITS"]
+                        | Literal["SPEND_LIMIT_REACHED"]
+                        | Literal["UNKNOWN"]
+                        | str,
+                        data,
+                    )
 
                 counted_incomplete_causes_item = _parse_counted_incomplete_causes_item(
                     counted_incomplete_causes_item_data
@@ -615,14 +630,14 @@ class ReviewSummary:
         head_commit_url = _parse_head_commit_url(d.pop("head_commit_url", UNSET))
 
         _incomplete_causes = d.pop("incomplete_causes", UNSET)
-        incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"]] | Unset = UNSET
+        incomplete_causes: list[IncompleteCauseType0 | Literal["UNKNOWN"] | str] | Unset = UNSET
         if _incomplete_causes is not UNSET:
             incomplete_causes = []
             for incomplete_causes_item_data in _incomplete_causes:
 
                 def _parse_incomplete_causes_item(
                     data: object,
-                ) -> IncompleteCauseType0 | Literal["UNKNOWN"]:
+                ) -> IncompleteCauseType0 | Literal["UNKNOWN"] | str:
                     try:
                         if not isinstance(data, str):
                             raise TypeError()
@@ -631,14 +646,18 @@ class ReviewSummary:
                         return componentsschemas_incomplete_cause_type_0
                     except (TypeError, ValueError, AttributeError, KeyError):
                         pass
-                    if not (type(data) is str and data == "UNKNOWN"):
-                        raise TypeError()
-                    componentsschemas_incomplete_cause_type_1 = cast(Literal["UNKNOWN"], data)
-                    if componentsschemas_incomplete_cause_type_1 != "UNKNOWN":
-                        raise ValueError(
-                            f"/components/schemas/IncompleteCause_type_1 must match const 'UNKNOWN', got '{componentsschemas_incomplete_cause_type_1}'"
-                        )
-                    return componentsschemas_incomplete_cause_type_1
+                    try:
+                        if not (type(data) is str and data == "UNKNOWN"):
+                            raise TypeError()
+                        componentsschemas_incomplete_cause_type_1 = cast(Literal["UNKNOWN"], data)
+                        if componentsschemas_incomplete_cause_type_1 != "UNKNOWN":
+                            raise ValueError(
+                                f"/components/schemas/IncompleteCause_type_1 must match const 'UNKNOWN', got '{componentsschemas_incomplete_cause_type_1}'"
+                            )
+                        return componentsschemas_incomplete_cause_type_1
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    return cast(IncompleteCauseType0 | Literal["UNKNOWN"] | str, data)
 
                 incomplete_causes_item = _parse_incomplete_causes_item(incomplete_causes_item_data)
 
