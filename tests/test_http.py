@@ -1322,27 +1322,35 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         if mode == "async":
             first_cb_event = asyncio.Event()
             second_cb_reached = asyncio.Event()
-            cb_gate = asyncio.Event()
             cb_completed = False
             waiter_task: asyncio.Task[Any] | None = None
 
-            async def async_mismatch_cb(r: Any) -> None:
-                nonlocal cb_completed
-                if len(polled_reviews) == 1:
-                    assert waiter_task is not None
-                    assert not waiter_task.done()
-                    second_cb_reached.set()
-                    await cb_gate.wait()
-                    cb_completed = True
+            class CallbackSignalFuture(asyncio.Future[None]):
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    super().__init__(*args, **kwargs)
+                    self.signal_registered = asyncio.Event()
+
+                def add_done_callback(self, fn: Any, *args: Any, **kwargs: Any) -> None:
+                    super().add_done_callback(fn, *args, **kwargs)
+                    self.signal_registered.set()
+
+            loop = asyncio.get_running_loop()
+            cb_signal_fut = CallbackSignalFuture(loop=loop)
+
+            def async_mismatch_cb(r: Any) -> Any:
                 captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
                 polled_reviews.append((r, len(server.requests)))
                 r.status = "MUTATED"
                 if len(polled_reviews) == 2:
                     r.head_commit_sha = OTHER_HEAD
+                    assert waiter_task is not None
+                    assert not waiter_task.done()
+                    second_cb_reached.set()
+                    return cb_signal_fut
                 else:
                     r.head_commit_sha = "mutated_sha"
-                if len(polled_reviews) == 1:
                     first_cb_event.set()
+                    return None
 
             cb: Any = async_mismatch_cb
         else:
@@ -1383,31 +1391,46 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                         if not first_waiter.done():
                             first_waiter.cancel()
 
-                    gate_waiter = asyncio.create_task(second_cb_reached.wait())
+                    signal_waiter = asyncio.create_task(cb_signal_fut.signal_registered.wait())
                     try:
-                        done_gate, _ = await asyncio.wait(
-                            {gate_waiter, waiter_task},
+                        done_sig, _ = await asyncio.wait(
+                            {signal_waiter, waiter_task},
                             timeout=5.0,
                             return_when=asyncio.FIRST_COMPLETED,
                         )
-                        if waiter_task in done_gate:
+                        if waiter_task in done_sig:
                             await waiter_task
-                        assert second_cb_reached.is_set()
+                        assert cb_signal_fut.signal_registered.is_set(), (
+                            "waiter_task did not wait on callback completion signal"
+                        )
                     finally:
-                        if not gate_waiter.done():
-                            gate_waiter.cancel()
+                        if not signal_waiter.done():
+                            signal_waiter.cancel()
 
+                    # Assert that the waiter is awaiting the callback's completion signal
+                    # before opening the gate:
+                    registered_cbs = [
+                        cb_item[0] if isinstance(cb_item, tuple) else cb_item
+                        for cb_item in (getattr(cb_signal_fut, "_callbacks", None) or [])
+                    ]
+                    assert any(
+                        getattr(cb_item, "__name__", "") == "_on_future_done"
+                        for cb_item in registered_cbs
+                    )
+                    assert getattr(waiter_task, "_fut_waiter", None) is not None
                     assert not cb_completed
-                    done_blocked, _ = await asyncio.wait({waiter_task}, timeout=0.05)
-                    assert waiter_task not in done_blocked, "waiter completed before callback"
-                    cb_gate.set()
+                    assert not waiter_task.done()
+
+                    cb_completed = True
+                    cb_signal_fut.set_result(None)
                     done_w, _ = await asyncio.wait({waiter_task}, timeout=5.0)
                     if waiter_task not in done_w:
                         pytest.fail("waiter_task did not complete in 5.0s")
                     result = waiter_task.result()
                     assert cb_completed
                 finally:
-                    cb_gate.set()
+                    if not cb_signal_fut.done():
+                        cb_signal_fut.set_result(None)
                     if waiter_task is not None and not waiter_task.done():
                         waiter_task.cancel()
                     if waiter_task is not None:
@@ -2871,6 +2894,7 @@ async def test_wait_for_review_invokes_on_poll_callback(
         # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
         # tasks cannot stall teardown.
         watchdog_code = """
+import sys
 import asyncio
 import pytest
 import time
@@ -3204,6 +3228,8 @@ async def main() -> None:
                     if cb_task_3b not in done_c3b:
                         print("Pending task: cb_task_3b", file=sys.stderr)
                     assert cb_task_3b in done_c3b
+                    cb_task_3b.result()
+                    assert task_success_3b.is_set()
                 finally:
                     task_release_3b.set()
                     if not startup_waiter.done():
@@ -4657,7 +4683,7 @@ asyncio.run(main())
     c_arr = (ctypes.c_int32 * 4)(1, 2, 3, 4)
     mv_ctypes = memoryview(c_arr)
     mv_ctypes_bytes = memoryview(c_arr).cast("B")
-    mv_ctypes_slice = memoryview(c_arr)[1::-2]
+    mv_ctypes_slice = memoryview(c_arr)[3::-2]
     detail_ctypes_mv = CustomerReviewDetail.from_dict(responses[1])
     detail_ctypes_mv.additional_properties["ctypes_arr"] = c_arr
     detail_ctypes_mv.additional_properties["ctypes_mv"] = mv_ctypes
@@ -4669,6 +4695,8 @@ asyncio.run(main())
     copied_mv = snap_ctypes.additional_properties["ctypes_mv"]
     copied_bytes = snap_ctypes.additional_properties["ctypes_bytes"]
     copied_slice = snap_ctypes.additional_properties["ctypes_slice"]
+    assert copied_slice.shape == mv_ctypes_slice.shape == (2,)
+    assert copied_slice.strides == mv_ctypes_slice.strides == (-8,)
     assert bytes(copied_mv) == bytes(mv_ctypes)
     assert bytes(copied_bytes) == bytes(mv_ctypes_bytes)
     assert bytes(copied_slice) == bytes(mv_ctypes_slice)
@@ -4680,11 +4708,34 @@ asyncio.run(main())
     copied_bytes[4] = 99
     assert copied_arr[1] == 99
     assert bytes(copied_mv)[4] == 99
-    assert bytes(copied_slice)[0] == 99
+    assert bytes(copied_slice) == b"\x04\x00\x00\x00\x63\x00\x00\x00"
     assert c_arr[1] == 2
     assert bytes(mv_ctypes)[4] == 2
-    assert bytes(mv_ctypes_slice)[0] == 2
+    assert bytes(mv_ctypes_slice) == b"\x04\x00\x00\x00\x02\x00\x00\x00"
     assert mv_ctypes_bytes[4] == 2
+
+    # UUID instances are cloned and memoized so mutations cannot alter the original
+    detail_uuid = CustomerReviewDetail.from_dict(responses[1])
+    orig_uuid = detail_uuid.id
+    snap_uuid = _snapshot_review(detail_uuid)
+    assert snap_uuid is not None
+    assert snap_uuid.id is not orig_uuid
+    assert snap_uuid.id == orig_uuid
+    object.__setattr__(snap_uuid.id, "int", 999999)
+    assert snap_uuid.id.int == 999999
+    assert orig_uuid.int != 999999
+
+    # 2D memoryview bounding span cast to physical rows and row sliced
+    c_arr_2d = (ctypes.c_uint8 * 8)(10, 11, 20, 21, 30, 31, 40, 41)
+    mv_2d_slice = memoryview(c_arr_2d).cast("B", shape=(4, 2))[::2]
+    detail_2d = CustomerReviewDetail.from_dict(responses[1])
+    detail_2d.additional_properties["ctypes_2d"] = mv_2d_slice
+    snap_2d = _snapshot_review(detail_2d)
+    assert snap_2d is not None
+    copied_2d = snap_2d.additional_properties["ctypes_2d"]
+    assert copied_2d.shape == mv_2d_slice.shape == (2, 2)
+    assert copied_2d.strides == mv_2d_slice.strides == (4, 1)
+    assert copied_2d.tobytes() == mv_2d_slice.tobytes()
 
     class MutableArray(ctypes.c_int32 * 4):
         pass

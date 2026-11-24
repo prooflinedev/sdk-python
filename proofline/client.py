@@ -256,7 +256,6 @@ _IMMUTABLE_TYPES: set[type] = {
     str,
     bool,
     bytes,
-    UUID,
     datetime.date,
 }
 
@@ -698,6 +697,11 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
             if val_id in pending_frozenset_ids:
                 if target is not None:
                     pending_assignments.setdefault(val_id, []).append((target, key, is_attr))
+                continue
+            if isinstance(val, UUID):
+                cloned_uuid = UUID(int=val.int)
+                memo[val_id] = cloned_uuid
+                _assign_target(target, key, is_attr, cloned_uuid)
                 continue
             if type(val) is dict:
                 new_dict: dict[Any, Any] = {}
@@ -1149,8 +1153,15 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                     offset + max_r * row_stride + max_c * col_stride + val.itemsize
                                 )
                                 span_bytes_2d: Any = full_bytes[min_byte:max_byte]
-                                span_2d: Any = span_bytes_2d.cast("B", shape=(rows, cols))
-                                resolved_mv = span_2d[::-1] if row_stride < 0 else span_2d
+                                row_bytes = cols * val.itemsize
+                                physical_rows = (
+                                    len(span_bytes_2d) // row_bytes if row_bytes > 0 else rows
+                                )
+                                span_2d: Any = span_bytes_2d.cast("B", shape=(physical_rows, cols))
+                                abs_step = abs(row_stride) // row_bytes if row_bytes > 0 else 1
+                                resolved_mv = (
+                                    span_2d[::-abs_step] if row_stride < 0 else span_2d[::abs_step]
+                                )
                             else:
                                 full_bytes_slice: Any = full_bytes[offset : offset + val.nbytes]
                                 resolved_mv = full_bytes_slice.cast("B", shape=val_shape)
