@@ -1334,7 +1334,10 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                 captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
                 polled_reviews.append((r, len(server.requests)))
                 r.status = "MUTATED"
-                r.head_commit_sha = "mutated_sha"
+                if len(polled_reviews) == 2:
+                    r.head_commit_sha = OTHER_HEAD
+                else:
+                    r.head_commit_sha = "mutated_sha"
                 if len(polled_reviews) == 1:
                     first_cb_event.set()
 
@@ -1345,7 +1348,10 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                 captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
                 polled_reviews.append((r, len(server.requests)))
                 r.status = "MUTATED"
-                r.head_commit_sha = "mutated_sha"
+                if len(polled_reviews) == 2:
+                    r.head_commit_sha = OTHER_HEAD
+                else:
+                    r.head_commit_sha = "mutated_sha"
 
             cb = sync_mismatch_cb
         async with session(mode, server.url) as client:
@@ -1391,7 +1397,10 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                     await asyncio.sleep(0.01)
                     assert not waiter_task.done()
                     cb_gate.set()
-                    result = await asyncio.wait_for(waiter_task, timeout=5.0)
+                    done_w, _ = await asyncio.wait({waiter_task}, timeout=5.0)
+                    if waiter_task not in done_w:
+                        pytest.fail("waiter_task did not complete in 5.0s")
+                    result = waiter_task.result()
                 finally:
                     cb_gate.set()
                     if waiter_task is not None and not waiter_task.done():
@@ -1418,7 +1427,7 @@ async def test_wait_ends_on_the_read_that_names_another_head(
             assert [p[0].status for p in polled_reviews] == ["MUTATED", "MUTATED"]
             assert [p[1] for p in polled_reviews] == [1, 2]
             assert polled_reviews[0][0].head_commit_sha == "mutated_sha"
-            assert polled_reviews[1][0].head_commit_sha == "mutated_sha"
+            assert polled_reviews[1][0].head_commit_sha == OTHER_HEAD
         assert result.status == "INCOMPLETE"
         assert result.review.status == "RUNNING"
         assert result.review.head_commit_sha == HEAD
@@ -2820,16 +2829,27 @@ async def test_wait_for_review_invokes_on_poll_callback(
                 except BaseException:
                     pass
 
-        # Assert already-failed future returned at deadline is detached and returns outcome
+        # Assert pending future failing at exact deadline is detached and returns outcome
         failed_at_deadline_futs: list[asyncio.Future[None]] = []
         call_start = clock.now
 
+        class PendingDeadlineFuture(asyncio.Future[None]):
+            def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+                def wrapped_fn(f: Any) -> None:
+                    clock.now = call_start + 10.0
+                    fn(f)
+
+                super().add_done_callback(wrapped_fn, context=context)
+
+        async def fail_pending_at_deadline(f: asyncio.Future[None]) -> None:
+            await asyncio.sleep(0.01)
+            f.set_exception(ValueError("pending future error exactly at deadline"))
+
         def failed_future_at_deadline_callback(r: Any) -> asyncio.Future[None]:
-            clock.now = call_start + 10.0
             loop = asyncio.get_running_loop()
-            fut: asyncio.Future[None] = loop.create_future()
-            fut.set_exception(ValueError("inline future error exactly at deadline"))
+            fut: asyncio.Future[None] = PendingDeadlineFuture(loop=loop)
             failed_at_deadline_futs.append(fut)
+            asyncio.create_task(fail_pending_at_deadline(fut))
             return fut
 
         try:
@@ -3250,7 +3270,9 @@ async def main() -> None:
                     pass
             assert not waiter_task_4.done()
             clock.advance(1.0)
-            res_4 = await asyncio.wait_for(waiter_task_4, timeout=1.0)
+            done_w4, _ = await asyncio.wait({waiter_task_4}, timeout=1.0)
+            assert waiter_task_4 in done_w4
+            res_4 = waiter_task_4.result()
             assert res_4.status == "COMPLETED"
             assert not callback_finished_term.is_set()
 
@@ -3289,10 +3311,11 @@ async def main() -> None:
             assert not wrapper_4.cancelled()
             assert getattr(wrapper_4, "exception_calls", 0) > 0
         finally:
+            release_callback_term.set()
             if not waiter_task_4.done():
                 waiter_task_4.cancel()
             try:
-                await waiter_task_4
+                await asyncio.wait({waiter_task_4}, timeout=1.0)
             except (asyncio.CancelledError, BaseException):
                 pass
             client_module.async_create_task = orig_create_task_4
@@ -3300,7 +3323,7 @@ async def main() -> None:
                 if not w.done():
                     w.cancel()
                 try:
-                    await w
+                    await asyncio.wait({w}, timeout=1.0)
                 except (asyncio.CancelledError, BaseException):
                     pass
 
@@ -4017,7 +4040,8 @@ asyncio.run(main())
         # Cancel the waiter while an UnhashableFuture is pending, then fail and release
         # the future and assert that the loop reports no unhandled exception.
         # Run in a subprocess with a hard timeout, settling the callback future
-        # before joining the waiter.
+        # before joining in cleanup and bounding waiter cancellation join with
+        # asyncio.wait.
         unhashable_code = f"""
 import asyncio
 import sys
@@ -4072,15 +4096,16 @@ async def main():
                 )
                 if waiter_task in done_set and not cb_started.is_set():
                     cb_wait_task.cancel()
-                    await asyncio.wait_for(waiter_task, timeout=5.0)
+                    await asyncio.wait({{waiter_task}}, timeout=1.0)
                 assert cb_wait_task in done_set, "Callback startup timed out"
                 waiter_task.cancel()
-                cancelled = False
+                done_cancel, _ = await asyncio.wait({{waiter_task}}, timeout=1.0)
+                assert waiter_task in done_cancel
+                assert waiter_task.cancelled()
                 try:
-                    await asyncio.wait_for(waiter_task, timeout=5.0)
+                    await waiter_task
                 except asyncio.CancelledError:
-                    cancelled = True
-                assert cancelled
+                    pass
                 target_fut = unhash_box[0]
                 fut_weakref = weakref.ref(target_fut)
                 assert id(target_fut) in _DETACHED_FUTURES
@@ -4095,6 +4120,7 @@ async def main():
                 await asyncio.sleep(0)
                 assert id(target_fut) not in _DETACHED_FUTURES
                 assert target_fut.exception_calls > 0
+                del target_fut_cbs
                 del target_fut
                 unhash_box.clear()
                 import gc
@@ -4115,7 +4141,7 @@ async def main():
                     if not t.done():
                         t.cancel()
                     try:
-                        await asyncio.wait_for(t, timeout=5.0)
+                        await asyncio.wait({{t}}, timeout=1.0)
                     except (asyncio.CancelledError, BaseException):
                         pass
                 await asyncio.sleep(0)
@@ -5792,6 +5818,76 @@ async def test_wait_for_review_pending_futures_and_clock(
             elif not late_failing_fut.cancelled():
                 try:
                     late_failing_fut.exception()
+                except BaseException:
+                    pass
+        loop.set_exception_handler(old_h)
+
+    # Pending future failing at exact deadline for completed review preserves COMPLETED
+    exact_call_start = 0.0
+
+    class ExactDeadlineCompletedFuture(TrackedFuture):
+        def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+            def wrapped_fn(f: Any) -> None:
+                clock.now = exact_call_start + 100.0
+                fn(f)
+
+            super().add_done_callback(wrapped_fn, context=context)
+
+    exact_dl_fut: ExactDeadlineCompletedFuture | None = ExactDeadlineCompletedFuture(
+        loop=asyncio.get_running_loop()
+    )
+    exact_dl_ref = weakref.ref(exact_dl_fut)
+    exact_dl_producer: asyncio.Task[None] | None = None
+
+    async def fail_at_exact_dl() -> None:
+        await asyncio.sleep(0)
+        if exact_dl_fut is not None:
+            exact_dl_fut.set_exception(ValueError("failure at exact deadline"))
+
+    def exact_dl_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal exact_dl_producer, exact_call_start
+        exact_call_start = clock.now
+        exact_dl_producer = asyncio.create_task(fail_at_exact_dl())
+        assert exact_dl_fut is not None
+        return exact_dl_fut
+
+    unhandled_exact_dl_reports: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, ctx: unhandled_exact_dl_reports.append(ctx))
+    try:
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_exact_dl = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=exact_dl_cb,
+                )
+                assert res_exact_dl.status == "COMPLETED"
+                assert exact_dl_fut is not None
+                assert exact_dl_fut.done()
+                if exact_dl_producer is not None:
+                    await exact_dl_producer
+                await asyncio.sleep(0)
+                assert exact_dl_fut.exception_retrieved is True
+                assert id(exact_dl_fut) not in client_module._DETACHED_FUTURES
+                exact_dl_fut = None
+                gc.collect()
+                assert exact_dl_ref() is None
+                assert unhandled_exact_dl_reports == []
+    finally:
+        if exact_dl_producer is not None:
+            if not exact_dl_producer.done():
+                exact_dl_producer.cancel()
+            try:
+                await exact_dl_producer
+            except (asyncio.CancelledError, BaseException):
+                pass
+        if exact_dl_fut is not None:
+            if not exact_dl_fut.done():
+                exact_dl_fut.cancel()
+            elif not exact_dl_fut.cancelled():
+                try:
+                    exact_dl_fut.exception()
                 except BaseException:
                     pass
         loop.set_exception_handler(old_h)

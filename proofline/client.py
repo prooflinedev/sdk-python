@@ -323,8 +323,6 @@ def _is_immutable(val: Any, seen: set[int] | None = None) -> bool:
     if val is None or val is UNSET:
         return True
     if isinstance(val, type):
-        if issubclass(val, (ctypes._SimpleCData, ctypes.Structure, ctypes.Union, ctypes.Array)):
-            return True
         return val in _SAFE_BUILTIN_CLASSES
     t = type(val)
     if t in _IMMUTABLE_TYPES:
@@ -401,6 +399,28 @@ _SAFE_SPECIAL_ATTRS: set[str] = {
 }
 
 
+def _is_pointer_bearing_ctypes_type(t: Any) -> bool:
+    if not isinstance(t, type):
+        return True
+    if issubclass(
+        t,
+        (
+            ctypes.py_object,
+            ctypes._Pointer,
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_wchar_p,
+        ),
+    ):
+        return True
+    code = getattr(t, "_type_", None)
+    if code in ("O", "P", "z", "Z", "u"):
+        return True
+    if issubclass(t, ctypes.Array):
+        return _is_pointer_bearing_ctypes_type(getattr(t, "_type_", None))
+    return False
+
+
 def _has_mutable_class_attrs(cls: type) -> bool:
     for base in cls.__mro__:
         if base in _SAFE_BUILTIN_CLASSES or base is object:
@@ -414,6 +434,8 @@ def _has_mutable_class_attrs(cls: type) -> bool:
                     continue
                 if name == "_type_":
                     if not (isinstance(attr, type) or hasattr(attr, "_type_")):
+                        return True
+                    if _is_pointer_bearing_ctypes_type(attr):
                         return True
                     continue
             if name in _SAFE_SPECIAL_ATTRS:
@@ -561,7 +583,18 @@ _py_release_buffer.restype = None
 _py_release_buffer.argtypes = [ctypes.POINTER(_Py_buffer)]
 
 
+class _DeadlineAborted(Exception):
+    pass
+
+
 def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | None:
+    try:
+        return _snapshot_review_impl(detail)
+    except _DeadlineAborted:
+        return None
+
+
+def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail | None:
     if _deadline_expired():
         return None
 
@@ -992,6 +1025,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             "Unsupported mutable value in review extension data: "
                             f"{exp_cls.__name__}"
                         )
+                    if _is_pointer_bearing_ctypes_type(exp_elem_type):
+                        raise TypeError(
+                            "Unsupported mutable value in review extension data: "
+                            f"{exp_cls.__name__}"
+                        )
                     if not isinstance(exp_len, int) or exp_len < 0:
                         raise TypeError(
                             "Unsupported mutable value in review extension data: "
@@ -1010,8 +1048,11 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                             return None
                         cloned_exporter = type(exporter).from_buffer_copy(exporter)
                         memo[exp_id] = cloned_exporter
-                        if hasattr(exporter, "__dict__"):
+                        if hasattr(exporter, "__dict__") or hasattr(exporter, "__slots__"):
                             _install_cloned_dict(exporter, cloned_exporter, memo, stack)
+                            stack.append(
+                                (_OBJ_EXPAND, cloned_exporter, iter(_get_obj_attrs(exporter)))
+                            )
                     b_val = _Py_buffer()
                     b_exp = _Py_buffer()
                     offset = 0
@@ -1086,11 +1127,46 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     else:
                         full_bytes = full_mv.cast("B")
                         try:
-                            full_bytes_slice = full_bytes[offset : offset + val.nbytes]
-                            if val_shape is not None:
-                                resolved_mv = full_bytes_slice.cast(val.format, shape=val_shape)
+                            if (
+                                val.ndim == 1
+                                and val_shape is not None
+                                and val_strides is not None
+                                and val.itemsize > 0
+                            ):
+                                shape = val_shape[0]
+                                stride = val_strides[0]
+                                itemsize = val.itemsize
+                                elem_stride = stride // itemsize
+                                min_byte = (
+                                    offset if stride >= 0 else (offset + (shape - 1) * stride)
+                                )
+                                max_byte = (
+                                    (offset + shape * stride)
+                                    if stride >= 0
+                                    else (offset + itemsize)
+                                )
+                                span_bytes: Any = full_bytes[min_byte:max_byte]
+                                span_cast: Any = span_bytes.cast(val.format)
+                                local_offset = (offset - min_byte) // itemsize
+                                if shape == 0:
+                                    resolved_mv = span_cast[0:0]
+                                elif elem_stride > 0:
+                                    resolved_mv = span_cast[
+                                        local_offset : local_offset
+                                        + shape * elem_stride : elem_stride
+                                    ]
+                                else:
+                                    last = local_offset + (shape - 1) * elem_stride
+                                    stop = (
+                                        None if (last + elem_stride < 0) else (last + elem_stride)
+                                    )
+                                    resolved_mv = span_cast[local_offset:stop:elem_stride]
                             else:
-                                resolved_mv = full_bytes_slice.cast(val.format)
+                                full_bytes_slice = full_bytes[offset : offset + val.nbytes]
+                                if val_shape is not None:
+                                    resolved_mv = full_bytes_slice.cast(val.format, shape=val_shape)
+                                else:
+                                    resolved_mv = full_bytes_slice.cast(val.format)
                         except Exception:
                             resolved_mv = full_mv
                     if val.readonly:
@@ -1416,6 +1492,10 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {val_cls.__name__}"
                     )
+                if _is_pointer_bearing_ctypes_type(val_elem_type):
+                    raise TypeError(
+                        f"Unsupported mutable value in review extension data: {val_cls.__name__}"
+                    )
                 if not isinstance(val_len, int) or val_len < 0:
                     raise TypeError(
                         f"Unsupported mutable value in review extension data: {val_cls.__name__}"
@@ -1641,6 +1721,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
     pending_frozensets: list[Any] = deferred_frozenset_insertions
 
     def _is_member_state_populated(m_clone: Any, current_target_id: int | None = None) -> bool:
+        if _deadline_expired():
+            raise _DeadlineAborted()
         if _is_immutable(m_clone):
             return True
         if _is_identity_hashed(m_clone):
@@ -1653,6 +1735,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
         stack_nodes: list[tuple[Any, bool]] = [(m_clone, root_in_custom)]
         container_ids: set[int] = set()
         while stack_nodes:
+            if _deadline_expired():
+                raise _DeadlineAborted()
             cur, in_custom = stack_nodes.pop()
             if _is_immutable(cur):
                 continue
@@ -1676,25 +1760,35 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                     stack_nodes.append((cur.__dict__, True))
                 if hasattr(cur, "__slots__") or hasattr(cur, "__dict__"):
                     for _, _, slot_val in _get_obj_attrs(cur):
+                        if _deadline_expired():
+                            raise _DeadlineAborted()
                         if not _is_immutable(slot_val):
                             stack_nodes.append((slot_val, True))
                 if isinstance(cur, dict):
                     for k, v in cur.items():
+                        if _deadline_expired():
+                            raise _DeadlineAborted()
                         if not _is_immutable(k):
                             stack_nodes.append((k, True))
                         if not _is_immutable(v):
                             stack_nodes.append((v, True))
                 elif isinstance(cur, tuple):
                     for item in cur:
+                        if _deadline_expired():
+                            raise _DeadlineAborted()
                         if not _is_immutable(item):
                             stack_nodes.append((item, True))
                 elif isinstance(cur, (list, set, frozenset, deque)):
                     for item in cur:
+                        if _deadline_expired():
+                            raise _DeadlineAborted()
                         if not _is_immutable(item):
                             stack_nodes.append((item, True))
             else:
                 if isinstance(cur, (tuple, frozenset)):
                     for item in cur:
+                        if _deadline_expired():
+                            raise _DeadlineAborted()
                         if _is_immutable(item):
                             continue
                         if _is_identity_hashed(item):
@@ -1703,6 +1797,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         stack_nodes.append((item, item_is_custom))
 
         for target, _, _, _, _, _ in deferred_tuple_finalizations:
+            if _deadline_expired():
+                raise _DeadlineAborted()
             if id(target) in container_ids:
                 if id(target) == current_target_id:
                     try:
@@ -1713,6 +1809,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         return False
                 return False
         for target, _, _, _, _, _ in pending_frozensets:
+            if _deadline_expired():
+                raise _DeadlineAborted()
             if id(target) in container_ids:
                 if id(target) == current_target_id:
                     try:
@@ -1723,6 +1821,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         return False
                 return False
         for s, _, _ in deferred_set_insertions:
+            if _deadline_expired():
+                raise _DeadlineAborted()
             if id(s) in container_ids:
                 if id(s) == current_target_id:
                     try:
@@ -1733,6 +1833,8 @@ def _snapshot_review(detail: CustomerReviewDetail) -> CustomerReviewDetail | Non
                         return False
                 return False
         for td_id, entries in dict_ordered_entries.items():
+            if _deadline_expired():
+                raise _DeadlineAborted()
             if td_id in container_ids:
                 if td_id == current_target_id:
                     try:
@@ -2803,8 +2905,8 @@ class ProoflineClient(Operations):
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.type == "urn:proofline:sdk:timeout" or (
-                        error.status == 0 and (_transport.remaining() or 0) <= 0
+                    if (_transport.remaining() or 0) <= 0 and (
+                        error.type == "urn:proofline:sdk:timeout" or error.status == 0
                     ):
                         break
                     raise
@@ -3273,8 +3375,8 @@ class AsyncProoflineClient(AsyncOperations):
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.type == "urn:proofline:sdk:timeout" or (
-                        error.status == 0 and (_transport.remaining() or 0) <= 0
+                    if (_transport.remaining() or 0) <= 0 and (
+                        error.type == "urn:proofline:sdk:timeout" or error.status == 0
                     ):
                         break
                     raise
@@ -3408,20 +3510,8 @@ class AsyncProoflineClient(AsyncOperations):
                                         except BaseException:
                                             _detach_overdue_future(res)
                                             raise
-                                    done: set[Any] = set()
                                     try:
-                                        while True:
-                                            deadline_val = _transport.DEADLINE.get()
-                                            cb_finished_in_budget = bool(completed_at) and (
-                                                deadline_val is None
-                                                or completed_at[0] < deadline_val
-                                            )
-                                            if cb_finished_in_budget:
-                                                if hasattr(res, "result"):
-                                                    res.result()
-                                                else:
-                                                    AsyncFuture.result(res)
-                                                break
+                                        while not completed_at:
                                             remaining_budget = _transport.remaining()
                                             if (
                                                 remaining_budget is not None
@@ -3429,13 +3519,13 @@ class AsyncProoflineClient(AsyncOperations):
                                             ):
                                                 break
                                             try:
-                                                done, _ = await async_wait(
+                                                await async_wait(
                                                     {completion_fut}, timeout=remaining_budget
                                                 )
                                             except BaseException:
                                                 _detach_overdue_future(res)
                                                 raise
-                                            if completion_fut in done:
+                                            if completed_at:
                                                 break
                                             rem_after = _transport.remaining()
                                             if rem_after is not None and rem_after <= 0:
@@ -3454,7 +3544,7 @@ class AsyncProoflineClient(AsyncOperations):
                                     cb_finished_in_budget = bool(completed_at) and (
                                         deadline_val is None or completed_at[0] < deadline_val
                                     )
-                                    if cb_finished_in_budget and completion_fut in done:
+                                    if cb_finished_in_budget:
                                         if hasattr(res, "result"):
                                             res.result()
                                         else:
