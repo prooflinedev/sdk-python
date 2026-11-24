@@ -5,7 +5,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,6 +24,15 @@ SILENT_V6 = "2001:db8::1"
 # These answer every SYN with a reset, as a host with nothing listening does.
 REFUSED = "198.51.100.1"
 REFUSED_V6 = "2001:db8::2"
+
+
+def until(condition: Callable[[], bool], what: str) -> None:
+    """Poll a condition a worker thread sets; fail instead of hanging if it never holds."""
+    deadline = time.monotonic() + 5
+    while not condition():
+        if time.monotonic() > deadline:
+            pytest.fail(f"Timed out waiting for {what}.")
+        time.sleep(0.001)
 
 
 @dataclass
@@ -247,8 +256,7 @@ def test_a_failure_while_an_attempt_starts_still_starts_the_next(
         if calls == 2:
             failures = race.failures
             first_fails.set()
-            while race.failures == failures:
-                time.sleep(0.001)
+            until(lambda: race.failures > failures, "the first attempt to fail")
         return seen
 
     addresses = ["192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"]
@@ -280,8 +288,7 @@ def test_a_failure_after_the_deadline_still_reports_the_timeout(
     def settle_then_fail(race: _sync_http.Race) -> httpcore2.NetworkStream | None:
         winner = settle(race)
         reset.set()
-        while race.running:
-            time.sleep(0.001)
+        until(lambda: not race.running, "the late attempts to fail")
         return winner
 
     monkeypatch.setattr(_sync_http, "resolve", lambda *_: [SILENT, SILENT_V6])
@@ -289,6 +296,60 @@ def test_a_failure_after_the_deadline_still_reports_the_timeout(
     monkeypatch.setattr(_sync_http.Race, "settle", settle_then_fail)
     with pytest.raises(httpcore2.ConnectTimeout):
         _sync_http.NetworkBackend().connect_tcp("dark.proofline.invalid", 443, 0.4)
+
+
+def test_a_winner_is_closed_when_starting_the_next_attempt_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first attempt connects just after the scheduler checked for a winner, and then
+    # starting the second attempt's thread fails. The error propagates; the stream is closed.
+    release = threading.Event()
+    winner = Stream()
+
+    def connect_tcp(self: Any, host: str, port: int, timeout: float | None, *args: Any) -> Any:
+        release.wait(5)
+        return winner
+
+    original_start = _sync_http.Race.start
+    starts = 0
+
+    def start(race: _sync_http.Race, connect: Callable[[], httpcore2.NetworkStream]) -> None:
+        nonlocal starts
+        starts += 1
+        if starts == 2:
+            release.set()
+            until(lambda: race.winner is not None, "the first attempt to connect")
+            raise RuntimeError("can't start new thread")
+        original_start(race, connect)
+
+    monkeypatch.setattr(_sync_http, "resolve", lambda *_: [SILENT, SILENT_V6])
+    monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect_tcp)
+    monkeypatch.setattr(_sync_http.Race, "start", start)
+    with pytest.raises(RuntimeError):
+        _sync_http.NetworkBackend().connect_tcp("dual.proofline.invalid", 443, 5)
+    assert winner.closed.wait(5)
+
+
+def test_an_attempt_whose_thread_cannot_start_is_not_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(thread: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    race = _sync_http.Race()
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    with pytest.raises(RuntimeError):
+        race.start(Stream)
+    assert race.running == 0
+
+
+def test_the_backend_alternates_address_families(network: Network) -> None:
+    # The resolver groups addresses by family; attempts must still alternate between them.
+    network.hosts["grouped.proofline.invalid"] = [SILENT_V6, REFUSED_V6, SILENT, REFUSED]
+    with httpx2.Client(transport=_sync_http.Transport(), timeout=0.8) as client:
+        with pytest.raises(httpx2.TimeoutException):
+            client.get("http://grouped.proofline.invalid:443/finding")
+    assert network.tried == [SILENT_V6, SILENT, REFUSED_V6, REFUSED]
 
 
 @pytest.mark.parametrize(
