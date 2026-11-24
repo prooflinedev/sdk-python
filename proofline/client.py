@@ -327,6 +327,22 @@ def _is_immutable_enum(val: Enum, seen: set[int] | None = None) -> bool:
         for v in inst_dict.values():
             if not _is_immutable(v, seen):
                 return False
+    seen_slots: set[str] = set()
+    for cls in type(val).__mro__:
+        slots = getattr(cls, "__slots__", None)
+        if slots is not None:
+            if isinstance(slots, str):
+                slots = (slots,)
+            for slot_name in slots:
+                if slot_name in seen_slots or slot_name in ("__dict__", "__weakref__"):
+                    continue
+                seen_slots.add(slot_name)
+                try:
+                    slot_val = getattr(val, slot_name)
+                except AttributeError:
+                    continue
+                if not _is_immutable(slot_val, seen):
+                    return False
     return True
 
 
@@ -1214,7 +1230,22 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                 stop = None if (last + stride < 0) else (last + stride)
                                 resolved_mv = full_bytes[offset:stop:stride]
                         elif val_shape is not None and val.ndim > 1:
-                            if val_strides is not None:
+                            if val_shape[0] == 0:
+                                plane_bytes = val.itemsize
+                                for d in val_shape[1:]:
+                                    plane_bytes *= d
+                                s_0 = val_strides[0] if val_strides is not None else 1
+                                if len(full_bytes) >= plane_bytes and plane_bytes > 0:
+                                    nonempty_shape = (1,) + val_shape[1:]
+                                    base_shaped = full_bytes[:plane_bytes].cast(
+                                        "B", shape=nonempty_shape
+                                    )
+                                    resolved_mv = (
+                                        base_shaped[::-1][0:0] if s_0 < 0 else base_shaped[0:0]
+                                    )
+                                else:
+                                    resolved_mv = full_bytes[0:0]
+                            elif val_strides is not None:
                                 d_0 = val_shape[0]
                                 s_0 = val_strides[0]
                                 plane_bytes = val.itemsize
@@ -3733,6 +3764,12 @@ class AsyncProoflineClient(AsyncOperations):
                                 completed_at = []
                                 wrapper_started = False
                                 captured_deadline = _transport.DEADLINE.get()
+                                wrapper_task: AsyncTask[Any] | None = None
+                                try:
+                                    task_completion_fut = async_get_running_loop().create_future()
+                                except BaseException:
+                                    _cleanup_discarded_awaitable(res)
+                                    raise
 
                                 async def _runner() -> Any:
                                     nonlocal wrapper_started
@@ -3767,13 +3804,21 @@ class AsyncProoflineClient(AsyncOperations):
                                                     break
                                         except BaseException:
                                             pass
+                                    curr_task = wrapper_task or async_current_task()
                                     try:
-                                        if getattr(task, "_must_cancel", False):
-                                            waiter_cancelling = True
-                                        elif hasattr(task, "cancelling") and task.cancelling() > 0:
-                                            waiter_cancelling = True
-                                        elif hasattr(task, "cancelled") and task.cancelled():
-                                            waiter_cancelling = True
+                                        if curr_task is not None:
+                                            if getattr(curr_task, "_must_cancel", False):
+                                                waiter_cancelling = True
+                                            elif (
+                                                hasattr(curr_task, "cancelling")
+                                                and curr_task.cancelling() > 0
+                                            ):
+                                                waiter_cancelling = True
+                                            elif (
+                                                hasattr(curr_task, "cancelled")
+                                                and curr_task.cancelled()
+                                            ):
+                                                waiter_cancelling = True
                                     except BaseException:
                                         pass
                                     try:
@@ -3805,6 +3850,7 @@ class AsyncProoflineClient(AsyncOperations):
                                 deadline_token_task = _transport.DEADLINE.set(None)
                                 try:
                                     task = async_create_task(runner_coro)
+                                    wrapper_task = task
                                 except BaseException:
                                     if (
                                         iscoroutine(runner_coro)
@@ -3818,11 +3864,6 @@ class AsyncProoflineClient(AsyncOperations):
                                     raise
                                 finally:
                                     _transport.DEADLINE.reset(deadline_token_task)
-                                try:
-                                    task_completion_fut = async_get_running_loop().create_future()
-                                except BaseException:
-                                    _detach_overdue_task(task, res, wrapper_started)
-                                    raise
 
                                 def _on_task_done(t: Any) -> None:
                                     if not completed_at:

@@ -2863,10 +2863,16 @@ async def test_wait_for_review_invokes_on_poll_callback(
 
         # Assert already-done failed future propagates inline
         failed_inline_futs: list[asyncio.Future[None]] = []
+        call_start_inline = clock.now
+
+        class ClockAdvancingDoneFuture(asyncio.Future[None]):
+            def done(self) -> bool:
+                clock.now = call_start_inline + 10.0
+                return super().done()
 
         def failed_future_callback(r: Any) -> asyncio.Future[None]:
             loop = asyncio.get_running_loop()
-            fut: asyncio.Future[None] = loop.create_future()
+            fut = ClockAdvancingDoneFuture(loop=loop)
             fut.set_exception(ValueError("inline future error"))
             failed_inline_futs.append(fut)
             return fut
@@ -2973,6 +2979,16 @@ async def main() -> None:
     async with AsyncProoflineClient(
         token="test_token", base_url="https://api.proofline.sh"
     ) as client:
+        async_wait_calls_1 = 0
+        orig_async_wait_1 = client_module.async_wait
+
+        async def counting_async_wait_1(*args: Any, **kwargs: Any) -> Any:
+            nonlocal async_wait_calls_1
+            async_wait_calls_1 += 1
+            return await orig_async_wait_1(*args, **kwargs)
+
+        client_module.async_wait = counting_async_wait_1
+
         # Case 1: Pending same-loop Future that times out is detached without cancelling
         # Assert it is still pending before advancing the controlled deadline
         class SignallingFuture(asyncio.Future[None]):
@@ -2985,6 +3001,8 @@ async def main() -> None:
             def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
                 super().add_done_callback(fn, context=context)
                 self.active_callbacks.append(fn)
+                if "_on_future_done" in getattr(fn, "__name__", ""):
+                    clock.advance(1.0)
                 self.wait_entered.set()
 
             def remove_done_callback(self, fn: Any) -> int:
@@ -3023,16 +3041,13 @@ async def main() -> None:
             if waiter_task_1 in done_1:
                 await waiter_task_1
             assert pending_fut is not None
-            await pending_fut.wait_entered.wait()
-            while getattr(waiter_task_1, "_fut_waiter", None) is None:
-                await asyncio.sleep(0)
-            clock.advance(1.0)
             done_waiter_1, _ = await asyncio.wait({waiter_task_1}, timeout=1.0)
             assert waiter_task_1 in done_waiter_1
             res_1 = waiter_task_1.result()
             assert res_1.status == "TIMED_OUT"
             assert not pending_fut.cancelled()
             assert not pending_fut.done()
+            assert async_wait_calls_1 == 0
             assert id(pending_fut) in client_module._DETACHED_FUTURES
             assert len(pending_fut.removed_callbacks) > 0
             assert any(
@@ -3047,6 +3062,7 @@ async def main() -> None:
             await asyncio.sleep(0)
             assert id(pending_fut) not in client_module._DETACHED_FUTURES
         finally:
+            client_module.async_wait = orig_async_wait_1
             if pending_fut is not None and not pending_fut.done():
                 pending_fut.set_result(None)
             if not startup_waiter_1.done():
@@ -4798,6 +4814,10 @@ asyncio.run(main())
     assert copied_2d.shape == mv_2d_slice.shape == (2, 2)
     assert copied_2d.strides == mv_2d_slice.strides == (4, 1)
     assert copied_2d.tobytes() == mv_2d_slice.tobytes()
+    copied_2d[0, 0] = 99
+    assert copied_2d[0, 0] == 99
+    assert mv_2d_slice[0, 0] == 10
+    assert c_arr_2d[0] == 10
 
     # 3D memoryview reversed first axis reconstructed from physical span
     c_arr_3d = (ctypes.c_uint8 * 24)(*range(24))
@@ -4810,6 +4830,10 @@ asyncio.run(main())
     assert copied_3d.shape == mv_3d_rev.shape == (2, 3, 4)
     assert copied_3d.strides == mv_3d_rev.strides == (-12, 4, 1)
     assert copied_3d.tobytes() == mv_3d_rev.tobytes()
+    copied_3d[0, 0, 0] = 99
+    assert copied_3d[0, 0, 0] == 99
+    assert mv_3d_rev[0, 0, 0] == 12
+    assert c_arr_3d[12] == 12
 
     class MutableArray(ctypes.c_int32 * 4):
         pass
@@ -5708,11 +5732,14 @@ async def test_wait_for_review_pending_futures_and_clock(
 
     with Server(lambda request, index: Reply(body=responses[1])) as server:
         async with session("async", server.url) as client:
-            await client.wait_for_review(
-                ORG,
-                REVIEW,
-                timeout=100.0,
-                on_poll=cb_consuming_clock,
+            await asyncio.wait_for(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=cb_consuming_clock,
+                ),
+                timeout=5.0,
             )
     assert wait_timeouts == [65.0]
     monkeypatch.setattr(client_module, "async_wait", orig_async_wait)
@@ -5738,11 +5765,14 @@ async def test_wait_for_review_pending_futures_and_clock(
         with Server(lambda request, index: Reply(body=responses[0])) as server:
             async with session("async", server.url) as client:
                 with pytest.raises(ValueError, match="timely failure"):
-                    await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=100.0,
-                        on_poll=timely_fail_cb,
+                    await asyncio.wait_for(
+                        client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=100.0,
+                            on_poll=timely_fail_cb,
+                        ),
+                        timeout=5.0,
                     )
     finally:
         if timely_producer is not None:
@@ -5783,11 +5813,14 @@ async def test_wait_for_review_pending_futures_and_clock(
         with Server(lambda request, index: Reply(body=responses[0])) as server:
             async with session("async", server.url) as client:
                 with pytest.raises(ValueError, match="timely failure with late resumption"):
-                    await client.wait_for_review(
-                        ORG,
-                        REVIEW,
-                        timeout=100.0,
-                        on_poll=timely_late_fail_cb,
+                    await asyncio.wait_for(
+                        client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=100.0,
+                            on_poll=timely_late_fail_cb,
+                        ),
+                        timeout=5.0,
                     )
         assert clock.now >= 200.0
     finally:
@@ -5832,11 +5865,14 @@ async def test_wait_for_review_pending_futures_and_clock(
     with Server(lambda request, index: Reply(body=responses[0])) as server:
         async with session("async", server.url) as client:
             with pytest.raises(ValueError, match="timely coroutine failure"):
-                await client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=100.0,
-                    on_poll=timely_fail_coro,
+                await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=timely_fail_coro,
+                    ),
+                    timeout=5.0,
                 )
     assert clock.now >= 200.0
     monkeypatch.setattr(client_module, "async_create_task", orig_create_task_timely)
@@ -5876,11 +5912,14 @@ async def test_wait_for_review_pending_futures_and_clock(
     try:
         with Server(lambda request, index: Reply(body=responses[1])) as server:
             async with session("async", server.url) as client:
-                res_late = await client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=100.0,
-                    on_poll=late_fail_cb,
+                res_late = await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=late_fail_cb,
+                    ),
+                    timeout=5.0,
                 )
                 assert res_late.status == "COMPLETED"
                 assert late_fut is not None
@@ -5937,11 +5976,14 @@ async def test_wait_for_review_pending_futures_and_clock(
     try:
         with Server(lambda request, index: Reply(body=responses[1])) as server:
             async with session("async", server.url) as client:
-                res_after = await client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=100.0,
-                    on_poll=late_failing_cb,
+                res_after = await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=late_failing_cb,
+                    ),
+                    timeout=5.0,
                 )
                 assert res_after.status == "COMPLETED"
                 assert late_failing_fut is not None
@@ -5976,30 +6018,29 @@ async def test_wait_for_review_pending_futures_and_clock(
 
     # Pending future failing at exact deadline for completed review preserves COMPLETED
     exact_call_start = 0.0
+    async_wait_calls_exact = 0
+    orig_async_wait_exact = client_module.async_wait
+
+    async def counting_async_wait_exact(*args: Any, **kwargs: Any) -> Any:
+        nonlocal async_wait_calls_exact
+        async_wait_calls_exact += 1
+        return await orig_async_wait_exact(*args, **kwargs)
+
+    monkeypatch.setattr(client_module, "async_wait", counting_async_wait_exact)
 
     class ExactDeadlineCompletedFuture(TrackedFuture):
         def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
-            def wrapped_fn(f: Any) -> None:
-                clock.now = exact_call_start + 100.0
-                fn(f)
-
-            super().add_done_callback(wrapped_fn, context=context)
+            super().add_done_callback(fn, context=context)
+            clock.now = exact_call_start + 100.0
 
     exact_dl_fut: ExactDeadlineCompletedFuture | None = ExactDeadlineCompletedFuture(
         loop=asyncio.get_running_loop()
     )
     exact_dl_ref = weakref.ref(exact_dl_fut)
-    exact_dl_producer: asyncio.Task[None] | None = None
-
-    async def fail_at_exact_dl() -> None:
-        await asyncio.sleep(0)
-        if exact_dl_fut is not None:
-            exact_dl_fut.set_exception(ValueError("failure at exact deadline"))
 
     def exact_dl_cb(r: Any) -> asyncio.Future[None]:
-        nonlocal exact_dl_producer, exact_call_start
+        nonlocal exact_call_start
         exact_call_start = clock.now
-        exact_dl_producer = asyncio.create_task(fail_at_exact_dl())
         assert exact_dl_fut is not None
         return exact_dl_fut
 
@@ -6008,32 +6049,29 @@ async def test_wait_for_review_pending_futures_and_clock(
     try:
         with Server(lambda request, index: Reply(body=responses[1])) as server:
             async with session("async", server.url) as client:
-                res_exact_dl = await client.wait_for_review(
-                    ORG,
-                    REVIEW,
-                    timeout=100.0,
-                    on_poll=exact_dl_cb,
+                res_exact_dl = await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=exact_dl_cb,
+                    ),
+                    timeout=5.0,
                 )
                 assert res_exact_dl.status == "COMPLETED"
                 assert exact_dl_fut is not None
-                assert exact_dl_fut.done()
-                if exact_dl_producer is not None:
-                    await exact_dl_producer
+                assert not exact_dl_fut.done()
+                assert async_wait_calls_exact == 0
+                assert id(exact_dl_fut) in client_module._DETACHED_FUTURES
+                assert exact_dl_fut.exception_retrieved is False
+                exact_dl_fut.cancel()
                 await asyncio.sleep(0)
-                assert exact_dl_fut.exception_retrieved is True
-                assert id(exact_dl_fut) not in client_module._DETACHED_FUTURES
                 exact_dl_fut = None
                 gc.collect()
                 assert exact_dl_ref() is None
                 assert unhandled_exact_dl_reports == []
     finally:
-        if exact_dl_producer is not None:
-            if not exact_dl_producer.done():
-                exact_dl_producer.cancel()
-            try:
-                await exact_dl_producer
-            except (asyncio.CancelledError, BaseException):
-                pass
+        monkeypatch.setattr(client_module, "async_wait", orig_async_wait_exact)
         if exact_dl_fut is not None:
             if not exact_dl_fut.done():
                 exact_dl_fut.cancel()
