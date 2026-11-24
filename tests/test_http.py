@@ -1398,9 +1398,8 @@ async def test_wait_ends_on_the_read_that_names_another_head(
                             gate_waiter.cancel()
 
                     assert not cb_completed
-                    assert not waiter_task.done()
-                    assert getattr(waiter_task, "_fut_waiter", None) is not None
-                    assert not waiter_task._fut_waiter.done()
+                    done_blocked, _ = await asyncio.wait({waiter_task}, timeout=0.05)
+                    assert waiter_task not in done_blocked, "waiter completed before callback"
                     cb_gate.set()
                     done_w, _ = await asyncio.wait({waiter_task}, timeout=5.0)
                     if waiter_task not in done_w:
@@ -3092,7 +3091,11 @@ async def main() -> None:
                     await waiter_task_3
                 assert not waiter_task_3.done()
                 clock.advance(1.0)
-                res_3 = await asyncio.wait_for(asyncio.shield(waiter_task_3), timeout=1.0)
+                done_w3, _ = await asyncio.wait({waiter_task_3}, timeout=1.0)
+                if waiter_task_3 not in done_w3:
+                    print("Pending task: waiter_task_3", file=sys.stderr)
+                assert waiter_task_3 in done_w3
+                res_3 = waiter_task_3.result()
                 assert res_3.status == "TIMED_OUT"
                 assert callback_running.is_set()
                 assert not callback_finished.is_set()
@@ -3125,20 +3128,24 @@ async def main() -> None:
                 except (asyncio.CancelledError, BaseException):
                     pass
         finally:
+            client_module.async_create_task = orig_create_task_3
+            sleep_forbidden = False
             release_callback.set()
             if not waiter_task_3.done():
                 waiter_task_3.cancel()
             try:
-                await asyncio.wait_for(waiter_task_3, timeout=1.0)
+                done_w3_clean, _ = await asyncio.wait({waiter_task_3}, timeout=1.0)
+                if waiter_task_3 not in done_w3_clean:
+                    print("Pending task: waiter_task_3", file=sys.stderr)
             except (asyncio.CancelledError, BaseException):
                 pass
-            client_module.async_create_task = orig_create_task_3
-            sleep_forbidden = False
             if cb_task_3 is not None:
                 if not cb_task_3.done():
                     cb_task_3.cancel()
                 try:
-                    await asyncio.wait_for(cb_task_3, timeout=1.0)
+                    done_cb3_clean, _ = await asyncio.wait({cb_task_3}, timeout=1.0)
+                    if cb_task_3 not in done_cb3_clean:
+                        print("Pending task: cb_task_3", file=sys.stderr)
                 except (asyncio.CancelledError, BaseException):
                     pass
 
@@ -3185,30 +3192,43 @@ async def main() -> None:
                     assert cb_task_3b is not None
                     assert not cb_task_3b.done()
                     clock.advance(1.0)
-                    res_3b = await asyncio.wait_for(asyncio.shield(waiter_task_3b), timeout=1.0)
+                    done_w3b, _ = await asyncio.wait({waiter_task_3b}, timeout=1.0)
+                    if waiter_task_3b not in done_w3b:
+                        print("Pending task: waiter_task_3b", file=sys.stderr)
+                    assert waiter_task_3b in done_w3b
+                    res_3b = waiter_task_3b.result()
                     assert res_3b.status == "TIMED_OUT"
                     assert not cb_task_3b.done()
                     task_release_3b.set()
-                    await asyncio.wait_for(asyncio.shield(cb_task_3b), timeout=1.0)
+                    done_c3b, _ = await asyncio.wait({cb_task_3b}, timeout=1.0)
+                    if cb_task_3b not in done_c3b:
+                        print("Pending task: cb_task_3b", file=sys.stderr)
+                    assert cb_task_3b in done_c3b
                 finally:
                     task_release_3b.set()
                     if not startup_waiter.done():
                         startup_waiter.cancel()
                     try:
-                        await asyncio.wait_for(startup_waiter, timeout=0.5)
+                        done_sw, _ = await asyncio.wait({startup_waiter}, timeout=0.5)
+                        if startup_waiter not in done_sw:
+                            print("Pending task: startup_waiter", file=sys.stderr)
                     except (asyncio.CancelledError, BaseException):
                         pass
                     if not waiter_task_3b.done():
                         waiter_task_3b.cancel()
                     try:
-                        await asyncio.wait_for(waiter_task_3b, timeout=0.5)
+                        done_w3b_clean, _ = await asyncio.wait({waiter_task_3b}, timeout=0.5)
+                        if waiter_task_3b not in done_w3b_clean:
+                            print("Pending task: waiter_task_3b", file=sys.stderr)
                     except (asyncio.CancelledError, BaseException):
                         pass
                     if cb_task_3b is not None:
                         if not cb_task_3b.done():
                             cb_task_3b.cancel()
                         try:
-                            await asyncio.wait_for(cb_task_3b, timeout=0.5)
+                            done_cb3b_clean, _ = await asyncio.wait({cb_task_3b}, timeout=0.5)
+                            if cb_task_3b not in done_cb3b_clean:
+                                print("Pending task: cb_task_3b", file=sys.stderr)
                         except (asyncio.CancelledError, BaseException):
                             pass
 

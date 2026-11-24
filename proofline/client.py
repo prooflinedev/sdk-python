@@ -407,6 +407,7 @@ def _is_pointer_bearing_ctypes_type(t: Any, seen: set[type] | None = None) -> bo
     if t in seen:
         return False
     seen.add(t)
+    cfuncptr = getattr(ctypes, "_CFuncPtr", None)
     if issubclass(
         t,
         (
@@ -416,7 +417,7 @@ def _is_pointer_bearing_ctypes_type(t: Any, seen: set[type] | None = None) -> bo
             ctypes.c_char_p,
             ctypes.c_wchar_p,
         ),
-    ):
+    ) or (cfuncptr is not None and issubclass(t, cfuncptr)):
         return True
     code = getattr(t, "_type_", None)
     if code in ("O", "P", "z", "Z", "u"):
@@ -1136,8 +1137,23 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                 stop = None if (last + stride < 0) else (last + stride)
                                 resolved_mv = full_bytes[offset:stop:stride]
                         elif val_shape is not None and val.ndim > 1:
-                            full_bytes_slice: Any = full_bytes[offset : offset + val.nbytes]
-                            resolved_mv = full_bytes_slice.cast("B", shape=val_shape)
+                            if val.ndim == 2 and val_strides is not None:
+                                rows, cols = val_shape[0], val_shape[1]
+                                row_stride, col_stride = val_strides[0], val_strides[1]
+                                min_r = 0 if row_stride >= 0 else (rows - 1)
+                                min_c = 0 if col_stride >= 0 else (cols - 1)
+                                min_byte = offset + min_r * row_stride + min_c * col_stride
+                                max_r = (rows - 1) if row_stride >= 0 else 0
+                                max_c = (cols - 1) if col_stride >= 0 else 0
+                                max_byte = (
+                                    offset + max_r * row_stride + max_c * col_stride + val.itemsize
+                                )
+                                span_bytes_2d: Any = full_bytes[min_byte:max_byte]
+                                span_2d: Any = span_bytes_2d.cast("B", shape=(rows, cols))
+                                resolved_mv = span_2d[::-1] if row_stride < 0 else span_2d
+                            else:
+                                full_bytes_slice: Any = full_bytes[offset : offset + val.nbytes]
+                                resolved_mv = full_bytes_slice.cast("B", shape=val_shape)
                         elif val.c_contiguous:
                             resolved_mv = full_bytes[offset : offset + val.nbytes]
                         elif val_shape is not None:
@@ -1184,6 +1200,25 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                             else (last + elem_stride)
                                         )
                                         resolved_mv = span_cast[local_offset:stop:elem_stride]
+                            elif (
+                                val.ndim == 2
+                                and val_shape is not None
+                                and val_strides is not None
+                                and val.itemsize > 0
+                            ):
+                                rows, cols = val_shape[0], val_shape[1]
+                                row_stride, col_stride = val_strides[0], val_strides[1]
+                                min_r = 0 if row_stride >= 0 else (rows - 1)
+                                min_c = 0 if col_stride >= 0 else (cols - 1)
+                                min_byte = offset + min_r * row_stride + min_c * col_stride
+                                max_r = (rows - 1) if row_stride >= 0 else 0
+                                max_c = (cols - 1) if col_stride >= 0 else 0
+                                max_byte = (
+                                    offset + max_r * row_stride + max_c * col_stride + val.itemsize
+                                )
+                                span_bytes_2d = full_bytes[min_byte:max_byte]
+                                span_2d = span_bytes_2d.cast(val.format, shape=(rows, cols))
+                                resolved_mv = span_2d[::-1] if row_stride < 0 else span_2d
                             else:
                                 full_bytes_slice = full_bytes[offset : offset + val.nbytes]
                                 if val_shape is not None:
@@ -1290,8 +1325,11 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                                 f"{type(exporter).__name__}"
                             ) from exc
                         memo[exp_id] = cloned_exporter
-                        if hasattr(exporter, "__dict__"):
+                        if hasattr(exporter, "__dict__") or hasattr(exporter, "__slots__"):
                             _install_cloned_dict(exporter, cloned_exporter, memo, stack)
+                            stack.append(
+                                (_OBJ_EXPAND, cloned_exporter, iter(_get_obj_attrs(exporter)))
+                            )
                     b_val = _Py_buffer()
                     b_exp = _Py_buffer()
                     if _py_get_buffer(val, ctypes.byref(b_val), 0x0118) != 0:
@@ -2097,9 +2135,13 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
             resolved_any = False
             still_pending = []
             for target, key, is_attr, val_id, orig_val, orig_members in pending_frozensets:
+                if _deadline_expired():
+                    raise _DeadlineAborted()
                 can_resolve = True
                 resolved_members = []
                 for m in orig_members:
+                    if _deadline_expired():
+                        raise _DeadlineAborted()
                     if _is_immutable(m):
                         rm = m
                     else:
@@ -2108,13 +2150,19 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                             can_resolve = False
                             break
                     try:
+                        if _deadline_expired():
+                            raise _DeadlineAborted()
                         hash(rm)
                         _ = rm == rm
+                    except _DeadlineAborted:
+                        raise
                     except Exception:
                         can_resolve = False
                         break
                     resolved_members.append(rm)
                 if can_resolve:
+                    if _deadline_expired():
+                        raise _DeadlineAborted()
                     if type(orig_val) is frozenset:
                         res_set = frozenset(resolved_members)
                     else:
@@ -2151,14 +2199,20 @@ def _snapshot_review_impl(detail: CustomerReviewDetail) -> CustomerReviewDetail 
                 pending_frozensets = still_pending
                 _flush_pending_structures()
                 continue
+            if _deadline_expired():
+                raise _DeadlineAborted()
             raise TypeError("Unsupported cyclic reference in frozenset")
 
     _flush_pending_structures()
     if _deadline_expired():
         return None
     for fb_set, fb_members in fallback_built_frozensets:
+        if _deadline_expired():
+            raise _DeadlineAborted()
         try:
             for rm in fb_members:
+                if _deadline_expired():
+                    raise _DeadlineAborted()
                 if rm not in fb_set:
                     raise TypeError("Member lookup failed in fallback frozenset")
         except TypeError:
