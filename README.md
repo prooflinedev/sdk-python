@@ -41,6 +41,33 @@ asyncio.run(main())
 
 The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Retry policy
+
+Safe `GET` operations retry HTTP 429 and 503 responses up to four total attempts by default.
+Pass `RetryPolicy` to either client to change the attempt count, response statuses, exponential
+backoff bounds and optional jitter. `max_attempts` includes the initial request; set it to `1`
+to disable retries.
+
+```python
+from proofline import ProoflineClient, RetryPolicy
+
+policy = RetryPolicy(
+    max_attempts=6,
+    retryable_statuses=frozenset({429, 500, 502, 503, 504}),
+    initial_backoff=0.5,
+    backoff_multiplier=2,
+    max_backoff=15,
+    jitter=0.2,
+)
+
+with ProoflineClient(retry_policy=policy) as client:
+    review = client.get_review(organization_id, review_id)
+```
+
+An accepted `Retry-After` header is used exactly and is never jittered. A malformed header or a
+delay beyond `max_backoff` returns the server problem immediately. Mutating requests are never
+retried, and retry delays remain bounded by any enclosing `wait_for_review` deadline.
+
 ## Errors and refusals
 
 A refused request raises `ProoflineError` with the server problem's `status`, `type`, `title` and `detail`. When a review request creates nothing, the error also carries `refusal`, whose `reason` names the setting to change, such as `NO_LINKED_ENVIRONMENT` or `ENVIRONMENT_NOT_READY`, and `repository_name`. `RunNowRefusal` names the type of `refusal`. A refusal that does not match the public contract keeps its status, `title` and `detail` with the type `urn:proofline:sdk:invalid-response` and no `refusal`. Any other status, such as the 402 a review request answers when credits cannot pay, is a plain problem with no `refusal`. The token is redacted from every text field, and `repr` and `str` show only the status.

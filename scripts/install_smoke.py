@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import proofline
-from proofline import AsyncProoflineClient, ProoflineClient, ReviewFilters, SecretStr
+from proofline import AsyncProoflineClient, ProoflineClient, RetryPolicy, ReviewFilters, SecretStr
 
 ORG = UUID("00000000-0000-4000-8000-000000000001")
 REVIEW = UUID("00000000-0000-4000-8000-000000000002")
@@ -110,7 +110,9 @@ def main() -> None:
     url = f"http://127.0.0.1:{server.server_port}"
 
     async def asynchronous() -> None:
-        async with AsyncProoflineClient(SecretStr(TOKEN), base_url=url) as client:
+        async with AsyncProoflineClient(
+            SecretStr(TOKEN), base_url=url, retry_policy=RetryPolicy(max_attempts=1)
+        ) as client:
             assert (await client.list_reviews(ORG, query=QUERY)).items == []
             history = await client.list_pull_request_reviews(ORG, "repo/name", 42, filters=filters)
             assert history.items == []
@@ -122,7 +124,9 @@ def main() -> None:
             assert TOKEN not in repr(client)
 
     try:
-        with ProoflineClient(SecretStr(TOKEN), base_url=url) as client:
+        with ProoflineClient(
+            SecretStr(TOKEN), base_url=url, retry_policy=RetryPolicy(max_attempts=1)
+        ) as client:
             assert client.list_reviews(ORG, query=QUERY).items == []
             history = client.list_pull_request_reviews(ORG, "repo/name", 42, filters=filters)
             assert history.items == []

@@ -76,6 +76,7 @@ from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
+from .retries import DEFAULT_RETRY_POLICY, RetryPolicy
 
 T = TypeVar("T")
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
@@ -137,6 +138,12 @@ def _configuration(
         token=_transport.token_value(token),
         timeout=httpx2.Timeout(timeout),
     )
+
+
+def _retry_policy(value: object) -> RetryPolicy:
+    if not isinstance(value, RetryPolicy):
+        raise TypeError("retry_policy must be a RetryPolicy.")
+    return value
 
 
 def _review_url(base_url: str, organization_id: UUID, review_id: UUID) -> str:
@@ -221,9 +228,11 @@ class ProoflineClient(Operations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        retry_policy = _retry_policy(retry_policy)
         self._http = httpx2.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -234,7 +243,7 @@ class ProoflineClient(Operations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(self._api.token, timeout, retry_policy),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
@@ -591,9 +600,11 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        retry_policy: RetryPolicy = DEFAULT_RETRY_POLICY,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        retry_policy = _retry_policy(retry_policy)
         self._http = httpx2.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -604,7 +615,7 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(self._api.token, timeout, retry_policy),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)

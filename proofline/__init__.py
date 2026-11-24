@@ -37,6 +37,7 @@ from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .retries import RetryPolicy
 
 __all__ = [
     "AgentSession",
@@ -68,6 +69,7 @@ __all__ = [
     "ReviewFilters",
     "ReviewOutcome",
     "ReviewPage",
+    "RetryPolicy",
     "RunNowMode",
     "RunNowRefusal",
     "RunNowRequest",
