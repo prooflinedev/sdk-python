@@ -159,8 +159,12 @@ class Race:
         # The request already has a connection or stopped waiting for one.
         stream.close()
 
-    def wait(self, timeout: float | None, *, failures: int | None = None) -> None:
-        """Wait for a winner or for every attempt to fail; or for more than `failures` failures."""
+    def wait(self, timeout: float | None, *, failures: int | None = None) -> int:
+        """Wait for a winner or for every attempt to fail; or for more than `failures` failures.
+
+        Returns the failure count observed under the lock, so the caller acts on exactly the
+        failures this wait saw rather than on ones that arrive after it returns.
+        """
         with self._changed:
             self._changed.wait_for(
                 lambda: (
@@ -170,6 +174,7 @@ class Race:
                 ),
                 timeout,
             )
+            return self.failures
 
     def settle(self) -> httpcore2.NetworkStream | None:
         """Stop accepting streams; a stream that connects later is closed by its attempt."""
@@ -205,36 +210,43 @@ class NetworkBackend(httpcore2.SyncBackend):
         options = list(socket_options or ())
         connect = super().connect_tcp
         race = Race()
-        failures = 0
+        # Failures that have already started an attempt. Each failure starts at most one,
+        # so one that arrives while an attempt is being started still starts the next.
+        answered = 0
+        # Set only here, so a worker that fails after the deadline cannot change the outcome.
+        expired = False
         try:
             for index, address in enumerate(interleaved(addresses)):
                 if index:
                     # Start the next attempt after the delay, or as soon as any attempt fails.
-                    race.wait(
+                    seen = race.wait(
                         ATTEMPT_DELAY
                         if deadline is None
                         else min(ATTEMPT_DELAY, deadline - monotonic()),
-                        failures=failures,
+                        failures=answered,
                     )
                     if race.winner is not None:
                         break
                     if deadline is not None and monotonic() >= deadline:
+                        expired = True
                         break
-                failures = race.failures
+                    if seen > answered:
+                        answered += 1
                 remaining = None if deadline is None else max(0.0, deadline - monotonic())
                 race.start(partial(connect, address, port, remaining, local_address, options))
-            while race.winner is None and race.running:
+            while not expired and race.winner is None and race.running:
                 if deadline is None:
                     race.wait(None)
-                elif (left := deadline - monotonic()) > 0:
+                    continue
+                if (left := deadline - monotonic()) > 0:
                     race.wait(left)
-                else:
-                    break
+                # Judge the deadline before rereading worker state that may change after it.
+                expired = monotonic() >= deadline
         finally:
             winner = race.settle()
         if winner is not None:
             return NetworkStream(winner)
-        if race.running:
+        if expired:
             raise httpcore2.ConnectTimeout("No resolved address connected in time.")
         raise race.failure or httpcore2.ConnectError("The host name did not resolve.")
 
