@@ -6,6 +6,7 @@ import math
 import threading
 from asyncio import Event as AsyncEvent
 from asyncio import sleep as async_sleep
+from asyncio import wait_for as async_wait_for
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from string import hexdigits
 from time import monotonic, sleep
@@ -191,7 +192,6 @@ def _pagination_limit(resource: str = "Review") -> ProoflineError:
     )
 
 
-_CANCEL_POLL_SECONDS = 0.05
 _CANCEL_REASON = "The wait was cancelled by the caller."
 
 
@@ -199,31 +199,53 @@ def _cancelled(event: threading.Event | AsyncEvent | None) -> bool:
     return event is not None and event.is_set()
 
 
-def _sleep_with_cancel(delay: float, event: threading.Event | None) -> bool:
-    """Sleep in short slices when cancellable; return False once cancelled."""
+def _wait_for_event(event: threading.Event, timeout: float) -> None:
+    event.wait(timeout)
+
+
+async def _async_wait_for_event(event: AsyncEvent, timeout: float) -> None:
+    try:
+        await async_wait_for(event.wait(), timeout)
+    except TimeoutError:
+        return
+
+
+def _cancel_end(delay: float, cutoff: float | None) -> float:
+    end = monotonic() + delay
+    return min(end, cutoff) if cutoff is not None else end
+
+
+def _sleep_with_cancel(
+    delay: float, event: threading.Event | None, cutoff: float | None = None
+) -> bool:
+    """Wait on the event until the delay or cutoff, returning False if cancelled."""
     if event is None:
         sleep(delay)
         return True
-    while delay > 0:
+    end = _cancel_end(delay, cutoff)
+    while True:
         if _cancelled(event):
             return False
-        slice_ = min(delay, _CANCEL_POLL_SECONDS)
-        sleep(slice_)
-        delay -= slice_
-    return not _cancelled(event)
+        remaining = end - monotonic()
+        if remaining <= 0:
+            return not _cancelled(event)
+        _wait_for_event(event, remaining)
 
 
-async def _async_sleep_with_cancel(delay: float, event: AsyncEvent | None) -> bool:
+async def _async_sleep_with_cancel(
+    delay: float, event: AsyncEvent | None, cutoff: float | None = None
+) -> bool:
     if event is None:
         await async_sleep(delay)
         return True
-    while delay > 0:
+    end = _cancel_end(delay, cutoff)
+    while True:
         if _cancelled(event):
             return False
-        slice_ = min(delay, _CANCEL_POLL_SECONDS)
-        await async_sleep(slice_)
-        delay -= slice_
-    return not _cancelled(event)
+        remaining = end - monotonic()
+        if remaining <= 0:
+            return not _cancelled(event)
+        await _async_wait_for_event(event, remaining)
 
 
 def _export_page_limit(max_pages: int) -> None:
@@ -612,10 +634,12 @@ class ProoflineClient(Operations):
         try:
             while (_transport.remaining() or 0) > 0:
                 if _cancelled(cancel_event):
-                    return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
+                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
+                    if _cancelled(cancel_event):
+                        return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
@@ -626,7 +650,9 @@ class ProoflineClient(Operations):
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
-                if not _sleep_with_cancel(min(interval, _transport.remaining() or 0), cancel_event):
+                remaining = _transport.remaining() or 0
+                cutoff = monotonic() + remaining
+                if not _sleep_with_cancel(min(interval, remaining), cancel_event, cutoff):
                     return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 interval = min(60, interval * 2)
             if _cancelled(cancel_event):
@@ -1010,10 +1036,12 @@ class AsyncProoflineClient(AsyncOperations):
         try:
             while (_transport.remaining() or 0) > 0:
                 if _cancelled(cancel_event):
-                    return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
+                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
+                    if _cancelled(cancel_event):
+                        return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
@@ -1024,8 +1052,10 @@ class AsyncProoflineClient(AsyncOperations):
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
+                remaining = _transport.remaining() or 0
+                cutoff = monotonic() + remaining
                 if not await _async_sleep_with_cancel(
-                    min(interval, _transport.remaining() or 0), cancel_event
+                    min(interval, remaining), cancel_event, cutoff
                 ):
                     return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 interval = min(60, interval * 2)
