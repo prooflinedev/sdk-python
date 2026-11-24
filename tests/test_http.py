@@ -1425,6 +1425,65 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
         assert len(server.requests) == 8
 
 
+async def test_async_wait_for_event_prefers_resolved_waiter_when_timer_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    real_sleep = asyncio.sleep
+    timer_gate: asyncio.Future[None] = loop.create_future()
+
+    async def fake_sleep(delay: float) -> None:
+        if delay == 0:
+            await real_sleep(0)
+        else:
+            await timer_gate
+
+    monkeypatch.setattr(client_module, "async_sleep", fake_sleep)
+
+    class GatedEvent:
+        def __init__(self) -> None:
+            self._flag = False
+            self._waiter: asyncio.Future[bool] = loop.create_future()
+
+        def is_set(self) -> bool:
+            return self._flag
+
+        def set(self) -> None:
+            self._flag = True
+            if not self._waiter.done():
+                self._waiter.set_result(True)
+
+        def clear(self) -> None:
+            self._flag = False
+
+        async def wait(self) -> bool:
+            result = await self._waiter
+            self._waiter = loop.create_future()
+            return result
+
+    event = GatedEvent()
+    task = asyncio.create_task(client_module._async_wait_for_event(event, 5))
+    await real_sleep(0)
+
+    # The timer wins, then the signal arrives and is cleared before the event
+    # waiter resumes. The resolved waiter must still beat the timeout.
+    timer_gate.set_result(None)
+    await real_sleep(0)
+    event.set()
+    event.clear()
+
+    assert await asyncio.wait_for(task, 1.0) is True
+
+
+async def test_async_wait_for_event_propagates_external_cancellation() -> None:
+    event = asyncio.Event()
+    task = asyncio.create_task(client_module._async_wait_for_event(event, 10))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 @MODES
 async def test_wait_for_review_cancel_event_stops_before_any_request(
     mode: str, monkeypatch: pytest.MonkeyPatch
@@ -1458,13 +1517,45 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     if mode == "sync":
 
         class SignallingEvent(threading.Event):
+            """A threading.Event that exposes real waiter registration."""
+
             def __init__(self) -> None:
                 super().__init__()
+                self._condition = threading.Condition(threading.Lock())
+                self._waiters = 0
                 self.waiter_registered = threading.Event()
 
+            def is_set(self) -> bool:
+                with self._condition:
+                    return self._flag
+
+            def set(self) -> None:
+                with self._condition:
+                    self._flag = True
+                    self._condition.notify_all()
+
+            def clear(self) -> None:
+                with self._condition:
+                    self._flag = False
+
             def wait(self, timeout: float | None = None) -> bool:
-                self.waiter_registered.set()
-                return super().wait(timeout)
+                deadline = None if timeout is None else time.monotonic() + timeout
+                with self._condition:
+                    if self._flag:
+                        return True
+                    self._waiters += 1
+                    # Setting this under the condition lock means set() cannot
+                    # run until this waiter has released the lock in wait().
+                    self.waiter_registered.set()
+                    try:
+                        while not self._flag:
+                            remaining = None if deadline is None else deadline - time.monotonic()
+                            if remaining is not None and remaining <= 0:
+                                return False
+                            self._condition.wait(remaining)
+                        return True
+                    finally:
+                        self._waiters -= 1
 
         event = SignallingEvent()
         real_wait = client_module._wait_for_event
@@ -1487,14 +1578,29 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     else:
 
         class SignallingEventAsync(asyncio.Event):
+            """An Event double that signals once it has a registered waiter."""
+
             def __init__(self) -> None:
                 super().__init__()
                 self.waiter_registered = asyncio.Event()
+                self._registered: set[asyncio.Future[bool]] = set()
 
-            async def wait(self) -> None:
-                waiter = asyncio.ensure_future(super().wait())
+            async def wait(self) -> bool:
+                if self.is_set():
+                    return True
+                waiter = asyncio.get_running_loop().create_future()
+                self._registered.add(waiter)
                 self.waiter_registered.set()
-                await waiter
+                try:
+                    return await waiter
+                finally:
+                    self._registered.discard(waiter)
+
+            def set(self) -> None:
+                super().set()
+                for waiter in tuple(self._registered):
+                    if not waiter.done():
+                        waiter.set_result(True)
 
         event = SignallingEventAsync()
         real_async_wait = client_module._async_wait_for_event

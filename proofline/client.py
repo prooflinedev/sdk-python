@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import math
 import threading
+from asyncio import FIRST_COMPLETED
 from asyncio import Event as AsyncEvent
+from asyncio import create_task as async_create_task
+from asyncio import gather as async_gather
 from asyncio import sleep as async_sleep
-from asyncio import timeout as async_timeout
+from asyncio import wait as async_wait
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from string import hexdigits
 from time import monotonic, sleep
@@ -213,12 +216,24 @@ def _wait_for_event(event: threading.Event, timeout: float) -> bool:
 
 async def _async_wait_for_event(event: AsyncEvent, timeout: float) -> bool:
     """Return True when the event woke the wait, False when it timed out."""
+    waiter = async_create_task(event.wait())
+    timer = async_create_task(async_sleep(timeout))
     try:
-        async with async_timeout(timeout):
-            await event.wait()
-        return True
-    except TimeoutError:
+        await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
+        if not waiter.done():
+            # A set event can resolve its waiter just as the timer fires. Let
+            # that already-scheduled waiter finish before treating it as a
+            # timeout, so a set-then-clear signal is not lost.
+            await async_sleep(0)
+        if waiter.done():
+            return waiter.result()
         return False
+    finally:
+        pending = [task for task in (waiter, timer) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await async_gather(*pending, return_exceptions=True)
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
