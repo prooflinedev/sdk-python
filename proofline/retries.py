@@ -28,14 +28,15 @@ class RetryPolicy:
         if not 1 <= self.max_attempts <= 10:
             raise ValueError("Retry max_attempts must be an integer from 1 through 10.")
         try:
-            statuses = frozenset(self.retryable_statuses)
+            supplied_statuses = tuple(self.retryable_statuses)
         except TypeError:
             raise ValueError("Retry statuses must be a collection of HTTP error codes.") from None
         if any(
             isinstance(status, bool) or not isinstance(status, int) or not 400 <= status <= 599
-            for status in statuses
+            for status in supplied_statuses
         ):
             raise ValueError("Retry statuses must be HTTP error codes from 400 through 599.")
+        statuses = frozenset(supplied_statuses)
         forbidden = statuses & {401, 403}
         if forbidden:
             raise ValueError("HTTP 401 and 403 cannot be configured as retryable statuses.")
@@ -47,12 +48,16 @@ class RetryPolicy:
             "max_backoff": self.max_backoff,
             "jitter": self.jitter,
         }
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, int | float)
-            or not math.isfinite(value)
-            for value in values.values()
-        ):
+        try:
+            invalid_number = any(
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                for value in values.values()
+            )
+        except OverflowError:
+            invalid_number = True
+        if invalid_number:
             raise ValueError("Retry backoff and jitter values must be finite numbers.")
         if self.initial_backoff < 0:
             raise ValueError("Retry initial_backoff must be nonnegative.")
