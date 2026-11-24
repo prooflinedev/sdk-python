@@ -52,7 +52,8 @@ class CustomerReviewDetail:
         created_at (datetime.datetime): When the review was created.
         environment_display_names (list[str]): Display names of this review's assessed environments, not current
             repository links.
-        finding_count (int): How many findings this review's assessments recorded, across all of them.
+        finding_count (int): How many findings this review's assessments recorded, across all of
+             them, with the supported findings its KIAN assessments published.
         id (UUID): The review's identifier.
         kind (str): `PULL_REQUEST`, `DEPLOYMENT`, `PATCH`, a review of local changes
              sent as a patch, `COMMIT`, a review of pushed commits, `FILES`,
