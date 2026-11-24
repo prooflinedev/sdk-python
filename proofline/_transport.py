@@ -65,6 +65,12 @@ RunNowRefusal: TypeAlias = (
     | RunNowRefusalViewType9
 )
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
+_TIMEOUT_PHASES: tuple[tuple[type[httpx2.TimeoutException], str], ...] = (
+    (httpx2.ConnectTimeout, "connect"),
+    (httpx2.ReadTimeout, "read"),
+    (httpx2.WriteTimeout, "write"),
+    (httpx2.PoolTimeout, "pool"),
+)
 
 
 class BearerAuth(httpx2.Auth):
@@ -103,6 +109,7 @@ class ProoflineError(Exception):
         self.title = title
         self.refusal = refusal
         self.repository_name = repository_name
+        self._deadline_bounded = False
         super().__init__(f"Proofline request failed (HTTP {status}).")
 
     def __repr__(self) -> str:
@@ -153,9 +160,27 @@ def invalid_response() -> ProoflineError:
     )
 
 
-def network_error(error: httpx2.HTTPError) -> ProoflineError:
+def timeout_error(*, deadline_bounded: bool = False) -> ProoflineError:
+    error = ProoflineError(0, "urn:proofline:sdk:timeout", "The request deadline expired.")
+    error._deadline_bounded = deadline_bounded
+    return error
+
+
+def is_deadline_timeout(error: ProoflineError) -> bool:
+    return (
+        error.status == 0 and error.type == "urn:proofline:sdk:timeout" and error._deadline_bounded
+    )
+
+
+def network_error(
+    error: httpx2.HTTPError, *, bounded_phases: frozenset[str] = frozenset()
+) -> ProoflineError:
     if isinstance(error, httpx2.TimeoutException):
-        return timeout_error()
+        phase = next(
+            (name for exc_type, name in _TIMEOUT_PHASES if isinstance(error, exc_type)),
+            None,
+        )
+        return timeout_error(deadline_bounded=phase is not None and phase in bounded_phases)
     return ProoflineError(
         0, "urn:proofline:sdk:transport-unavailable", "Could not reach the Proofline API."
     )
@@ -173,26 +198,62 @@ def operation_errors() -> Iterator[None]:
         raise invalid_response() from None
 
 
-def timeout_error() -> ProoflineError:
-    return ProoflineError(0, "urn:proofline:sdk:timeout", "The request deadline expired.")
-
-
 def remaining() -> float | None:
     deadline = DEADLINE.get()
     return None if deadline is None else max(0.0, deadline - monotonic())
 
 
-def limit_timeout(request: httpx2.Request) -> None:
-    budget = remaining()
-    if budget is None:
-        return
-    if budget <= 0:
+def limit_timeout(
+    request: httpx2.Request,
+    configured_timeouts: dict[str, float | None] | None = None,
+    *,
+    internal_deadline: float | None = None,
+) -> frozenset[str]:
+    caller = DEADLINE.get()
+    now = monotonic()
+    caller_budget = None if caller is None else caller - now
+    internal_budget = None if internal_deadline is None else internal_deadline - now
+
+    if (
+        caller_budget is not None
+        and caller_budget <= 0
+        and (internal_budget is None or caller_budget <= internal_budget)
+    ):
+        raise timeout_error(deadline_bounded=True)
+    if internal_budget is not None and internal_budget <= 0:
         raise timeout_error()
-    configured = request.extensions.get("timeout", {})
-    request.extensions["timeout"] = {
-        field: budget if configured.get(field) is None else min(budget, configured[field])
-        for field in ("connect", "read", "write", "pool")
-    }
+
+    budgets = [budget for budget in (caller_budget, internal_budget) if budget is not None]
+    if not budgets:
+        return frozenset()
+
+    effective_budget = min(budgets)
+    caller_dominates_internal = caller_budget is not None and (
+        internal_budget is None or caller_budget <= internal_budget
+    )
+    configured = (
+        request.extensions.get("timeout", {})
+        if configured_timeouts is None
+        else configured_timeouts
+    )
+
+    bounded: list[str] = []
+    limited: dict[str, float] = {}
+    for field in ("connect", "read", "write", "pool"):
+        phase_timeout = configured.get(field)
+        if phase_timeout is None or effective_budget <= phase_timeout:
+            if (
+                caller_dominates_internal
+                and caller_budget is not None
+                and (phase_timeout is None or caller_budget <= phase_timeout)
+            ):
+                bounded.append(field)
+            limited[field] = effective_budget
+        else:
+            limited[field] = phase_timeout
+
+    request.extensions["timeout"] = limited
+    return frozenset(bounded)
 
 
 def retry_delay(value: str | None, attempt: int) -> float | None:
@@ -364,11 +425,18 @@ def check_stream(size: int, status: int, deadline: float) -> None:
         raise ProoflineError(
             status, "urn:proofline:sdk:invalid-response", "The response exceeds 8 MiB."
         )
-    budget = remaining()
-    if monotonic() >= deadline or (budget is not None and budget <= 0):
+
+    caller = DEADLINE.get()
+    now = monotonic()
+    caller_expired = caller is not None and now >= caller
+    internal_expired = now >= deadline
+
+    if caller_expired or internal_expired:
         # Retryable statuses time out as an expired read does; other problems keep their status.
         if 200 <= status < 300 or status in (429, 503):
-            raise timeout_error()
+            raise timeout_error(
+                deadline_bounded=caller_expired and caller is not None and caller <= deadline
+            )
         raise unreadable_problem(status)
 
 
@@ -385,20 +453,33 @@ def io_budget(deadline: float) -> float:
 
 
 class DeadlineStream(httpx2.SyncByteStream):
-    def __init__(self, inner: httpx2.SyncByteStream, status: int, deadline: float) -> None:
+    def __init__(
+        self,
+        inner: httpx2.SyncByteStream,
+        status: int,
+        deadline: float,
+        *,
+        read_bounded: bool = False,
+    ) -> None:
         self._inner = inner
         self._status = status
         self._deadline = deadline
+        self._read_bounded = read_bounded
 
     def __iter__(self) -> Iterator[bytes]:
         size = 0
         deadline = IO_DEADLINE.set(io_deadline(self._deadline))
+        bounded = frozenset({"read"}) if self._read_bounded else frozenset()
         try:
             for chunk in self._inner:
                 size += len(chunk)
                 check_stream(size, self._status, self._deadline)
                 yield chunk
             check_stream(size, self._status, self._deadline)
+        except httpx2.TimeoutException as error:
+            if not (200 <= self._status < 300 or self._status in (429, 503)):
+                raise unreadable_problem(self._status) from None
+            raise network_error(error, bounded_phases=bounded) from None
         finally:
             IO_DEADLINE.reset(deadline)
 
@@ -407,14 +488,23 @@ class DeadlineStream(httpx2.SyncByteStream):
 
 
 class AsyncDeadlineStream(httpx2.AsyncByteStream):
-    def __init__(self, inner: httpx2.AsyncByteStream, status: int, deadline: float) -> None:
+    def __init__(
+        self,
+        inner: httpx2.AsyncByteStream,
+        status: int,
+        deadline: float,
+        *,
+        read_bounded: bool = False,
+    ) -> None:
         self._inner = inner
         self._status = status
         self._deadline = deadline
+        self._read_bounded = read_bounded
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         size = 0
         iterator = self._inner.__aiter__()
+        bounded = frozenset({"read"}) if self._read_bounded else frozenset()
         while True:
             try:
                 with anyio.fail_after(io_budget(self._deadline)):
@@ -422,7 +512,16 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
             except StopAsyncIteration:
                 break
             except TimeoutError:
-                raise httpx2.ReadTimeout("The request deadline expired.") from None
+                if not (200 <= self._status < 300 or self._status in (429, 503)):
+                    raise unreadable_problem(self._status) from None
+                raise network_error(
+                    httpx2.ReadTimeout("The request deadline expired."),
+                    bounded_phases=bounded,
+                ) from None
+            except httpx2.TimeoutException as error:
+                if not (200 <= self._status < 300 or self._status in (429, 503)):
+                    raise unreadable_problem(self._status) from None
+                raise network_error(error, bounded_phases=bounded) from None
             size += len(chunk)
             check_stream(size, self._status, self._deadline)
             yield chunk
@@ -439,12 +538,19 @@ class RetryTransport(httpx2.BaseTransport):
         self._inner = SyncHTTPTransport()
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        configured_timeouts = dict(request.extensions.get("timeout", {}))
         for attempt in range(4):
-            limit_timeout(request)
             deadline = monotonic() + self._timeout
+            bounded = limit_timeout(
+                request,
+                configured_timeouts,
+                internal_deadline=deadline,
+            )
             marker = IO_DEADLINE.set(io_deadline(deadline))
             try:
                 response = self._inner.handle_request(request)
+            except httpx2.TimeoutException as error:
+                raise network_error(error, bounded_phases=bounded) from None
             finally:
                 IO_DEADLINE.reset(marker)
             if 300 <= response.status_code < 400:
@@ -456,16 +562,25 @@ class RetryTransport(httpx2.BaseTransport):
             if not isinstance(response.stream, httpx2.SyncByteStream):
                 response.close()
                 raise unreadable_problem(response.status_code)
-            response.stream = DeadlineStream(response.stream, response.status_code, deadline)
+            response.stream = DeadlineStream(
+                response.stream,
+                response.status_code,
+                deadline,
+                read_bounded="read" in bounded,
+            )
             if 200 <= response.status_code < 300:
                 return response
             try:
                 response.read()
-                error = problem(response, self._token)
+                failure = problem(response, self._token)
+            except httpx2.TimeoutException as exc:
+                if response.status_code in (429, 503):
+                    raise network_error(exc, bounded_phases=bounded) from None
+                failure = unreadable_problem(response.status_code)
             except httpx2.HTTPError:
                 if response.status_code in (429, 503):
                     raise
-                error = unreadable_problem(response.status_code)
+                failure = unreadable_problem(response.status_code)
             finally:
                 response.close()
             delay = retry_delay(response.headers.get("Retry-After"), attempt)
@@ -475,7 +590,7 @@ class RetryTransport(httpx2.BaseTransport):
                 or attempt == 3
                 or delay is None
             ):
-                raise error from None
+                raise failure from None
             sleep(delay_within_deadline(delay))
         raise timeout_error()
 
@@ -490,14 +605,23 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
         self._inner = httpx2.AsyncHTTPTransport()
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        configured_timeouts = dict(request.extensions.get("timeout", {}))
         for attempt in range(4):
-            limit_timeout(request)
             deadline = monotonic() + self._timeout
+            bounded = limit_timeout(
+                request,
+                configured_timeouts,
+                internal_deadline=deadline,
+            )
+            caller = DEADLINE.get()
+            deadline_bounded = caller is not None and caller <= deadline
             try:
                 with anyio.fail_after(io_budget(deadline)):
                     response = await self._inner.handle_async_request(request)
             except TimeoutError:
-                raise httpx2.ReadTimeout("The request deadline expired.") from None
+                raise timeout_error(deadline_bounded=deadline_bounded) from None
+            except httpx2.TimeoutException as error:
+                raise network_error(error, bounded_phases=bounded) from None
             if 300 <= response.status_code < 400:
                 await response.aclose()
                 raise redirect_error(response.status_code) from None
@@ -507,16 +631,25 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
             if not isinstance(response.stream, httpx2.AsyncByteStream):
                 await response.aclose()
                 raise unreadable_problem(response.status_code)
-            response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
+            response.stream = AsyncDeadlineStream(
+                response.stream,
+                response.status_code,
+                deadline,
+                read_bounded="read" in bounded,
+            )
             if 200 <= response.status_code < 300:
                 return response
             try:
                 await response.aread()
-                error = problem(response, self._token)
+                failure = problem(response, self._token)
+            except httpx2.TimeoutException as exc:
+                if response.status_code in (429, 503):
+                    raise network_error(exc, bounded_phases=bounded) from None
+                failure = unreadable_problem(response.status_code)
             except httpx2.HTTPError:
                 if response.status_code in (429, 503):
                     raise
-                error = unreadable_problem(response.status_code)
+                failure = unreadable_problem(response.status_code)
             finally:
                 await response.aclose()
             delay = retry_delay(response.headers.get("Retry-After"), attempt)
@@ -526,7 +659,7 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
                 or attempt == 3
                 or delay is None
             ):
-                raise error from None
+                raise failure from None
             await async_sleep(delay_within_deadline(delay))
         raise timeout_error()
 

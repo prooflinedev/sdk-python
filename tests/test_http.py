@@ -1569,6 +1569,8 @@ async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
 async def test_streaming_and_resolution_keep_deadline_outcomes_explicit(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # 1. Caller deadline expires during streaming.
+    # Expected: wait_for_review returns TIMED_OUT.
     with Server(lambda request, index: Reply(body=review(), chunk_size=4, pause=0.01)) as server:
         async with session(mode, server.url) as client:
             started = time.monotonic()
@@ -1576,6 +1578,18 @@ async def test_streaming_and_resolution_keep_deadline_outcomes_explicit(
             assert result.status == "TIMED_OUT"
             assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
             assert time.monotonic() - started < 0.5
+
+    # 2. Internal HTTP timeout expires before the caller's deadline.
+    # Expected: SDK timeout error, NOT TIMED_OUT.
+    with Server(lambda request, index: Reply(body=review(), chunk_size=4, pause=0.01)) as server:
+        async with session(mode, server.url, timeout=0.06) as client:
+            started = time.monotonic()
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_review", ORG, REVIEW, timeout=1)
+            assert raised.value.type == "urn:proofline:sdk:timeout"
+            assert time.monotonic() - started < 0.5
+
+    # 3. Existing get_finding internal HTTP timeout coverage.
     with Server(lambda request, index: Reply(body=finding(), chunk_size=4, pause=0.01)) as server:
         async with session(mode, server.url, timeout=0.06) as client:
             started = time.monotonic()
@@ -1584,6 +1598,7 @@ async def test_streaming_and_resolution_keep_deadline_outcomes_explicit(
             assert raised.value.type == "urn:proofline:sdk:timeout"
             assert time.monotonic() - started < 0.5
 
+    # 4. DNS resolution timeout.
     original_resolution = socket.getaddrinfo
     resolution_started = threading.Event()
     resolution_released = threading.Event()
@@ -2586,3 +2601,65 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+@pytest.mark.parametrize("status", [200, 403])
+async def test_body_timeout_early_preserves_caller_and_authority_semantics(
+    mode: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    sync_iter = _transport.DeadlineStream.__iter__
+    async_aiter = _transport.AsyncDeadlineStream.__aiter__
+
+    def stalled_body() -> Any:
+        raise httpx2.ReadTimeout("stalled body read timeout")
+        yield b""
+
+    async def stalled_async_body() -> Any:
+        raise httpx2.ReadTimeout("stalled async body read timeout")
+        yield b""
+
+    def stalled_sync_iter(self: _transport.DeadlineStream) -> Any:
+        caller_deadline = _transport.DEADLINE.get()
+        assert caller_deadline is not None
+        assert self._deadline > caller_deadline
+
+        clock.now = caller_deadline - 0.0002
+        original_inner = self._inner
+        self._inner = stalled_body()
+
+        try:
+            yield from sync_iter(self)
+        finally:
+            self._inner = original_inner
+
+    async def stalled_async_aiter(self: _transport.AsyncDeadlineStream) -> Any:
+        caller_deadline = _transport.DEADLINE.get()
+        assert caller_deadline is not None
+        assert self._deadline > caller_deadline
+
+        clock.now = caller_deadline - 0.0002
+        original_inner = self._inner
+        self._inner = stalled_async_body()
+
+        try:
+            async for chunk in async_aiter(self):
+                yield chunk
+        finally:
+            self._inner = original_inner
+
+    monkeypatch.setattr(_transport.DeadlineStream, "__iter__", stalled_sync_iter)
+    monkeypatch.setattr(_transport.AsyncDeadlineStream, "__aiter__", stalled_async_aiter)
+
+    body = review() if status == 200 else {"detail": PRIVATE}
+
+    with Server(lambda request, index: Reply(status, body)) as server:
+        async with session(mode, server.url) as client:
+            if status == 200:
+                result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
+                assert result.status == "TIMED_OUT"
+            else:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
+                assert raised.value.status == 403
