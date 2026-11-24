@@ -116,12 +116,14 @@ class CustomerReviewDetail:
         cost_microcredits (int | None | Unset): The credits this run was charged so far, in microcredits, whoever
              paid: the plan, the free review month or the organization's credits.
              Null for a caller who is not a member of the organization.
-        counted_incomplete_causes (list[IncompleteCauseType0 | Literal['OUT_OF_CREDITS'] |
+        counted_incomplete_causes (list[IncompleteCauseType0 | Literal['GITHUB_REFUSED'] | Literal['OUT_OF_CREDITS'] |
             Literal['SPEND_LIMIT_REACHED'] | Literal['UNKNOWN']] | Unset): `incomplete_causes` as the Inbox and the reviews
             `cause:` search
              count them: `OUT_OF_CREDITS` or `SPEND_LIMIT_REACHED` in place of the
              `NOT_CONFIGURED` an assessment records when credits or a monthly spend
-             limit refused it. Present exactly when
+             limit refused it, and `GITHUB_REFUSED` in place of the
+             `EVIDENCE_UNAVAILABLE` a code assessment records when GitHub refused
+             its source read. Present exactly when
              `incomplete_causes` is.
         current_head_commit_sha (None | str | Unset): The pull request's head commit as the latest provider projection
             reports it, which can differ from `head_commit_sha`. Set only on a single-review read, and absent for a
@@ -297,6 +299,7 @@ class CustomerReviewDetail:
     counted_incomplete_causes: (
         list[
             IncompleteCauseType0
+            | Literal["GITHUB_REFUSED"]
             | Literal["OUT_OF_CREDITS"]
             | Literal["SPEND_LIMIT_REACHED"]
             | Literal["UNKNOWN"]
@@ -499,7 +502,8 @@ class CustomerReviewDetail:
 
         counted_incomplete_causes: (
             list[
-                Literal["OUT_OF_CREDITS"]
+                Literal["GITHUB_REFUSED"]
+                | Literal["OUT_OF_CREDITS"]
                 | Literal["SPEND_LIMIT_REACHED"]
                 | Literal["UNKNOWN"]
                 | str
@@ -510,7 +514,8 @@ class CustomerReviewDetail:
             counted_incomplete_causes = []
             for counted_incomplete_causes_item_data in self.counted_incomplete_causes:
                 counted_incomplete_causes_item: (
-                    Literal["OUT_OF_CREDITS"]
+                    Literal["GITHUB_REFUSED"]
+                    | Literal["OUT_OF_CREDITS"]
                     | Literal["SPEND_LIMIT_REACHED"]
                     | Literal["UNKNOWN"]
                     | str
@@ -1227,6 +1232,7 @@ class CustomerReviewDetail:
         counted_incomplete_causes: (
             list[
                 IncompleteCauseType0
+                | Literal["GITHUB_REFUSED"]
                 | Literal["OUT_OF_CREDITS"]
                 | Literal["SPEND_LIMIT_REACHED"]
                 | Literal["UNKNOWN"]
@@ -1241,6 +1247,7 @@ class CustomerReviewDetail:
                     data: object,
                 ) -> (
                     IncompleteCauseType0
+                    | Literal["GITHUB_REFUSED"]
                     | Literal["OUT_OF_CREDITS"]
                     | Literal["SPEND_LIMIT_REACHED"]
                     | Literal["UNKNOWN"]
@@ -1277,16 +1284,29 @@ class CustomerReviewDetail:
                         return componentsschemas_credit_refusal_cause_type_0
                     except (TypeError, ValueError, AttributeError, KeyError):
                         pass
-                    if not (type(data) is str and data == "SPEND_LIMIT_REACHED"):
-                        raise TypeError()
-                    componentsschemas_credit_refusal_cause_type_1 = cast(
-                        Literal["SPEND_LIMIT_REACHED"], data
-                    )
-                    if componentsschemas_credit_refusal_cause_type_1 != "SPEND_LIMIT_REACHED":
-                        raise ValueError(
-                            f"/components/schemas/CreditRefusalCause_type_1 must match const 'SPEND_LIMIT_REACHED', got '{componentsschemas_credit_refusal_cause_type_1}'"
+                    try:
+                        if not (type(data) is str and data == "SPEND_LIMIT_REACHED"):
+                            raise TypeError()
+                        componentsschemas_credit_refusal_cause_type_1 = cast(
+                            Literal["SPEND_LIMIT_REACHED"], data
                         )
-                    return componentsschemas_credit_refusal_cause_type_1
+                        if componentsschemas_credit_refusal_cause_type_1 != "SPEND_LIMIT_REACHED":
+                            raise ValueError(
+                                f"/components/schemas/CreditRefusalCause_type_1 must match const 'SPEND_LIMIT_REACHED', got '{componentsschemas_credit_refusal_cause_type_1}'"
+                            )
+                        return componentsschemas_credit_refusal_cause_type_1
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not (type(data) is str and data == "GITHUB_REFUSED"):
+                        raise TypeError()
+                    componentsschemas_installation_refusal_cause_type_0 = cast(
+                        Literal["GITHUB_REFUSED"], data
+                    )
+                    if componentsschemas_installation_refusal_cause_type_0 != "GITHUB_REFUSED":
+                        raise ValueError(
+                            f"/components/schemas/InstallationRefusalCause_type_0 must match const 'GITHUB_REFUSED', got '{componentsschemas_installation_refusal_cause_type_0}'"
+                        )
+                    return componentsschemas_installation_refusal_cause_type_0
 
                 counted_incomplete_causes_item = _parse_counted_incomplete_causes_item(
                     counted_incomplete_causes_item_data

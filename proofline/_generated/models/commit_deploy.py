@@ -40,12 +40,13 @@ class CommitDeploy:
             Literal['SIGNAL_BUCKET_UNEXPECTED'] | Literal['SIGNAL_CONFIGURATION_INVALID'] | Literal['SIGNAL_NO_DATA'] |
             Literal['SIGNAL_NOT_SINGLE_SERIES'] | Literal['SIGNAL_PROJECT_NOT_CONNECTED'] | Literal['SIGNAL_READ_PARTIAL'] |
             Literal['SIGNAL_READ_UNAVAILABLE'] | Literal['SIGNAL_RESPONSE_INVALID'] |
-            Literal['TELEMETRY_CONNECTION_UNAVAILABLE'] | Literal['TELEMETRY_CREDENTIAL_UNAVAILABLE']]): What the checks
-            that leave the deploy unproven name.
+            Literal['TELEMETRY_CONNECTION_UNAVAILABLE'] | Literal['TELEMETRY_CREDENTIAL_UNAVAILABLE'] | str]): What the
+            checks that leave the deploy unproven name.
         regressed (bool): Whether any check recorded `REGRESSED`, whatever its gaps.
         state (Literal['FAILED'] | Literal['INACTIVE'] | Literal['INCOMPLETE'] | Literal['NOT_YET_DUE'] |
             Literal['SUPERSEDED'] | Literal['UNRECORDED'] | Literal['UNVERIFIED'] | Literal['VERIFIED'] |
-            Literal['VERIFIED_UNTIL_SUPERSEDED']): Where one deploy's verification stands. Each deploy has exactly one, so
+            Literal['VERIFIED_UNTIL_SUPERSEDED'] | str): Where one deploy's verification stands. Each deploy has exactly
+            one, so
              the counts add up to the population.
         deploy_url (None | str | Unset): The deploy's console page.
         deployment_task (None | str | Unset): The GitHub deployment's task, such as `deploy` or `deploy:web`.
@@ -68,6 +69,12 @@ class CommitDeploy:
              an earlier deploy again, as its console page reads it. A later check
              that finds none clears it, while `regressed` keeps an earlier
              regression. Older responses omit it, which reads as false. Default: False.
+        github_deployment_ids (list[int] | Unset): The ID of each GitHub deployment the deploy holds, ascending: the
+             deployment a pipeline created, or each one an Actions run's jobs
+             created. A deployment outside Actions is a deploy of its own, so two
+             of one commit, GitHub Environment and task read apart by this ID.
+             Every listed deploy holds one; a server from before the field existed
+             omits it.
     """
 
     checkpoints: list[DeployCoverageCheckpoint]
@@ -106,6 +113,7 @@ class CommitDeploy:
         | Literal["SIGNAL_RESPONSE_INVALID"]
         | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
         | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+        | str
     ]
     regressed: bool
     state: (
@@ -118,6 +126,7 @@ class CommitDeploy:
         | Literal["UNVERIFIED"]
         | Literal["VERIFIED"]
         | Literal["VERIFIED_UNTIL_SUPERSEDED"]
+        | str
     )
     deploy_url: None | str | Unset = UNSET
     deployment_task: None | str | Unset = UNSET
@@ -127,6 +136,7 @@ class CommitDeploy:
     workflow_run_attempts: list[int] | Unset = UNSET
     workflow_run_id: int | None | Unset = UNSET
     rolled_back: bool | Unset = False
+    github_deployment_ids: list[int] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -175,6 +185,7 @@ class CommitDeploy:
                 | Literal["SIGNAL_RESPONSE_INVALID"]
                 | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
                 | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                | str
             )
             gaps_item = gaps_item_data
             gaps.append(gaps_item)
@@ -191,6 +202,7 @@ class CommitDeploy:
             | Literal["UNVERIFIED"]
             | Literal["VERIFIED"]
             | Literal["VERIFIED_UNTIL_SUPERSEDED"]
+            | str
         )
         state = self.state
 
@@ -238,6 +250,10 @@ class CommitDeploy:
 
         rolled_back = self.rolled_back
 
+        github_deployment_ids: list[int] | Unset = UNSET
+        if not isinstance(self.github_deployment_ids, Unset):
+            github_deployment_ids = self.github_deployment_ids
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -265,6 +281,8 @@ class CommitDeploy:
             field_dict["workflow_run_id"] = workflow_run_id
         if rolled_back is not UNSET:
             field_dict["rolled_back"] = rolled_back
+        if github_deployment_ids is not UNSET:
+            field_dict["github_deployment_ids"] = github_deployment_ids
 
         return field_dict
 
@@ -323,6 +341,7 @@ class CommitDeploy:
                 | Literal["SIGNAL_RESPONSE_INVALID"]
                 | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
                 | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                | str
             ):
                 try:
                     if not (type(data) is str and data == "CHANGE_CHECK_MISSING"):
@@ -817,16 +836,59 @@ class CommitDeploy:
                     return componentsschemas_deploy_verification_gap_type_31
                 except (TypeError, ValueError, AttributeError, KeyError):
                     pass
-                if not (type(data) is str and data == "BASELINE_HELD_REGRESSION"):
-                    raise TypeError()
-                componentsschemas_deploy_verification_gap_type_32 = cast(
-                    Literal["BASELINE_HELD_REGRESSION"], data
-                )
-                if componentsschemas_deploy_verification_gap_type_32 != "BASELINE_HELD_REGRESSION":
-                    raise ValueError(
-                        f"/components/schemas/DeployVerificationGap_type_32 must match const 'BASELINE_HELD_REGRESSION', got '{componentsschemas_deploy_verification_gap_type_32}'"
+                try:
+                    if not (type(data) is str and data == "BASELINE_HELD_REGRESSION"):
+                        raise TypeError()
+                    componentsschemas_deploy_verification_gap_type_32 = cast(
+                        Literal["BASELINE_HELD_REGRESSION"], data
                     )
-                return componentsschemas_deploy_verification_gap_type_32
+                    if (
+                        componentsschemas_deploy_verification_gap_type_32
+                        != "BASELINE_HELD_REGRESSION"
+                    ):
+                        raise ValueError(
+                            f"/components/schemas/DeployVerificationGap_type_32 must match const 'BASELINE_HELD_REGRESSION', got '{componentsschemas_deploy_verification_gap_type_32}'"
+                        )
+                    return componentsschemas_deploy_verification_gap_type_32
+                except (TypeError, ValueError, AttributeError, KeyError):
+                    pass
+                return cast(
+                    Literal["AWS_TELEMETRY_CONNECTION_UNAVAILABLE"]
+                    | Literal["BASELINE_HELD_REGRESSION"]
+                    | Literal["BASELINE_UNAVAILABLE"]
+                    | Literal["BELOW_TRAFFIC_FLOOR"]
+                    | Literal["CHANGE_CHECK_INCOMPLETE"]
+                    | Literal["CHANGE_CHECK_MISSING"]
+                    | Literal["ENVIRONMENT_NOT_CHECKED"]
+                    | Literal["NO_SIGNALS_CONFIGURED"]
+                    | Literal["NO_SIGNALS_FOR_TASK_SERVICES"]
+                    | Literal["RUNNING_REVISION_UNKNOWN"]
+                    | Literal["RUNTIME_ATTESTATIONS_PERMISSION_PENDING"]
+                    | Literal["RUNTIME_CAPABILITY_UNQUALIFIED"]
+                    | Literal["RUNTIME_COMMIT_BINDING_MISSING"]
+                    | Literal["RUNTIME_IMAGE_BUILT_EARLIER"]
+                    | Literal["RUNTIME_INVENTORY_INCOMPLETE"]
+                    | Literal["RUNTIME_INVENTORY_STALE"]
+                    | Literal["RUNTIME_INVENTORY_UNAVAILABLE"]
+                    | Literal["RUNTIME_REVISION_UNKNOWN"]
+                    | Literal["RUNTIME_ROLLOUT_UNSETTLED"]
+                    | Literal["RUNTIME_SERVICE_UNKNOWN"]
+                    | Literal["RUNTIME_TARGET_UNAVAILABLE"]
+                    | Literal["RUNTIME_TASK_UNMAPPED"]
+                    | Literal["RUNTIME_TRAFFIC_UNKNOWN"]
+                    | Literal["SIGNAL_BUCKET_UNEXPECTED"]
+                    | Literal["SIGNAL_CONFIGURATION_INVALID"]
+                    | Literal["SIGNAL_NO_DATA"]
+                    | Literal["SIGNAL_NOT_SINGLE_SERIES"]
+                    | Literal["SIGNAL_PROJECT_NOT_CONNECTED"]
+                    | Literal["SIGNAL_READ_PARTIAL"]
+                    | Literal["SIGNAL_READ_UNAVAILABLE"]
+                    | Literal["SIGNAL_RESPONSE_INVALID"]
+                    | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
+                    | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                    | str,
+                    data,
+                )
 
             gaps_item = _parse_gaps_item(gaps_item_data)
 
@@ -846,6 +908,7 @@ class CommitDeploy:
             | Literal["UNVERIFIED"]
             | Literal["VERIFIED"]
             | Literal["VERIFIED_UNTIL_SUPERSEDED"]
+            | str
         ):
             try:
                 if not (type(data) is str and data == "VERIFIED"):
@@ -937,14 +1000,30 @@ class CommitDeploy:
                 return componentsschemas_deploy_coverage_state_type_7
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            if not (type(data) is str and data == "INACTIVE"):
-                raise TypeError()
-            componentsschemas_deploy_coverage_state_type_8 = cast(Literal["INACTIVE"], data)
-            if componentsschemas_deploy_coverage_state_type_8 != "INACTIVE":
-                raise ValueError(
-                    f"/components/schemas/DeployCoverageState_type_8 must match const 'INACTIVE', got '{componentsschemas_deploy_coverage_state_type_8}'"
-                )
-            return componentsschemas_deploy_coverage_state_type_8
+            try:
+                if not (type(data) is str and data == "INACTIVE"):
+                    raise TypeError()
+                componentsschemas_deploy_coverage_state_type_8 = cast(Literal["INACTIVE"], data)
+                if componentsschemas_deploy_coverage_state_type_8 != "INACTIVE":
+                    raise ValueError(
+                        f"/components/schemas/DeployCoverageState_type_8 must match const 'INACTIVE', got '{componentsschemas_deploy_coverage_state_type_8}'"
+                    )
+                return componentsschemas_deploy_coverage_state_type_8
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(
+                Literal["FAILED"]
+                | Literal["INACTIVE"]
+                | Literal["INCOMPLETE"]
+                | Literal["NOT_YET_DUE"]
+                | Literal["SUPERSEDED"]
+                | Literal["UNRECORDED"]
+                | Literal["UNVERIFIED"]
+                | Literal["VERIFIED"]
+                | Literal["VERIFIED_UNTIL_SUPERSEDED"]
+                | str,
+                data,
+            )
 
         state = _parse_state(d.pop("state"))
 
@@ -1014,6 +1093,8 @@ class CommitDeploy:
 
         rolled_back = d.pop("rolled_back", UNSET)
 
+        github_deployment_ids = cast(list[int], d.pop("github_deployment_ids", UNSET))
+
         commit_deploy = cls(
             checkpoints=checkpoints,
             environment_id=environment_id,
@@ -1028,6 +1109,7 @@ class CommitDeploy:
             workflow_run_attempts=workflow_run_attempts,
             workflow_run_id=workflow_run_id,
             rolled_back=rolled_back,
+            github_deployment_ids=github_deployment_ids,
         )
 
         commit_deploy.additional_properties = d

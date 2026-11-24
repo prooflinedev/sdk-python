@@ -21,7 +21,7 @@ class DeployCoverageCheckpoint:
         checkpoint (DeployCheckpoint): One of the four checks of a deploy.
         due_at (datetime.datetime): When a missing check becomes overdue, allowing the workflow's read
              delay, landing inventory reread, successor wait and transient-read retries.
-        result (Literal['HEALTHY'] | Literal['INCOMPLETE'] | Literal['REGRESSED'] | Literal['SUPERSEDED'] | None |
+        result (Literal['HEALTHY'] | Literal['INCOMPLETE'] | Literal['REGRESSED'] | Literal['SUPERSEDED'] | None | str |
             Unset): The recorded result; absent while no check of this window is recorded.
         gaps (list[Literal['AWS_TELEMETRY_CONNECTION_UNAVAILABLE'] | Literal['BASELINE_HELD_REGRESSION'] |
             Literal['BASELINE_UNAVAILABLE'] | Literal['BELOW_TRAFFIC_FLOOR'] | Literal['CHANGE_CHECK_INCOMPLETE'] |
@@ -36,8 +36,8 @@ class DeployCoverageCheckpoint:
             Literal['SIGNAL_BUCKET_UNEXPECTED'] | Literal['SIGNAL_CONFIGURATION_INVALID'] | Literal['SIGNAL_NO_DATA'] |
             Literal['SIGNAL_NOT_SINGLE_SERIES'] | Literal['SIGNAL_PROJECT_NOT_CONNECTED'] | Literal['SIGNAL_READ_PARTIAL'] |
             Literal['SIGNAL_READ_UNAVAILABLE'] | Literal['SIGNAL_RESPONSE_INVALID'] |
-            Literal['TELEMETRY_CONNECTION_UNAVAILABLE'] | Literal['TELEMETRY_CREDENTIAL_UNAVAILABLE']] | Unset): The gaps
-            this window's check recorded, beside its recorded result;
+            Literal['TELEMETRY_CONNECTION_UNAVAILABLE'] | Literal['TELEMETRY_CREDENTIAL_UNAVAILABLE'] | str] | Unset): The
+            gaps this window's check recorded, beside its recorded result;
              empty while no check of this window is recorded. The deploy's `gaps`
              unite those that leave it unproven.
     """
@@ -50,6 +50,7 @@ class DeployCoverageCheckpoint:
         | Literal["REGRESSED"]
         | Literal["SUPERSEDED"]
         | None
+        | str
         | Unset
     ) = UNSET
     gaps: (
@@ -87,6 +88,7 @@ class DeployCoverageCheckpoint:
             | Literal["SIGNAL_RESPONSE_INVALID"]
             | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
             | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+            | str
         ]
         | Unset
     ) = UNSET
@@ -103,6 +105,7 @@ class DeployCoverageCheckpoint:
             | Literal["REGRESSED"]
             | Literal["SUPERSEDED"]
             | None
+            | str
             | Unset
         )
         if isinstance(self.result, Unset):
@@ -145,6 +148,7 @@ class DeployCoverageCheckpoint:
                 | Literal["SIGNAL_RESPONSE_INVALID"]
                 | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
                 | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                | str
             ]
             | Unset
         ) = UNSET
@@ -185,6 +189,7 @@ class DeployCoverageCheckpoint:
                     | Literal["SIGNAL_RESPONSE_INVALID"]
                     | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
                     | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                    | str
                 )
                 gaps_item = gaps_item_data
                 gaps.append(gaps_item)
@@ -219,6 +224,7 @@ class DeployCoverageCheckpoint:
             | Literal["REGRESSED"]
             | Literal["SUPERSEDED"]
             | None
+            | str
             | Unset
         ):
             if data is None:
@@ -275,6 +281,7 @@ class DeployCoverageCheckpoint:
                 | Literal["REGRESSED"]
                 | Literal["SUPERSEDED"]
                 | None
+                | str
                 | Unset,
                 data,
             )
@@ -317,6 +324,7 @@ class DeployCoverageCheckpoint:
                 | Literal["SIGNAL_RESPONSE_INVALID"]
                 | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
                 | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                | str
             ]
             | Unset
         ) = UNSET
@@ -360,6 +368,7 @@ class DeployCoverageCheckpoint:
                     | Literal["SIGNAL_RESPONSE_INVALID"]
                     | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
                     | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                    | str
                 ):
                     try:
                         if not (type(data) is str and data == "CHANGE_CHECK_MISSING"):
@@ -874,19 +883,59 @@ class DeployCoverageCheckpoint:
                         return componentsschemas_deploy_verification_gap_type_31
                     except (TypeError, ValueError, AttributeError, KeyError):
                         pass
-                    if not (type(data) is str and data == "BASELINE_HELD_REGRESSION"):
-                        raise TypeError()
-                    componentsschemas_deploy_verification_gap_type_32 = cast(
-                        Literal["BASELINE_HELD_REGRESSION"], data
-                    )
-                    if (
-                        componentsschemas_deploy_verification_gap_type_32
-                        != "BASELINE_HELD_REGRESSION"
-                    ):
-                        raise ValueError(
-                            f"/components/schemas/DeployVerificationGap_type_32 must match const 'BASELINE_HELD_REGRESSION', got '{componentsschemas_deploy_verification_gap_type_32}'"
+                    try:
+                        if not (type(data) is str and data == "BASELINE_HELD_REGRESSION"):
+                            raise TypeError()
+                        componentsschemas_deploy_verification_gap_type_32 = cast(
+                            Literal["BASELINE_HELD_REGRESSION"], data
                         )
-                    return componentsschemas_deploy_verification_gap_type_32
+                        if (
+                            componentsschemas_deploy_verification_gap_type_32
+                            != "BASELINE_HELD_REGRESSION"
+                        ):
+                            raise ValueError(
+                                f"/components/schemas/DeployVerificationGap_type_32 must match const 'BASELINE_HELD_REGRESSION', got '{componentsschemas_deploy_verification_gap_type_32}'"
+                            )
+                        return componentsschemas_deploy_verification_gap_type_32
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    return cast(
+                        Literal["AWS_TELEMETRY_CONNECTION_UNAVAILABLE"]
+                        | Literal["BASELINE_HELD_REGRESSION"]
+                        | Literal["BASELINE_UNAVAILABLE"]
+                        | Literal["BELOW_TRAFFIC_FLOOR"]
+                        | Literal["CHANGE_CHECK_INCOMPLETE"]
+                        | Literal["CHANGE_CHECK_MISSING"]
+                        | Literal["ENVIRONMENT_NOT_CHECKED"]
+                        | Literal["NO_SIGNALS_CONFIGURED"]
+                        | Literal["NO_SIGNALS_FOR_TASK_SERVICES"]
+                        | Literal["RUNNING_REVISION_UNKNOWN"]
+                        | Literal["RUNTIME_ATTESTATIONS_PERMISSION_PENDING"]
+                        | Literal["RUNTIME_CAPABILITY_UNQUALIFIED"]
+                        | Literal["RUNTIME_COMMIT_BINDING_MISSING"]
+                        | Literal["RUNTIME_IMAGE_BUILT_EARLIER"]
+                        | Literal["RUNTIME_INVENTORY_INCOMPLETE"]
+                        | Literal["RUNTIME_INVENTORY_STALE"]
+                        | Literal["RUNTIME_INVENTORY_UNAVAILABLE"]
+                        | Literal["RUNTIME_REVISION_UNKNOWN"]
+                        | Literal["RUNTIME_ROLLOUT_UNSETTLED"]
+                        | Literal["RUNTIME_SERVICE_UNKNOWN"]
+                        | Literal["RUNTIME_TARGET_UNAVAILABLE"]
+                        | Literal["RUNTIME_TASK_UNMAPPED"]
+                        | Literal["RUNTIME_TRAFFIC_UNKNOWN"]
+                        | Literal["SIGNAL_BUCKET_UNEXPECTED"]
+                        | Literal["SIGNAL_CONFIGURATION_INVALID"]
+                        | Literal["SIGNAL_NO_DATA"]
+                        | Literal["SIGNAL_NOT_SINGLE_SERIES"]
+                        | Literal["SIGNAL_PROJECT_NOT_CONNECTED"]
+                        | Literal["SIGNAL_READ_PARTIAL"]
+                        | Literal["SIGNAL_READ_UNAVAILABLE"]
+                        | Literal["SIGNAL_RESPONSE_INVALID"]
+                        | Literal["TELEMETRY_CONNECTION_UNAVAILABLE"]
+                        | Literal["TELEMETRY_CREDENTIAL_UNAVAILABLE"]
+                        | str,
+                        data,
+                    )
 
                 gaps_item = _parse_gaps_item(gaps_item_data)
 

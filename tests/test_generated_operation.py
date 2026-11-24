@@ -24,6 +24,21 @@ def test_checkpoint_keeps_its_positional_result() -> None:
     )
     assert recorded.result == "REGRESSED"
     assert recorded.gaps == ["CHANGE_CHECK_MISSING"]
+    # A later server's gap, state or result reads as its string.
+    deploy = models.CommitDeploy.from_dict(
+        {
+            "environment_id": "00000000-0000-4000-8000-000000000003",
+            "state": "LATER_STATE",
+            "regressed": False,
+            "gaps": ["LATER_GAP", "CHANGE_CHECK_MISSING"],
+            "checkpoints": [
+                {**checkpoint.to_dict(), "result": "LATER_RESULT", "gaps": ["LATER_GAP"]}
+            ],
+        }
+    )
+    assert (deploy.state, deploy.gaps) == ("LATER_STATE", ["LATER_GAP", "CHANGE_CHECK_MISSING"])
+    later = deploy.checkpoints[0]
+    assert (later.result, later.gaps) == ("LATER_RESULT", ["LATER_GAP"])
 
 
 def test_new_public_operation(tmp_path: Path) -> None:
