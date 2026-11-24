@@ -1510,11 +1510,12 @@ async def test_retry_after_is_bounded_by_wait_deadline(
 
 
 @MODES
-@pytest.mark.parametrize("status", [429, 503, 403])
+@pytest.mark.parametrize("status", [429, 500, 503, 403])
 async def test_deadline_expiring_with_a_received_problem_chunk_keeps_retry_policy(
     mode: str, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Clock(monkeypatch)
+    policy = RetryPolicy(retryable_statuses=frozenset({429, 500}))
     checked = _transport.check_stream
 
     def late(
@@ -1531,11 +1532,11 @@ async def test_deadline_expiring_with_a_received_problem_chunk_keeps_retry_polic
     with Server(
         lambda request, index: Reply(status, {"detail": PRIVATE}, {"Retry-After": "2"})
     ) as server:
-        async with session(mode, server.url) as client:
-            if status == 403:
+        async with session(mode, server.url, retry_policy=policy) as client:
+            if status not in policy.retryable_statuses:
                 with pytest.raises(ProoflineError) as raised:
                     await call(client, "wait_for_review", ORG, REVIEW, timeout=1)
-                assert raised.value.status == 403
+                assert raised.value.status == status
             else:
                 result = await call(client, "wait_for_review", ORG, REVIEW, timeout=1)
                 assert result.status == "TIMED_OUT"
