@@ -6,7 +6,7 @@ import math
 import threading
 from asyncio import Event as AsyncEvent
 from asyncio import sleep as async_sleep
-from asyncio import wait_for as async_wait_for
+from asyncio import timeout as async_timeout
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from string import hexdigits
 from time import monotonic, sleep
@@ -214,7 +214,8 @@ def _wait_for_event(event: threading.Event, timeout: float) -> bool:
 async def _async_wait_for_event(event: AsyncEvent, timeout: float) -> bool:
     """Return True when the event woke the wait, False when it timed out."""
     try:
-        await async_wait_for(event.wait(), timeout)
+        async with async_timeout(timeout):
+            await event.wait()
         return True
     except TimeoutError:
         return False

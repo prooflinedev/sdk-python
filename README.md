@@ -78,7 +78,7 @@ if outcome.status != "COMPLETED":
 
 ## Cancelling a wait
 
-Pass `cancel_event` to stop a wait when your own code no longer needs the result: a `threading.Event` for `wait_for_review` on `ProoflineClient`, or an `asyncio.Event` for `wait_for_review` on `AsyncProoflineClient`. Set it from another thread or task. For an `asyncio.Event`, use `loop.call_soon_threadsafe(cancel.set)` when the setter is another thread. If you register a signal handler with `loop.add_signal_handler(signal.SIGINT, cancel.set)`, remove it in a `finally` block with `loop.remove_signal_handler(signal.SIGINT)` so a later Ctrl-C is not swallowed. Do not call `threading.Event.set()` directly from a Python signal handler; have the handler hand off to another thread instead.
+Pass `cancel_event` to stop a wait when your own code no longer needs the result: a `threading.Event` for `wait_for_review` on `ProoflineClient`, or an `asyncio.Event` for `wait_for_review` on `AsyncProoflineClient`. Set it from another thread or task. For an `asyncio.Event`, use `loop.call_soon_threadsafe(cancel.set)` when the setter is another thread. If your application already owns `SIGINT` handling, route cancellation through that handler instead of replacing it with `loop.add_signal_handler`. Do not call `threading.Event.set()` directly from a Python signal handler; have the handler hand off to another thread instead.
 
 ```python
 import threading
@@ -101,7 +101,7 @@ outcome = await async_client.wait_for_review(
 # From another thread: loop.call_soon_threadsafe(cancel.set)
 ```
 
-Cancellation is checked before the wait starts, before each poll, during the backoff, and after each read. The backoff waits on the event itself instead of polling it in short slices, so an unset event adds no extra wakeups. An in-flight read is not interrupted: cancellation waits for that read to finish, including transport retries and their delays. Retry delays count toward the overall wait deadline, not a single per-attempt HTTP timeout. A cancelled wait returns `ReviewOutcome` with `status == "STOPPED"` and `reason == "The wait was cancelled by the caller."`. When a review had already been read, `outcome.review` still holds that last record, including when cancellation lands during an erroring read or just before the next poll. Passing the wrong event type raises `TypeError` before any request. Without `cancel_event`, waits keep their existing polling and timeout behavior.
+Cancellation is checked before the wait starts, before each poll, during the backoff, and after each read. The backoff waits on the event itself instead of polling it in short slices, so an unset event adds no extra wakeups. An in-flight read is not interrupted: cancellation waits for that read to finish, including transport retries and their delays. Retry delays count toward the overall wait deadline, not a single per-attempt HTTP timeout. A cancelled wait returns `ReviewOutcome` with `status == "STOPPED"` and `reason == "The wait was cancelled by the caller."`. When a review had already been read, `outcome.review` still holds that last record, including when cancellation lands during a read that raises `ProoflineError` or just before the next poll; other exceptions still propagate. Passing the wrong event type raises `TypeError` before any request. Without `cancel_event`, waits keep their existing polling and timeout behavior.
 
 ## Review exports
 

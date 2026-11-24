@@ -1452,43 +1452,68 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
     thread: threading.Thread | None = None
     task: asyncio.Task[None] | None = None
-    entered: Any
+    wait_elapsed: list[float] = []
+    event: Any
 
     if mode == "sync":
-        event: Any = threading.Event()
-        entered = threading.Event()
+
+        class SignallingEvent(threading.Event):
+            def __init__(self) -> None:
+                super().__init__()
+                self.waiter_registered = threading.Event()
+
+            def wait(self, timeout: float | None = None) -> bool:
+                self.waiter_registered.set()
+                return super().wait(timeout)
+
+        event = SignallingEvent()
         real_wait = client_module._wait_for_event
 
         def wait_for_event(wait_event: Any, timeout: float) -> bool:
-            entered.set()
-            return real_wait(wait_event, timeout)
+            started = time.monotonic()
+            try:
+                return real_wait(wait_event, timeout)
+            finally:
+                wait_elapsed.append(time.monotonic() - started)
 
         monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
 
         def set_event() -> None:
-            assert entered.wait(2.0)
+            assert event.waiter_registered.wait(10.0)
             event.set()
 
         thread = threading.Thread(target=set_event, daemon=True)
         thread.start()
     else:
-        event = asyncio.Event()
-        entered = asyncio.Event()
+
+        class SignallingEventAsync(asyncio.Event):
+            def __init__(self) -> None:
+                super().__init__()
+                self.waiter_registered = asyncio.Event()
+
+            async def wait(self) -> None:
+                waiter = asyncio.ensure_future(super().wait())
+                self.waiter_registered.set()
+                await waiter
+
+        event = SignallingEventAsync()
         real_async_wait = client_module._async_wait_for_event
 
         async def async_wait_for_event(wait_event: Any, timeout: float) -> bool:
-            entered.set()
-            return await real_async_wait(wait_event, timeout)
+            started = time.monotonic()
+            try:
+                return await real_async_wait(wait_event, timeout)
+            finally:
+                wait_elapsed.append(time.monotonic() - started)
 
         monkeypatch.setattr(client_module, "_async_wait_for_event", async_wait_for_event)
 
         async def set_event() -> None:
-            await asyncio.wait_for(entered.wait(), 2.0)
+            await asyncio.wait_for(event.waiter_registered.wait(), 10.0)
             event.set()
 
         task = asyncio.create_task(set_event())
 
-    started = time.monotonic()
     try:
         with Server(lambda request, index: Reply(body=body)) as server:
             async with session(mode, server.url) as client:
@@ -1501,10 +1526,10 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
             thread.join()
         if task is not None:
             task.cancel()
-    elapsed = time.monotonic() - started
 
-    assert entered.is_set()
-    assert elapsed < 2.0
+    assert event.waiter_registered.is_set()
+    assert wait_elapsed
+    assert wait_elapsed[0] < 2.0
     assert result.status == "STOPPED"
     assert result.reason == "The wait was cancelled by the caller."
     assert result.review.id == REVIEW
