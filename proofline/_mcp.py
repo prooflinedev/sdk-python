@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, NotRequired, TypedDict, cast
+from uuid import UUID
 
 import httpx2
 
@@ -27,12 +28,24 @@ def _refused() -> ProoflineError:
     return ProoflineError(0, "urn:proofline:sdk:mcp", "Invalid or refused MCP response.")
 
 
+def _serialize_mcp_value(val: Any) -> Any:
+    if isinstance(val, UUID):
+        return str(val)
+    if isinstance(val, list):
+        return [_serialize_mcp_value(x) for x in val]
+    if isinstance(val, tuple):
+        return [_serialize_mcp_value(x) for x in val]
+    if isinstance(val, dict):
+        return {key: _serialize_mcp_value(v) for key, v in val.items()}
+    return val
+
+
 def _body(method: str, params: dict[str, Any] | None, identity: int | None) -> bytes:
     value: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
     if identity is not None:
         value["id"] = identity
     if params is not None:
-        value["params"] = params
+        value["params"] = _serialize_mcp_value(params)
     data = json.dumps(value).encode("utf-8")
     if len(data) > 8192:
         raise ValueError("MCP request exceeds 8192 bytes.")
@@ -96,10 +109,15 @@ class McpTools:
         self._http = http
 
     def _call(
-        self, name: str, args: dict[str, Any], *, organization_id: str | None = None
+        self, name: str, args: dict[str, Any], *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         if organization_id is not None:
-            args = {**args, "organization_id": organization_id}
+            args = {
+                **args,
+                "organization_id": (
+                    str(organization_id) if isinstance(organization_id, UUID) else organization_id
+                ),
+            }
         call = _body("tools/call", {"name": name, "arguments": args}, 2)
         frames = [
             (
@@ -145,10 +163,15 @@ class AsyncMcpTools:
         self._http = http
 
     async def _call(
-        self, name: str, args: dict[str, Any], *, organization_id: str | None = None
+        self, name: str, args: dict[str, Any], *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         if organization_id is not None:
-            args = {**args, "organization_id": organization_id}
+            args = {
+                **args,
+                "organization_id": (
+                    str(organization_id) if isinstance(organization_id, UUID) else organization_id
+                ),
+            }
         call = _body("tools/call", {"name": name, "arguments": args}, 2)
         frames = [
             (
