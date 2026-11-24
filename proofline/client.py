@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import threading
+from asyncio import Event as AsyncEvent
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from string import hexdigits
@@ -187,6 +189,41 @@ def _pagination_limit(resource: str = "Review") -> ProoflineError:
         "urn:proofline:sdk:pagination-limit",
         f"{resource} pagination reached the configured bound.",
     )
+
+
+_CANCEL_POLL_SECONDS = 0.05
+_CANCEL_REASON = "The wait was cancelled by the caller."
+
+
+def _cancelled(event: threading.Event | AsyncEvent | None) -> bool:
+    return event is not None and event.is_set()
+
+
+def _sleep_with_cancel(delay: float, event: threading.Event | None) -> bool:
+    """Sleep in short slices when cancellable; return False once cancelled."""
+    if event is None:
+        sleep(delay)
+        return True
+    while delay > 0:
+        if _cancelled(event):
+            return False
+        slice_ = min(delay, _CANCEL_POLL_SECONDS)
+        sleep(slice_)
+        delay -= slice_
+    return not _cancelled(event)
+
+
+async def _async_sleep_with_cancel(delay: float, event: AsyncEvent | None) -> bool:
+    if event is None:
+        await async_sleep(delay)
+        return True
+    while delay > 0:
+        if _cancelled(event):
+            return False
+        slice_ = min(delay, _CANCEL_POLL_SECONDS)
+        await async_sleep(slice_)
+        delay -= slice_
+    return not _cancelled(event)
 
 
 def _export_page_limit(max_pages: int) -> None:
@@ -546,6 +583,7 @@ class ProoflineClient(Operations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ReviewOutcome:
         """Wait for recorded review completion or return TIMED_OUT.
 
@@ -554,30 +592,45 @@ class ProoflineClient(Operations):
 
         head_commit_sha holds the outcome to that commit. A review pinned to
         another head ends the wait on that read and is never COMPLETED.
+
+        cancel_event stops the wait before another request. It is checked before
+        each poll, during the backoff, and after each read; an in-flight read is
+        not interrupted and finishes within the client's HTTP timeout.
         """
 
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         _head_commit(head_commit_sha)
+        if cancel_event is not None and not isinstance(cancel_event, threading.Event):
+            raise TypeError("cancel_event must be a threading.Event.")
         url = _review_url(self._base_url, organization_id, review_id)
+        if _cancelled(cancel_event):
+            return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
+                if _cancelled(cancel_event):
+                    return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
+                if _cancelled(cancel_event):
+                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
-                sleep(min(interval, _transport.remaining() or 0))
+                if not _sleep_with_cancel(min(interval, _transport.remaining() or 0), cancel_event):
+                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 interval = min(60, interval * 2)
+            if _cancelled(cancel_event):
+                return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
@@ -941,29 +994,43 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         timeout: float = 300,
         head_commit_sha: str | None = None,
+        cancel_event: AsyncEvent | None = None,
     ) -> ReviewOutcome:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The review timeout must be a finite nonnegative number of seconds.")
         _head_commit(head_commit_sha)
+        if cancel_event is not None and not isinstance(cancel_event, AsyncEvent):
+            raise TypeError("cancel_event must be an asyncio.Event.")
         url = _review_url(self._base_url, organization_id, review_id)
+        if _cancelled(cancel_event):
+            return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
+                if _cancelled(cancel_event):
+                    return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
+                if _cancelled(cancel_event):
+                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
-                await async_sleep(min(interval, _transport.remaining() or 0))
+                if not await _async_sleep_with_cancel(
+                    min(interval, _transport.remaining() or 0), cancel_event
+                ):
+                    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
                 interval = min(60, interval * 2)
+            if _cancelled(cancel_event):
+                return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:

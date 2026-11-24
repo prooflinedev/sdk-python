@@ -76,6 +76,34 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Cancelling a wait
+
+Pass `cancel_event` to stop a wait when your own code no longer needs the result: a `threading.Event` for `wait_for_review` on `ProoflineClient`, or an `asyncio.Event` for `wait_for_review` on `AsyncProoflineClient`. Set the event from another thread, task, or signal handler.
+
+```python
+import threading
+
+cancel = threading.Event()
+outcome = client.wait_for_review(organization_id, review_id, cancel_event=cancel)
+# From another thread, or from a signal handler: cancel.set()
+```
+
+```python
+import asyncio
+import signal
+
+cancel = asyncio.Event()
+loop = asyncio.get_running_loop()
+loop.add_signal_handler(signal.SIGINT, cancel.set)
+outcome = await async_client.wait_for_review(
+    organization_id,
+    review_id,
+    cancel_event=cancel,
+)
+```
+
+Cancellation is checked before the wait starts, before each poll, during the backoff, and after each read. An in-flight read is not interrupted; it finishes within the client's configured HTTP timeout. A cancelled wait returns `ReviewOutcome` with `status == "STOPPED"` and `reason == "The wait was cancelled by the caller."`. When a review had already been read, `outcome.review` still holds that last record. Passing the wrong event type raises `TypeError` before any request. Without `cancel_event`, waits keep their existing polling and timeout behavior.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.

@@ -1415,6 +1415,93 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
 
 
 @MODES
+async def test_wait_for_review_cancel_event_stops_before_any_request(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    event.set()
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert server.requests == []
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
+    assert result.review is None
+    assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_review_cancel_event_interrupts_poll_interval(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+
+    def sleep(delay: float) -> None:
+        clock.sleep(delay)
+        if len(clock.delays) == 1:
+            event.set()
+
+    monkeypatch.setattr(client_module, "sleep", sleep)
+    if mode == "async":
+
+        async def async_sleep(delay: float) -> None:
+            sleep(delay)
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(client_module, "async_sleep", async_sleep)
+
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.review.id == REVIEW
+    assert clock.delays == [0.05]
+
+
+@MODES
+async def test_wait_for_review_cancel_event_stops_after_the_read_that_saw_it(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+
+    def respond(request: Request, index: int) -> Reply:
+        event.set()
+        return Reply(body=review("RUNNING"))
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.review.id == REVIEW
+    assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_review_rejects_an_unknown_cancel_event_type(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(TypeError, match="cancel_event"):
+                await call(
+                    client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=object()
+                )
+        assert server.requests == []
+
+
+@MODES
 async def test_retry_after_is_bounded_by_wait_deadline(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
