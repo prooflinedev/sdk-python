@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import math
 import threading
+from asyncio import FIRST_COMPLETED
 from asyncio import Event as AsyncEvent
 from asyncio import Future as AsyncFuture
+from asyncio import create_task as async_create_task
+from asyncio import gather as async_gather
+from asyncio import get_running_loop as async_get_running_loop
 from asyncio import sleep as async_sleep
 from asyncio import wait as async_wait
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -214,38 +218,34 @@ def _wait_for_event(event: threading.Event, timeout: float) -> bool:
 
 async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
     """Return True when the event is delivered before cutoff, False on timeout."""
-    waiter = event.wait()
-    future: AsyncFuture[bool] | None = None
-    finished = False
+    loop = async_get_running_loop()
+    timer: AsyncFuture[None] = loop.create_future()
     delivered = False
+    expired = False
+
+    def expire() -> None:
+        nonlocal expired
+        expired = True
+        if not timer.done():
+            timer.set_result(None)
+
+    handle = loop.call_at(loop.time() + max(0.0, cutoff - monotonic()), expire)
+
+    async def wait_for_signal() -> None:
+        nonlocal delivered
+        await event.wait()
+        if not expired:
+            delivered = True
+
+    waiter = async_create_task(wait_for_signal())
     try:
-        try:
-            future = waiter.send(None)
-        except StopIteration as stop:
-            finished = True
-            return bool(stop.value) and monotonic() <= cutoff
-
-        original_set_result = future.set_result
-
-        def set_result(result: bool) -> None:
-            nonlocal delivered
-            if monotonic() <= cutoff:
-                delivered = True
-            original_set_result(result)
-
-        future.set_result = set_result  # type: ignore[method-assign]
-
-        await async_wait((future,), timeout=max(0.0, cutoff - monotonic()))
-        if delivered and future.done() and not future.cancelled():
-            try:
-                waiter.send(None)
-            except StopIteration as stop:
-                finished = True
-                return bool(stop.value)
-        return False
+        await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
+        return delivered
     finally:
-        if not finished:
-            waiter.close()
+        handle.cancel()
+        if not waiter.done():
+            waiter.cancel()
+            await async_gather(waiter, return_exceptions=True)
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -286,6 +286,8 @@ async def _async_sleep_with_cancel(
             return not _cancelled(event)
         if await _async_wait_for_event(event, end):
             return False
+        if monotonic() >= end:
+            return True
 
 
 def _export_page_limit(max_pages: int) -> None:
@@ -686,10 +688,10 @@ class ProoflineClient(Operations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
-                if (_transport.remaining() or 0) <= 0:
-                    break
                 if _cancelled(cancel_event):
                     return _stopped(url, last, review_id)
+                if (_transport.remaining() or 0) <= 0:
+                    break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
@@ -1088,10 +1090,10 @@ class AsyncProoflineClient(AsyncOperations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
-                if (_transport.remaining() or 0) <= 0:
-                    break
                 if _cancelled(cancel_event):
                     return _stopped(url, last, review_id)
+                if (_transport.remaining() or 0) <= 0:
+                    break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
