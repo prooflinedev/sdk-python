@@ -77,9 +77,6 @@ def _optional_texts(value: object) -> bool:
 
 
 def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | None:
-    # A CODE result cannot replace a missing ENV result or its check receipts.
-    if review.assessment_count != 0 or review.assessments:
-        return None
     code = review.code_assessment
     if (
         not isinstance(code, CustomerCodeAssessment)
@@ -101,6 +98,18 @@ def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | N
     if any(finding.risk_domain == _WITHHELD_MARKER for finding in code.findings):
         return None
     return code
+
+
+def _code_gap(code: CustomerCodeAssessment) -> AssessmentGap | None:
+    kind = text(code.incompleteness_kind)
+    reasons = tuple(code.reason_codes) if isinstance(code.reason_codes, list) else ()
+    if kind:
+        reasons = (*reasons, kind)
+    if code.status == "COMPLETED" and not reasons:
+        return None
+    return AssessmentGap(
+        code.id, code.status, reasons or ("CODE_ASSESSMENT_STATE_UNAVAILABLE",), kind
+    )
 
 
 def _validate(review: CustomerReviewDetail, review_id: UUID | None) -> None:
@@ -166,23 +175,13 @@ def outcome(
         )
     _validate(review, review_id)
     code_only = review.assessment_count == 0 and not review.assessments
-    code = _code_assessment(review)
     if code_only:
+        # A CODE result cannot replace a missing ENV result or its check receipts.
+        code = _code_assessment(review)
         if code is None:
             gaps.append(AssessmentGap(None, "UNKNOWN", ("CODE_ASSESSMENT_UNAVAILABLE",)))
-        elif code.status != "COMPLETED" or text(code.incompleteness_kind) or code.reason_codes:
-            kind = text(code.incompleteness_kind)
-            reasons = tuple(code.reason_codes) if isinstance(code.reason_codes, list) else ()
-            if kind:
-                reasons = (*reasons, kind)
-            gaps.append(
-                AssessmentGap(
-                    code.id,
-                    code.status,
-                    reasons or ("CODE_ASSESSMENT_STATE_UNAVAILABLE",),
-                    kind,
-                )
-            )
+        elif (gap := _code_gap(code)) is not None:
+            gaps.append(gap)
     for assessment in review.assessments:
         reasons = (
             tuple(assessment.reason_codes) if isinstance(assessment.reason_codes, list) else ()

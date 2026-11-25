@@ -37,6 +37,7 @@ from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .sarif import review_sarif
 
 __all__ = [
     "AgentSession",
@@ -80,4 +81,5 @@ __all__ = [
     "UploadedReport",
     "__version__",
     "models",
+    "review_sarif",
 ]

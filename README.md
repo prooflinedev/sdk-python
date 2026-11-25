@@ -78,6 +78,23 @@ if outcome.status != "COMPLETED":
 
 ## Review exports
 
+Use `review_sarif` to write a retained pull-request review as SARIF 2.1.0 for CI and code scanning.
+
+```python
+import json
+from pathlib import Path
+
+from proofline import ProoflineClient, review_sarif
+
+with ProoflineClient() as client:
+    outcome = client.wait_for_review(organization_id, review_id)
+
+report = review_sarif(outcome, organization_id)
+Path("proofline.sarif").write_text(json.dumps(report), encoding="utf-8")
+```
+
+The review must record a full head SHA. Findings include file locations when their citations have verified provenance at that head. Check `runs[0].invocations[0]` for execution success and assessment gaps, including gaps in a CODE assessment alongside completed environment assessments.
+
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
 
 ```python
