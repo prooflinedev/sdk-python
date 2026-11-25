@@ -516,6 +516,45 @@ class ProoflineClient(Operations):
         max_items: int = 10_000,
         filters: ReviewFilters | None = None,
     ) -> Iterator[ReviewSummary]:
+        yield from self._iter_review_items(
+            lambda params: self.list_reviews(organization_id, **params),
+            page_size=page_size,
+            max_pages=max_pages,
+            max_items=max_items,
+            filters=filters,
+        )
+
+    def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int = 100,
+        max_items: int = 10_000,
+        filters: ReviewFilters | None = None,
+    ) -> Iterator[ReviewSummary]:
+        """Iterate the bounded review history of one pull request."""
+        yield from self._iter_review_items(
+            lambda params: self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=params
+            ),
+            page_size=page_size,
+            max_pages=max_pages,
+            max_items=max_items,
+            filters=filters,
+        )
+
+    def _iter_review_items(
+        self,
+        fetch: Callable[[ReviewFilters], ReviewPage],
+        *,
+        page_size: int,
+        max_pages: int,
+        max_items: int,
+        filters: ReviewFilters | None,
+    ) -> Iterator[ReviewSummary]:
         _page_limits(page_size, max_pages, max_items)
         params: ReviewFilters = {}
         if filters:
@@ -527,7 +566,7 @@ class ProoflineClient(Operations):
             seen.add(cursor)
         count = 0
         for _ in range(max_pages):
-            page = self.list_reviews(organization_id, **params)
+            page = fetch(params)
             for item in page.items:
                 if count == max_items:
                     raise _pagination_limit()
@@ -911,6 +950,47 @@ class AsyncProoflineClient(AsyncOperations):
         max_items: int = 10_000,
         filters: ReviewFilters | None = None,
     ) -> AsyncIterator[ReviewSummary]:
+        async for item in self._iter_review_items(
+            lambda params: self.list_reviews(organization_id, **params),
+            page_size=page_size,
+            max_pages=max_pages,
+            max_items=max_items,
+            filters=filters,
+        ):
+            yield item
+
+    async def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int = 100,
+        max_items: int = 10_000,
+        filters: ReviewFilters | None = None,
+    ) -> AsyncIterator[ReviewSummary]:
+        """Iterate the bounded review history of one pull request."""
+        async for item in self._iter_review_items(
+            lambda params: self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=params
+            ),
+            page_size=page_size,
+            max_pages=max_pages,
+            max_items=max_items,
+            filters=filters,
+        ):
+            yield item
+
+    async def _iter_review_items(
+        self,
+        fetch: Callable[[ReviewFilters], Awaitable[ReviewPage]],
+        *,
+        page_size: int,
+        max_pages: int,
+        max_items: int,
+        filters: ReviewFilters | None,
+    ) -> AsyncIterator[ReviewSummary]:
         _page_limits(page_size, max_pages, max_items)
         params: ReviewFilters = {}
         if filters:
@@ -922,7 +1002,7 @@ class AsyncProoflineClient(AsyncOperations):
             seen.add(cursor)
         count = 0
         for _ in range(max_pages):
-            page = await self.list_reviews(organization_id, **params)
+            page = await fetch(params)
             for item in page.items:
                 if count == max_items:
                     raise _pagination_limit()

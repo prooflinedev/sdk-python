@@ -39,6 +39,8 @@ async def main():
 asyncio.run(main())
 ```
 
+To traverse the review history of a single pull request, use `iter_pull_request_reviews(organization_id, "owner/repository", 42)` (or `async for` with the async client). It accepts the same page, item and filter options as `iter_reviews`.
+
 The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
 ## Errors and refusals
