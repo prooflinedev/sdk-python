@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import threading
 from asyncio import FIRST_COMPLETED
-from asyncio import CancelledError as AsyncCancelledError
 from asyncio import Event as AsyncEvent
 from asyncio import Future as AsyncFuture
 from asyncio import get_running_loop as async_get_running_loop
@@ -221,10 +220,11 @@ class _ConditionSignalTracker:
 
     def record(self) -> None:
         now = monotonic()
+        # Record while holding the same lock used to read the latch, then call
+        # the original notification after releasing it to avoid lock inversion.
         with _notify_lock:
-            deadlines = tuple(self.deadlines)
-        for deadline in deadlines:
-            deadline.record(now)
+            for deadline in tuple(self.deadlines):
+                deadline.record(now)
 
     def notify_all(self) -> None:
         self.record()
@@ -281,6 +281,10 @@ def _cancelled(event: threading.Event | AsyncEvent | None) -> bool:
     return event is not None and event.is_set()
 
 
+def _invalid_response(error: ProoflineError) -> bool:
+    return error.type == "urn:proofline:sdk:invalid-response"
+
+
 def _stopped(
     url: str,
     last: CustomerReviewDetail | None,
@@ -301,34 +305,78 @@ def _stopped(
     return ReviewOutcome("STOPPED", url, last, result.gaps, _CANCEL_REASON)
 
 
+def _sync_deadline_state(deadline: _SignalDeadline) -> tuple[float | None, float]:
+    """Read the latch and clock under the lock that records notifications."""
+    with _notify_lock:
+        return deadline.signalled_at, monotonic()
+
+
 def _wait_for_event(
     event: threading.Event, timeout: float, deadline: _SignalDeadline | None = None
 ) -> bool:
     """Return True when the event woke the wait, False when it timed out."""
     if deadline is None:
         return event.wait(timeout)
-    conditions = deadline.conditions
-    if conditions:
-        # Install the tracker and check the flag under the same condition lock,
-        # so a set/clear between the check and waiter registration is recorded.
-        with conditions[0]:
+    if type(event) is threading.Event and deadline.conditions:
+        condition = deadline.conditions[0]
+        # A plain Event's flag and waiters share this condition. Setting and
+        # clearing between the flag check and waiter registration therefore
+        # cannot hide a notification from this wait.
+        with condition:
             _track_thread_signal(event, deadline)
-            if deadline.signalled_at is not None:
+            if _sync_deadline_state(deadline)[0] is not None:
                 return True
             if getattr(event, "_flag", False) is True:
                 deadline.record(monotonic())
                 return True
-    now = monotonic()
+            remaining = min(timeout, deadline.end - monotonic())
+            if remaining <= 0:
+                return False
+            condition.wait(remaining)
+            signalled_at, now = _sync_deadline_state(deadline)
+            if signalled_at is not None:
+                return True
+            if getattr(event, "_flag", False) is True and now < deadline.end:
+                deadline.record(now)
+                return True
+            return False
+    if deadline.conditions:
+        with deadline.conditions[0]:
+            _track_thread_signal(event, deadline)
+            if _sync_deadline_state(deadline)[0] is not None:
+                return True
+            if getattr(event, "_flag", False) is True:
+                deadline.record(monotonic())
+                return True
+    signalled_at, now = _sync_deadline_state(deadline)
+    if signalled_at is not None:
+        return True
     remaining = min(timeout, deadline.end - now)
     if remaining <= 0:
         return False
     woke = event.wait(remaining)
-    if woke and deadline.signalled_at is None:
-        # A subclass may notify through a primitive we cannot observe. A
-        # successful wait is evidence that its signal reached the wait primitive
-        # after this call began, which is before the absolute cutoff.
-        deadline.record(now)
+    # Subclasses can wake through a primitive we cannot wrap. Only an observed
+    # wake before the cutoff counts; a tracked late notification stays late.
+    if woke and _sync_deadline_state(deadline)[0] is None and monotonic() < deadline.end:
+        deadline.record(monotonic())
     return woke
+
+
+def _async_event_graph(event: AsyncEvent) -> list[AsyncEvent]:
+    events: list[AsyncEvent] = []
+    seen: set[int] = set()
+    pending = [event]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, AsyncEvent):
+            events.append(current)
+            pending.extend(
+                value for value in vars(current).values() if isinstance(value, AsyncEvent)
+            )
+    return events
 
 
 async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
@@ -338,67 +386,57 @@ async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
         return False
     timer: AsyncFuture[None] = loop.create_future()
     handle = loop.call_at(loop.time() + max(0.0, cutoff - monotonic()), timer.set_result, None)
-    delivered = event.is_set() and monotonic() < cutoff
+    delivered = False
+    wrapped: list[tuple[AsyncFuture[Any], Any]] = []
     waiter: Any = None
-    future: AsyncFuture[Any] | None = None
-    original_set_result: Any = None
-    started = False
-    resumed = False
+
+    def watch_waiters() -> None:
+        for candidate in _async_event_graph(event):
+            for future in tuple(getattr(candidate, "_waiters", ())):
+                if not isinstance(future, AsyncFuture) or any(
+                    future is item[0] for item in wrapped
+                ):
+                    continue
+                original = future.set_result
+
+                def set_result(result: Any, original: Any = original) -> None:
+                    nonlocal delivered
+                    if monotonic() < cutoff:
+                        delivered = True
+                    original(result)
+
+                future.set_result = set_result  # type: ignore[method-assign]
+                wrapped.append((future, original))
+
+    def on_waiter_done(task: Any) -> None:
+        nonlocal delivered
+        if task.cancelled() or task.exception() is not None:
+            return
+        if task.result() and monotonic() < cutoff:
+            delivered = True
+
     try:
-        # Drive the event's public wait() coroutine directly. It honors
-        # subclasses that delegate to a backing event while still letting us
-        # observe the future that carries the signal.
-        waiter = event.wait()
-        started = True
-        try:
-            awaited = waiter.send(None)
-        except StopIteration as stop:
-            resumed = True
-            if stop.value and monotonic() < cutoff:
+        # Run the public wait() as a task so subclasses may suspend any number
+        # of times, including through sleep(0) or a delegated Task.
+        waiter = loop.create_task(event.wait())
+        waiter.add_done_callback(on_waiter_done)
+        for _ in range(4):
+            await async_sleep(0)
+            watch_waiters()
+            if wrapped or waiter.done():
+                break
+        await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
+        if waiter.done() and not waiter.cancelled():
+            if waiter.result() and not delivered and monotonic() < cutoff:
                 delivered = True
-            return delivered
-        except BaseException:
-            # A coroutine that raises during startup is already closed.
-            resumed = True
-            raise
-        future = cast(AsyncFuture[Any], awaited)
-        original_set_result = future.set_result
-
-        def set_result(result: Any) -> None:
-            nonlocal delivered
-            if monotonic() < cutoff:
-                delivered = True
-            original_set_result(result)
-
-        future.set_result = set_result  # type: ignore[method-assign]
-        await async_wait((future, timer), return_when=FIRST_COMPLETED)
-        if future.done():
-            # Mark this before resuming: a failed send closes the coroutine, and
-            # cleanup must not throw into it again.
-            resumed = True
-            try:
-                waiter.send(None)
-            except (StopIteration, AsyncCancelledError):
-                pass
         return delivered
     finally:
         handle.cancel()
-        if future is not None and original_set_result is not None:
-            future.set_result = original_set_result  # type: ignore[method-assign]
-        if waiter is not None:
-            if started and not resumed:
-                if future is not None and not future.done():
-                    future.cancel()
-                try:
-                    waiter.throw(AsyncCancelledError())
-                except (StopIteration, AsyncCancelledError):
-                    pass
-            if future is not None and future.done() and not future.cancelled():
-                try:
-                    future.exception()
-                except AsyncCancelledError:
-                    pass
-            waiter.close()
+        for future, original in wrapped:
+            future.set_result = original  # type: ignore[method-assign]
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
+            waiter.add_done_callback(lambda task: None if task.cancelled() else task.exception())
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -417,23 +455,27 @@ def _sleep_with_cancel(
     deadline = _track_thread_signal(event, _SignalDeadline(end))
     try:
         while True:
-            if deadline.signalled_at is not None:
+            signalled_at, now = _sync_deadline_state(deadline)
+            if signalled_at is not None:
                 return False
-            now = monotonic()
             if now >= end:
                 return True
             if _cancelled(event):
                 # Read the flag before the final cutoff check: a signal at or
                 # after the cutoff cannot turn a timeout into a stop.
-                if monotonic() < end:
-                    deadline.record(monotonic())
+                signalled_at, now = _sync_deadline_state(deadline)
+                if signalled_at is not None:
+                    return False
+                if now < end:
+                    deadline.record(now)
                     return False
                 return True
             if not _wait_for_event(event, end - now, deadline):
-                if deadline.signalled_at is not None:
+                signalled_at, now = _sync_deadline_state(deadline)
+                if signalled_at is not None:
                     return False
-                if monotonic() < end and _cancelled(event):
-                    deadline.record(monotonic())
+                if now < end and _cancelled(event):
+                    deadline.record(now)
                     return False
                 return True
     finally:
@@ -849,6 +891,8 @@ class ProoflineClient(Operations):
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
+                    if _invalid_response(error):
+                        raise
                     if _cancelled(cancel_event):
                         return _stopped(url, last, review_id, head_commit_sha)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
@@ -1251,6 +1295,8 @@ class AsyncProoflineClient(AsyncOperations):
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
+                    if _invalid_response(error):
+                        raise
                     if _cancelled(cancel_event):
                         return _stopped(url, last, review_id, head_commit_sha)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
