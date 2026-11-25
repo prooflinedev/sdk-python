@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 import threading
 from asyncio import FIRST_COMPLETED
+from asyncio import CancelledError as AsyncCancelledError
 from asyncio import Event as AsyncEvent
 from asyncio import Future as AsyncFuture
-from asyncio import create_task as async_create_task
 from asyncio import get_running_loop as async_get_running_loop
 from asyncio import sleep as async_sleep
 from asyncio import wait as async_wait
@@ -199,6 +199,65 @@ def _pagination_limit(resource: str = "Review") -> ProoflineError:
 _CANCEL_REASON = "The wait was cancelled by the caller."
 
 
+class _SignalDeadline:
+    def __init__(self, end: float) -> None:
+        self.end = end
+        self.signalled_at: float | None = None
+
+    def record(self, now: float) -> None:
+        if self.signalled_at is None and now < self.end:
+            self.signalled_at = now
+
+
+class _NotifyAllTracker:
+    def __init__(self, condition: Any) -> None:
+        self.condition = condition
+        self.original = condition.notify_all
+        self.deadlines: set[_SignalDeadline] = set()
+        condition.notify_all = self.notify_all
+
+    def notify_all(self) -> None:
+        now = monotonic()
+        with _notify_lock:
+            deadlines = tuple(self.deadlines)
+        for deadline in deadlines:
+            deadline.record(now)
+        self.original()
+
+
+_notify_lock = threading.Lock()
+_notify_trackers: dict[int, _NotifyAllTracker] = {}
+
+
+def _track_thread_signal(event: threading.Event, end: float) -> _SignalDeadline:
+    deadline = _SignalDeadline(end)
+    condition = getattr(event, "_cond", None)
+    if not isinstance(condition, threading.Condition):
+        return deadline
+    key = id(condition)
+    with _notify_lock:
+        tracker = _notify_trackers.get(key)
+        if tracker is None:
+            tracker = _NotifyAllTracker(condition)
+            _notify_trackers[key] = tracker
+        tracker.deadlines.add(deadline)
+    return deadline
+
+
+def _untrack_thread_signal(event: threading.Event, deadline: _SignalDeadline) -> None:
+    condition = getattr(event, "_cond", None)
+    if not isinstance(condition, threading.Condition):
+        return
+    with _notify_lock:
+        tracker = _notify_trackers.get(id(condition))
+        if tracker is None:
+            return
+        tracker.deadlines.discard(deadline)
+        if not tracker.deadlines:
+            tracker.condition.notify_all = tracker.original
+            del _notify_trackers[id(condition)]
+
+
 def _cancelled(event: threading.Event | AsyncEvent | None) -> bool:
     return event is not None and event.is_set()
 
@@ -220,53 +279,47 @@ async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
     loop = async_get_running_loop()
     timer: AsyncFuture[None] = loop.create_future()
     delivered = event.is_set() and monotonic() < cutoff
-    original_set: Any = None
-    wrapped_set = False
+    handle = loop.call_at(loop.time() + max(0.0, cutoff - monotonic()), timer.set_result, None)
+
+    # Drive the built-in Event.wait coroutine so subclasses cannot override the
+    # wait primitive or leave a task behind when they suppress cancellation.
+    waiter = AsyncEvent.wait(event)
     try:
-        original_set = event.set
+        future = cast(AsyncFuture[bool], waiter.send(None))
+    except StopIteration as stop:
+        handle.cancel()
+        return bool(stop.value) and monotonic() < cutoff
 
-        def set_with_delivery_time() -> None:
-            nonlocal delivered
-            if monotonic() < cutoff:
-                delivered = True
-            original_set()
+    original_set_result = future.set_result
 
-        event.set = set_with_delivery_time  # type: ignore[method-assign]
-        wrapped_set = True
-    except (AttributeError, TypeError):
-        pass
-
-    def expire() -> None:
-        if not timer.done():
-            timer.set_result(None)
-
-    handle = loop.call_at(loop.time() + max(0.0, cutoff - monotonic()), expire)
-
-    async def wait_for_signal() -> None:
+    def set_result(result: bool) -> None:
         nonlocal delivered
-        await event.wait()
-        # A subclass may complete its waiter directly instead of through set().
-        if not delivered and monotonic() < cutoff:
+        if monotonic() < cutoff:
             delivered = True
+        original_set_result(result)
 
-    waiter = async_create_task(wait_for_signal())
-
-    def retrieve(task: Any) -> None:
-        if not task.cancelled():
-            task.exception()
-
-    waiter.add_done_callback(retrieve)
+    future.set_result = set_result  # type: ignore[method-assign]
+    resumed = False
     try:
-        await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
-        if waiter.done():
-            waiter.result()
+        await async_wait((future, timer), return_when=FIRST_COMPLETED)
+        if future.done() and not future.cancelled():
+            try:
+                waiter.send(None)
+            except StopIteration:
+                pass
+            resumed = True
         return delivered
     finally:
         handle.cancel()
-        if wrapped_set:
-            event.set = original_set  # type: ignore[method-assign]
-        if not waiter.done():
-            waiter.cancel()
+        future.set_result = original_set_result  # type: ignore[method-assign]
+        if not resumed:
+            if not future.done():
+                future.cancel()
+            try:
+                waiter.throw(AsyncCancelledError())
+            except (StopIteration, AsyncCancelledError):
+                pass
+        waiter.close()
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -282,38 +335,21 @@ def _sleep_with_cancel(
         sleep(delay)
         return True
     end = _cancel_end(delay, cutoff)
-    signalled_at: float | None = None
-    original_set: Any = None
-    wrapped_set = False
-    try:
-        original_set = event.set
-
-        def set_with_delivery_time() -> None:
-            nonlocal signalled_at
-            now = monotonic()
-            if signalled_at is None and now < end:
-                signalled_at = now
-            original_set()
-
-        event.set = set_with_delivery_time  # type: ignore[method-assign]
-        wrapped_set = True
-    except (AttributeError, TypeError):
-        pass
+    deadline = _track_thread_signal(event, end)
     try:
         while True:
-            if signalled_at is not None:
+            if deadline.signalled_at is not None:
                 return False
             if monotonic() >= end:
                 return True
             if _cancelled(event):
                 return False
             if _wait_for_event(event, end - monotonic()):
-                if signalled_at is not None:
+                if deadline.signalled_at is not None:
                     return False
                 return True
     finally:
-        if wrapped_set:
-            event.set = original_set  # type: ignore[method-assign]
+        _untrack_thread_signal(event, deadline)
 
 
 async def _async_sleep_with_cancel(

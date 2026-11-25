@@ -106,6 +106,11 @@ async def collect(client: Client, **kwargs: Any) -> list[Any]:
     return list(iterator)
 
 
+async def wait_for_all(aws: Any, **kwargs: Any) -> Any:
+    kwargs["return_when"] = asyncio.ALL_COMPLETED
+    return await asyncio.wait(aws, **kwargs)
+
+
 class Clock:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.now = 100.0
@@ -1435,99 +1440,128 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
         assert len(server.requests) == 8
 
 
-async def test_async_wait_for_event_latches_a_set_then_clear() -> None:
+async def test_async_wait_for_event_latches_a_set_then_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    registered = asyncio.Event()
+
+    async def wait_for_all_and_register(aws: Any, **kwargs: Any) -> Any:
+        registered.set()
+        kwargs["return_when"] = asyncio.ALL_COMPLETED
+        return await asyncio.wait(aws, **kwargs)
+
+    monkeypatch.setattr(client_module, "async_wait", wait_for_all_and_register)
     event = asyncio.Event()
-    asyncio.get_running_loop().call_later(0.01, lambda: (event.set(), event.clear()))
-    assert await client_module._async_wait_for_event(event, time.monotonic() + 1.0) is True
+    cutoff = clock.now + 0.01
+
+    async def send_signal() -> None:
+        await registered.wait()
+        event.set()
+        event.clear()
+        clock.now = cutoff + 1.0
+
+    sender = asyncio.create_task(send_signal())
+    assert await asyncio.wait_for(real_wait(event, cutoff), 1.0) is True
+    await sender
 
 
 async def test_async_wait_for_event_ignores_a_signal_after_cutoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real_async_wait = client_module.async_wait
-    late_signal_delivered = False
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    registered = asyncio.Event()
+    observed: list[Any] = []
 
-    # Keep the helper alive until the late signal has reached the waiter task,
-    # so this test cannot pass merely because the helper returned too early.
-    async def wait_for_both(aws: Any, **kwargs: Any) -> Any:
+    async def wait_for_all_and_record(aws: Any, **kwargs: Any) -> Any:
+        observed.append(aws)
+        registered.set()
         kwargs["return_when"] = asyncio.ALL_COMPLETED
-        return await real_async_wait(aws, **kwargs)
+        return await asyncio.wait(aws, **kwargs)
 
-    monkeypatch.setattr(client_module, "async_wait", wait_for_both)
+    monkeypatch.setattr(client_module, "async_wait", wait_for_all_and_record)
 
-    class RecordingEvent(asyncio.Event):
-        async def wait(self) -> bool:
-            nonlocal late_signal_delivered
-            result = await super().wait()
-            late_signal_delivered = True
-            return result
+    event = asyncio.Event()
+    cutoff = clock.now + 0.01
+    signal_sent = False
 
-    event = RecordingEvent()
-    cutoff = time.monotonic() + 0.01
-    delay = max(0.0, cutoff - time.monotonic()) + 0.01
-
-    def send_late_signal() -> None:
+    async def send_late_signal() -> None:
+        nonlocal signal_sent
+        await registered.wait()
+        clock.now = cutoff + 1.0
         event.set()
+        signal_sent = True
 
-    asyncio.get_running_loop().call_later(delay, send_late_signal)
-    assert await client_module._async_wait_for_event(event, cutoff) is False
-    assert late_signal_delivered is True
-
-
-async def test_async_wait_for_event_latches_delivery_before_a_late_resume() -> None:
-    class SlowResumeEvent(asyncio.Event):
-        async def wait(self) -> bool:
-            result = await super().wait()
-            await asyncio.sleep(0.1)
-            return result
-
-    event = SlowResumeEvent()
-    cutoff = time.monotonic() + 0.05
-    delay = max(0.0, cutoff - time.monotonic()) / 2
-
-    def send_early_signal() -> None:
-        event.set()
-
-    asyncio.get_running_loop().call_later(delay, send_early_signal)
-    assert await client_module._async_wait_for_event(event, cutoff) is True
+    sender = asyncio.create_task(send_late_signal())
+    assert await asyncio.wait_for(real_wait(event, cutoff), 1.0) is False
+    await sender
+    assert signal_sent is True
+    assert any(item.done() for item in observed[0])
 
 
-async def test_async_wait_for_event_does_not_join_a_persistent_waiter(
+async def test_async_wait_for_event_latches_delivery_before_a_late_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class PersistentEvent(asyncio.Event):
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    registered = asyncio.Event()
+
+    async def wait_for_all_and_register(aws: Any, **kwargs: Any) -> Any:
+        registered.set()
+        kwargs["return_when"] = asyncio.ALL_COMPLETED
+        return await asyncio.wait(aws, **kwargs)
+
+    monkeypatch.setattr(client_module, "async_wait", wait_for_all_and_register)
+    event = asyncio.Event()
+    cutoff = clock.now + 0.01
+
+    async def send_signal() -> None:
+        await registered.wait()
+        event.set()
+        clock.now = cutoff + 1.0
+
+    sender = asyncio.create_task(send_signal())
+    assert await asyncio.wait_for(real_wait(event, cutoff), 1.0) is True
+    await sender
+
+
+async def test_async_wait_for_event_ignores_subclass_wait_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    registered = asyncio.Event()
+
+    async def wait_for_all_and_register(aws: Any, **kwargs: Any) -> Any:
+        registered.set()
+        kwargs["return_when"] = asyncio.ALL_COMPLETED
+        return await asyncio.wait(aws, **kwargs)
+
+    monkeypatch.setattr(client_module, "async_wait", wait_for_all_and_register)
+
+    class OverriddenEvent(asyncio.Event):
         def __init__(self) -> None:
             super().__init__()
-            self.stop = False
+            self.wait_calls = 0
 
         async def wait(self) -> bool:
-            try:
-                await super().wait()
-            except asyncio.CancelledError:
-                while not self.stop:
-                    await asyncio.sleep(0.01)
-            return False
+            self.wait_calls += 1
+            raise RuntimeError("subclass wait must not be used")
 
-    created: list[asyncio.Task[Any]] = []
-    real_create_task = client_module.async_create_task
+    event = OverriddenEvent()
+    cutoff = clock.now + 0.01
 
-    def create_task(coro: Any) -> asyncio.Task[Any]:
-        task = real_create_task(coro)
-        created.append(task)
-        return task
+    async def send_signal() -> None:
+        await registered.wait()
+        event.set()
+        clock.now = cutoff + 1.0
 
-    monkeypatch.setattr(client_module, "async_create_task", create_task)
-
-    event = PersistentEvent()
-    task = asyncio.create_task(client_module._async_wait_for_event(event, time.monotonic() + 0.01))
-    try:
-        assert await asyncio.wait_for(task, 1.0) is False
-    finally:
-        event.stop = True
-        for item in created:
-            item.cancel()
-        if created:
-            await asyncio.gather(*created, return_exceptions=True)
+    sender = asyncio.create_task(send_signal())
+    assert await asyncio.wait_for(real_wait(event, cutoff), 1.0) is True
+    await sender
+    assert event.wait_calls == 0
 
 
 def test_sleep_with_cancel_ignores_a_signal_set_at_deadline(
@@ -1564,24 +1598,69 @@ def test_sleep_with_cancel_latches_delivery_before_a_late_resume(
     assert clock.delays == [1.0]
 
 
-async def test_async_wait_for_event_accepts_subclass_that_yields_none() -> None:
-    class YieldingEvent(asyncio.Event):
-        async def wait(self) -> bool:
-            await asyncio.sleep(0)
-            return await super().wait()
+def test_sleep_with_cancel_records_a_captured_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    setter = event.set
 
-    event = YieldingEvent()
-    asyncio.get_running_loop().call_later(0.01, event.set)
-    assert await client_module._async_wait_for_event(event, time.monotonic() + 1.0) is True
+    def wait_for_event(wait_event: Any, timeout: float) -> bool:
+        setter()
+        clock.sleep(timeout)
+        return True
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert clock.delays == [1.0]
 
 
-async def test_async_wait_for_event_propagates_waiter_exception() -> None:
-    class FailingEvent(asyncio.Event):
-        async def wait(self) -> bool:
-            raise RuntimeError("wait failed")
+async def test_async_wait_for_event_records_a_captured_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    registered = asyncio.Event()
 
-    with pytest.raises(RuntimeError, match="wait failed"):
-        await client_module._async_wait_for_event(FailingEvent(), time.monotonic() + 1.0)
+    async def wait_for_all_and_register(aws: Any, **kwargs: Any) -> Any:
+        registered.set()
+        kwargs["return_when"] = asyncio.ALL_COMPLETED
+        return await asyncio.wait(aws, **kwargs)
+
+    monkeypatch.setattr(client_module, "async_wait", wait_for_all_and_register)
+    event = asyncio.Event()
+    setter = event.set
+    cutoff = clock.now + 0.01
+
+    async def send_signal() -> None:
+        await registered.wait()
+        setter()
+        clock.now = cutoff + 1.0
+
+    sender = asyncio.create_task(send_signal())
+    assert await asyncio.wait_for(real_wait(event, cutoff), 1.0) is True
+    await sender
+
+
+def test_sleep_with_cancel_does_not_replace_the_event_setter() -> None:
+    event = threading.Event()
+    setter = event.set
+    condition = event._cond
+    notify_all = condition.notify_all
+
+    assert client_module._sleep_with_cancel(0, event) is True
+    assert event.set == setter
+    assert condition.notify_all == notify_all
+
+
+async def test_async_wait_for_event_does_not_replace_the_event_setter() -> None:
+    event = asyncio.Event()
+    setter = event.set
+
+    assert await client_module._async_wait_for_event(event, time.monotonic() - 1.0) is False
+    assert event.set == setter
+    assert not event._waiters
 
 
 async def test_async_wait_for_event_propagates_external_cancellation() -> None:
@@ -1622,6 +1701,7 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     task: asyncio.Task[None] | None = None
     poll_task: asyncio.Task[Any] | None = None
     wait_elapsed: list[float] = []
+    wait_results: list[bool] = []
     failures: list[BaseException] = []
     event: Any
     release: Any
@@ -1677,16 +1757,12 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
 
         def wait_for_event(wait_event: Any, timeout: float) -> bool:
             started = time.monotonic()
-            deadline = started + timeout
             try:
-                while True:
-                    if abort.is_set():
-                        raise failures[0]
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return False
-                    if real_wait(wait_event, min(remaining, 0.01)):
-                        return True
+                woke = real_wait(wait_event, timeout)
+                wait_results.append(woke)
+                if abort.is_set() and failures:
+                    raise failures[0]
+                return woke
             finally:
                 wait_elapsed.append(time.monotonic() - started)
 
@@ -1697,6 +1773,7 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
             while not event.waiter_registered.is_set() and not release.is_set():
                 if time.monotonic() >= deadline:
                     failures.append(AssertionError("waiter registration timed out"))
+                    event.set()
                     abort.set()
                     return
                 release.wait(0.01)
@@ -1705,29 +1782,15 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     else:
 
         class SignallingEventAsync(asyncio.Event):
-            """An Event double that signals once it has a registered waiter."""
+            """An Event double that signals once the built-in wait registers."""
 
             def __init__(self) -> None:
                 super().__init__()
                 self.waiter_registered = asyncio.Event()
-                self._registered: set[asyncio.Future[bool]] = set()
 
-            async def wait(self) -> bool:
-                if self.is_set():
-                    return True
-                waiter = asyncio.get_running_loop().create_future()
-                self._registered.add(waiter)
+            def _get_loop(self) -> Any:
                 self.waiter_registered.set()
-                try:
-                    return await waiter
-                finally:
-                    self._registered.discard(waiter)
-
-            def set(self) -> None:
-                super().set()
-                for waiter in tuple(self._registered):
-                    if not waiter.done():
-                        waiter.set_result(True)
+                return super()._get_loop()
 
         event = SignallingEventAsync()
         release = asyncio.Event()
@@ -1745,7 +1808,9 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
                     await asyncio.wait((wait_task, abort_task), return_when=asyncio.FIRST_COMPLETED)
                     if abort_task.done():
                         raise failures[0]
-                    return wait_task.result()
+                    result = wait_task.result()
+                    wait_results.append(result)
+                    return result
                 finally:
                     supervised = (wait_task, abort_task)
                     for item in supervised:
@@ -1826,6 +1891,7 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     assert event.waiter_registered.is_set()
     assert wait_elapsed
     assert wait_elapsed[0] < 2.0
+    assert wait_results[0] is True
     assert result.status == "STOPPED"
     assert result.reason == "The wait was cancelled by the caller."
     assert result.review.id == REVIEW
