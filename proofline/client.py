@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 from asyncio import FIRST_COMPLETED
@@ -210,8 +211,15 @@ class _SignalDeadline:
 
 
 class _ConditionSignalTracker:
+    """Watch one condition, preserving whether overrides were instance attributes."""
+
     def __init__(self, condition: threading.Condition) -> None:
         self.condition = condition
+        attributes = vars(condition)
+        self.had_notify_all = "notify_all" in attributes
+        self.saved_notify_all: Any = attributes.get("notify_all")
+        self.had_notify = "notify" in attributes
+        self.saved_notify: Any = attributes.get("notify")
         self.original_notify_all = condition.notify_all
         self.original_notify = condition.notify
         self.deadlines: set[_SignalDeadline] = set()
@@ -220,8 +228,8 @@ class _ConditionSignalTracker:
 
     def record(self) -> None:
         now = monotonic()
-        # Record while holding the same lock used to read the latch, then call
-        # the original notification after releasing it to avoid lock inversion.
+        # Latch under the lock readers use, then notify after releasing it so a
+        # waiter holding the condition lock cannot deadlock this tracker.
         with _notify_lock:
             for deadline in tuple(self.deadlines):
                 deadline.record(now)
@@ -234,19 +242,39 @@ class _ConditionSignalTracker:
         self.record()
         self.original_notify(*args, **kwargs)
 
+    def restore(self) -> None:
+        if self.had_notify_all:
+            self.condition.notify_all = self.saved_notify_all  # type: ignore[method-assign]
+        else:
+            del self.condition.notify_all
+        if self.had_notify:
+            self.condition.notify = self.saved_notify  # type: ignore[method-assign]
+        else:
+            del self.condition.notify
+
 
 _notify_lock = threading.Lock()
 _notify_trackers: dict[int, _ConditionSignalTracker] = {}
 
 
 def _thread_conditions(event: threading.Event) -> tuple[threading.Condition, ...]:
+    """Collect conditions owned by this event or backing events it references."""
     conditions: list[threading.Condition] = []
-    seen: set[int] = set()
-    candidates = [getattr(event, "_cond", None), *vars(event).values()]
-    for candidate in candidates:
-        if isinstance(candidate, threading.Condition) and id(candidate) not in seen:
-            seen.add(id(candidate))
-            conditions.append(candidate)
+    seen_events: set[int] = set()
+    seen_conditions: set[int] = set()
+    pending = [event]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen_events:
+            continue
+        seen_events.add(id(current))
+        condition = getattr(current, "_cond", None)
+        if isinstance(condition, threading.Condition) and id(condition) not in seen_conditions:
+            seen_conditions.add(id(condition))
+            conditions.append(condition)
+        pending.extend(
+            value for value in vars(current).values() if isinstance(value, threading.Event)
+        )
     return tuple(conditions)
 
 
@@ -272,8 +300,7 @@ def _untrack_thread_signal(event: threading.Event, deadline: _SignalDeadline) ->
                 continue
             tracker.deadlines.discard(deadline)
             if not tracker.deadlines:
-                tracker.condition.notify_all = tracker.original_notify_all  # type: ignore[method-assign]
-                tracker.condition.notify = tracker.original_notify  # type: ignore[method-assign]
+                tracker.restore()
                 del _notify_trackers[key]
 
 
@@ -317,11 +344,12 @@ def _wait_for_event(
     """Return True when the event woke the wait, False when it timed out."""
     if deadline is None:
         return event.wait(timeout)
-    if type(event) is threading.Event and deadline.conditions:
-        condition = deadline.conditions[0]
-        # A plain Event's flag and waiters share this condition. Setting and
-        # clearing between the flag check and waiter registration therefore
-        # cannot hide a notification from this wait.
+    inherited = type(event).wait is threading.Event.wait
+    condition = getattr(event, "_cond", None) if inherited else None
+    if isinstance(condition, threading.Condition):
+        # Plain events and subclasses that inherit Event.wait() share this
+        # condition for the flag and the waiter list. Checking and waiting under
+        # it makes a set/clear between those steps observable.
         with condition:
             _track_thread_signal(event, deadline)
             if _sync_deadline_state(deadline)[0] is not None:
@@ -345,7 +373,7 @@ def _wait_for_event(
             _track_thread_signal(event, deadline)
             if _sync_deadline_state(deadline)[0] is not None:
                 return True
-            if getattr(event, "_flag", False) is True:
+            if event.is_set():
                 deadline.record(monotonic())
                 return True
     signalled_at, now = _sync_deadline_state(deadline)
@@ -362,21 +390,125 @@ def _wait_for_event(
     return woke
 
 
-def _async_event_graph(event: AsyncEvent) -> list[AsyncEvent]:
-    events: list[AsyncEvent] = []
-    seen: set[int] = set()
-    pending = [event]
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, AsyncEvent):
-            events.append(current)
-            pending.extend(
-                value for value in vars(current).values() if isinstance(value, AsyncEvent)
-            )
-    return events
+_async_set_lock = threading.Lock()
+_async_future_lock = threading.Lock()
+_async_set_watches: dict[int, _AsyncSetWatch] = {}
+_async_future_watches: dict[int, _AsyncFutureWatch] = {}
+
+
+class _AsyncSetWatch:
+    """One shared hook on an event's public set(), with independent observers."""
+
+    def __init__(self, event: AsyncEvent) -> None:
+        self.event = event
+        attributes = _instance_attributes(event)
+        self.had_instance = "set" in attributes
+        self.saved: Any = attributes.get("set")
+        self.original = event.set
+        self.deadlines: set[_SignalDeadline] = set()
+
+        def set_event(*args: Any, **kwargs: Any) -> Any:
+            result = self.original(*args, **kwargs)
+            now = monotonic()
+            with _async_set_lock:
+                deadlines = tuple(self.deadlines)
+            for deadline in deadlines:
+                deadline.record(now)
+            return result
+
+        event.set = set_event  # type: ignore[method-assign]
+
+    def restore(self) -> None:
+        if self.had_instance:
+            self.event.set = self.saved  # type: ignore[method-assign]
+        else:
+            del self.event.set
+
+
+class _AsyncFutureWatch:
+    """One shared hook on a waiter future, with independent observers."""
+
+    def __init__(self, future: AsyncFuture[Any], event: AsyncEvent) -> None:
+        self.future = future
+        self.event = event
+        attributes = _instance_attributes(future)
+        self.had_instance = "set_result" in attributes
+        self.saved: Any = attributes.get("set_result")
+        self.original = future.set_result
+        self.deadlines: set[_SignalDeadline] = set()
+
+        def set_result(result: Any) -> None:
+            now = monotonic()
+            if _event_is_set(event):
+                with _async_future_lock:
+                    deadlines = tuple(self.deadlines)
+                for deadline in deadlines:
+                    deadline.record(now)
+            self.original(result)
+
+        future.set_result = set_result  # type: ignore[method-assign]
+
+    def restore(self) -> None:
+        if self.had_instance:
+            self.future.set_result = self.saved  # type: ignore[method-assign]
+        else:
+            del self.future.set_result
+
+
+def _instance_attributes(value: Any) -> dict[str, Any]:
+    return getattr(value, "__dict__", {})
+
+
+def _event_is_set(event: AsyncEvent) -> bool:
+    try:
+        return event.is_set()
+    except Exception:
+        return False
+
+
+def _watch_async_set(event: AsyncEvent, deadline: _SignalDeadline) -> None:
+    with _async_set_lock:
+        watch = _async_set_watches.get(id(event))
+        if watch is None:
+            watch = _AsyncSetWatch(event)
+            _async_set_watches[id(event)] = watch
+        watch.deadlines.add(deadline)
+
+
+def _unwatch_async_set(event: AsyncEvent, deadline: _SignalDeadline) -> None:
+    with _async_set_lock:
+        watch = _async_set_watches.get(id(event))
+        if watch is None:
+            return
+        watch.deadlines.discard(deadline)
+        if not watch.deadlines:
+            watch.restore()
+            del _async_set_watches[id(event)]
+
+
+def _watch_async_future(
+    future: AsyncFuture[Any], event: AsyncEvent, deadline: _SignalDeadline
+) -> None:
+    with _async_future_lock:
+        watch = _async_future_watches.get(id(future))
+        if watch is None:
+            watch = _AsyncFutureWatch(future, event)
+            _async_future_watches[id(future)] = watch
+        watch.deadlines.add(deadline)
+
+
+def _unwatch_async_future(future: AsyncFuture[Any], deadline: _SignalDeadline) -> bool:
+    """Remove one observer; return True when the future has no observers left."""
+    with _async_future_lock:
+        watch = _async_future_watches.get(id(future))
+        if watch is None:
+            return False
+        watch.deadlines.discard(deadline)
+        if not watch.deadlines:
+            watch.restore()
+            del _async_future_watches[id(future)]
+            return True
+        return False
 
 
 async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
@@ -384,59 +516,70 @@ async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
     loop = async_get_running_loop()
     if monotonic() >= cutoff:
         return False
+    deadline = _SignalDeadline(cutoff)
     timer: AsyncFuture[None] = loop.create_future()
     handle = loop.call_at(loop.time() + max(0.0, cutoff - monotonic()), timer.set_result, None)
-    delivered = False
-    wrapped: list[tuple[AsyncFuture[Any], Any]] = []
-    waiter: Any = None
-
-    def watch_waiters() -> None:
-        for candidate in _async_event_graph(event):
-            for future in tuple(getattr(candidate, "_waiters", ())):
-                if not isinstance(future, AsyncFuture) or any(
-                    future is item[0] for item in wrapped
-                ):
-                    continue
-                original = future.set_result
-
-                def set_result(result: Any, original: Any = original) -> None:
-                    nonlocal delivered
-                    if monotonic() < cutoff:
-                        delivered = True
-                    original(result)
-
-                future.set_result = set_result  # type: ignore[method-assign]
-                wrapped.append((future, original))
-
-    def on_waiter_done(task: Any) -> None:
-        nonlocal delivered
-        if task.cancelled() or task.exception() is not None:
-            return
-        if task.result() and monotonic() < cutoff:
-            delivered = True
-
+    coro: Any = None
+    child: asyncio.Task[Any] | None = None
+    future: AsyncFuture[Any] | None = None
+    resumed = False
     try:
-        # Run the public wait() as a task so subclasses may suspend any number
-        # of times, including through sleep(0) or a delegated Task.
-        waiter = loop.create_task(event.wait())
-        waiter.add_done_callback(on_waiter_done)
-        for _ in range(4):
-            await async_sleep(0)
-            watch_waiters()
-            if wrapped or waiter.done():
-                break
-        await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
-        if waiter.done() and not waiter.cancelled():
-            if waiter.result() and not delivered and monotonic() < cutoff:
-                delivered = True
-        return delivered
+        if type(event) is asyncio.Event:
+            # The built-in Event.wait() always suspends once on a registered
+            # future. Driving it directly registers that waiter before yielding.
+            coro = event.wait()
+            try:
+                awaited = coro.send(None)
+            except StopIteration as stop:
+                resumed = True
+                if stop.value:
+                    deadline.record(monotonic())
+                return deadline.signalled_at is not None
+            future = cast(AsyncFuture[Any], awaited)
+            _watch_async_future(future, event, deadline)
+            await async_wait((future, timer), return_when=FIRST_COMPLETED)
+            if future.done() and not future.cancelled():
+                resumed = True
+                try:
+                    coro.send(None)
+                except StopIteration:
+                    pass
+            return deadline.signalled_at is not None
+
+        # Subclasses own their suspension sequence, so only their public set()
+        # is treated as verified cancellation; nested gates are not signals.
+        _watch_async_set(event, deadline)
+
+        def on_waiter_done(task: asyncio.Task[Any]) -> None:
+            if task.cancelled() or task.exception() is not None:
+                return
+            if task.result() and _event_is_set(event):
+                deadline.record(monotonic())
+
+        child = loop.create_task(event.wait())
+        child.add_done_callback(on_waiter_done)
+        await async_wait((child, timer), return_when=FIRST_COMPLETED)
+        if child.done() and not child.cancelled():
+            if child.result() and deadline.signalled_at is None and _event_is_set(event):
+                deadline.record(monotonic())
+        return deadline.signalled_at is not None
     finally:
         handle.cancel()
-        for future, original in wrapped:
-            future.set_result = original  # type: ignore[method-assign]
-        if waiter is not None and not waiter.done():
-            waiter.cancel()
-            waiter.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        _unwatch_async_set(event, deadline)
+        if future is not None:
+            last_observer = _unwatch_async_future(future, deadline)
+            # A future shared by overlapping waits belongs to the remaining
+            # observers until the last one leaves.
+            if last_observer:
+                if future.done() and not future.cancelled():
+                    future.exception()
+                else:
+                    future.cancel()
+        if coro is not None and not resumed:
+            coro.close()
+        if child is not None and not child.done():
+            child.cancel()
+            await asyncio.gather(child, return_exceptions=True)
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -891,9 +1034,9 @@ class ProoflineClient(Operations):
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if _invalid_response(error):
-                        raise
                     if _cancelled(cancel_event):
+                        if _invalid_response(error):
+                            raise
                         return _stopped(url, last, review_id, head_commit_sha)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
@@ -1295,9 +1438,9 @@ class AsyncProoflineClient(AsyncOperations):
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if _invalid_response(error):
-                        raise
                     if _cancelled(cancel_event):
+                        if _invalid_response(error):
+                            raise
                         return _stopped(url, last, review_id, head_commit_sha)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
