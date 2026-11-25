@@ -82,7 +82,7 @@ from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
-from .outcomes import ReviewOutcome, _validate, outcome
+from .outcomes import ReviewOutcome, outcome
 
 T = TypeVar("T")
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
@@ -203,123 +203,202 @@ class _SignalDeadline:
     def __init__(self, end: float) -> None:
         self.end = end
         self.signalled_at: float | None = None
+        self.conditions: tuple[threading.Condition, ...] = ()
 
     def record(self, now: float) -> None:
         if self.signalled_at is None and now < self.end:
             self.signalled_at = now
 
 
-class _NotifyAllTracker:
-    def __init__(self, condition: Any) -> None:
+class _ConditionSignalTracker:
+    def __init__(self, condition: threading.Condition) -> None:
         self.condition = condition
-        self.original = condition.notify_all
+        self.original_notify_all = condition.notify_all
+        self.original_notify = condition.notify
         self.deadlines: set[_SignalDeadline] = set()
-        condition.notify_all = self.notify_all
+        condition.notify_all = self.notify_all  # type: ignore[method-assign]
+        condition.notify = self.notify  # type: ignore[method-assign]
 
-    def notify_all(self) -> None:
+    def record(self) -> None:
         now = monotonic()
         with _notify_lock:
             deadlines = tuple(self.deadlines)
         for deadline in deadlines:
             deadline.record(now)
-        self.original()
+
+    def notify_all(self) -> None:
+        self.record()
+        self.original_notify_all()
+
+    def notify(self, *args: Any, **kwargs: Any) -> None:
+        self.record()
+        self.original_notify(*args, **kwargs)
 
 
 _notify_lock = threading.Lock()
-_notify_trackers: dict[int, _NotifyAllTracker] = {}
+_notify_trackers: dict[int, _ConditionSignalTracker] = {}
 
 
-def _track_thread_signal(event: threading.Event, end: float) -> _SignalDeadline:
-    deadline = _SignalDeadline(end)
-    condition = getattr(event, "_cond", None)
-    if not isinstance(condition, threading.Condition):
-        return deadline
-    key = id(condition)
+def _thread_conditions(event: threading.Event) -> tuple[threading.Condition, ...]:
+    conditions: list[threading.Condition] = []
+    seen: set[int] = set()
+    candidates = [getattr(event, "_cond", None), *vars(event).values()]
+    for candidate in candidates:
+        if isinstance(candidate, threading.Condition) and id(candidate) not in seen:
+            seen.add(id(candidate))
+            conditions.append(candidate)
+    return tuple(conditions)
+
+
+def _track_thread_signal(event: threading.Event, deadline: _SignalDeadline) -> _SignalDeadline:
+    deadline.conditions = _thread_conditions(event)
     with _notify_lock:
-        tracker = _notify_trackers.get(key)
-        if tracker is None:
-            tracker = _NotifyAllTracker(condition)
-            _notify_trackers[key] = tracker
-        tracker.deadlines.add(deadline)
+        for condition in deadline.conditions:
+            key = id(condition)
+            tracker = _notify_trackers.get(key)
+            if tracker is None:
+                tracker = _ConditionSignalTracker(condition)
+                _notify_trackers[key] = tracker
+            tracker.deadlines.add(deadline)
     return deadline
 
 
 def _untrack_thread_signal(event: threading.Event, deadline: _SignalDeadline) -> None:
-    condition = getattr(event, "_cond", None)
-    if not isinstance(condition, threading.Condition):
-        return
     with _notify_lock:
-        tracker = _notify_trackers.get(id(condition))
-        if tracker is None:
-            return
-        tracker.deadlines.discard(deadline)
-        if not tracker.deadlines:
-            tracker.condition.notify_all = tracker.original
-            del _notify_trackers[id(condition)]
+        for condition in deadline.conditions:
+            key = id(condition)
+            tracker = _notify_trackers.get(key)
+            if tracker is None:
+                continue
+            tracker.deadlines.discard(deadline)
+            if not tracker.deadlines:
+                tracker.condition.notify_all = tracker.original_notify_all  # type: ignore[method-assign]
+                tracker.condition.notify = tracker.original_notify  # type: ignore[method-assign]
+                del _notify_trackers[key]
 
 
 def _cancelled(event: threading.Event | AsyncEvent | None) -> bool:
     return event is not None and event.is_set()
 
 
-def _stopped(url: str, last: CustomerReviewDetail | None, review_id: UUID) -> ReviewOutcome:
-    """Build a STOPPED outcome, validating any review it carries."""
-    if last is not None:
-        _validate(last, review_id)
-    return ReviewOutcome("STOPPED", url, last, reason=_CANCEL_REASON)
+def _stopped(
+    url: str,
+    last: CustomerReviewDetail | None,
+    review_id: UUID,
+    head_commit_sha: str | None = None,
+) -> ReviewOutcome:
+    """Build a STOPPED outcome, validating any review and keeping its gaps."""
+    if last is None:
+        return ReviewOutcome("STOPPED", url, reason=_CANCEL_REASON)
+    result = outcome(
+        last,
+        url,
+        "STOPPED",
+        review_id=review_id,
+        head_commit_sha=head_commit_sha,
+    )
+    assert result is not None
+    return ReviewOutcome("STOPPED", url, last, result.gaps, _CANCEL_REASON)
 
 
-def _wait_for_event(event: threading.Event, timeout: float) -> bool:
+def _wait_for_event(
+    event: threading.Event, timeout: float, deadline: _SignalDeadline | None = None
+) -> bool:
     """Return True when the event woke the wait, False when it timed out."""
-    return event.wait(timeout)
+    if deadline is None:
+        return event.wait(timeout)
+    conditions = deadline.conditions
+    if conditions:
+        # Install the tracker and check the flag under the same condition lock,
+        # so a set/clear between the check and waiter registration is recorded.
+        with conditions[0]:
+            _track_thread_signal(event, deadline)
+            if deadline.signalled_at is not None:
+                return True
+            if getattr(event, "_flag", False) is True:
+                deadline.record(monotonic())
+                return True
+    now = monotonic()
+    remaining = min(timeout, deadline.end - now)
+    if remaining <= 0:
+        return False
+    woke = event.wait(remaining)
+    if woke and deadline.signalled_at is None:
+        # A subclass may notify through a primitive we cannot observe. A
+        # successful wait is evidence that its signal reached the wait primitive
+        # after this call began, which is before the absolute cutoff.
+        deadline.record(now)
+    return woke
 
 
 async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
     """Return True when the event is signalled before cutoff, False on timeout."""
     loop = async_get_running_loop()
+    if monotonic() >= cutoff:
+        return False
     timer: AsyncFuture[None] = loop.create_future()
-    delivered = event.is_set() and monotonic() < cutoff
     handle = loop.call_at(loop.time() + max(0.0, cutoff - monotonic()), timer.set_result, None)
-
-    # Drive the built-in Event.wait coroutine so subclasses cannot override the
-    # wait primitive or leave a task behind when they suppress cancellation.
-    waiter = AsyncEvent.wait(event)
-    try:
-        future = cast(AsyncFuture[bool], waiter.send(None))
-    except StopIteration as stop:
-        handle.cancel()
-        return bool(stop.value) and monotonic() < cutoff
-
-    original_set_result = future.set_result
-
-    def set_result(result: bool) -> None:
-        nonlocal delivered
-        if monotonic() < cutoff:
-            delivered = True
-        original_set_result(result)
-
-    future.set_result = set_result  # type: ignore[method-assign]
+    delivered = event.is_set() and monotonic() < cutoff
+    waiter: Any = None
+    future: AsyncFuture[Any] | None = None
+    original_set_result: Any = None
+    started = False
     resumed = False
     try:
+        # Drive the event's public wait() coroutine directly. It honors
+        # subclasses that delegate to a backing event while still letting us
+        # observe the future that carries the signal.
+        waiter = event.wait()
+        started = True
+        try:
+            awaited = waiter.send(None)
+        except StopIteration as stop:
+            resumed = True
+            if stop.value and monotonic() < cutoff:
+                delivered = True
+            return delivered
+        except BaseException:
+            # A coroutine that raises during startup is already closed.
+            resumed = True
+            raise
+        future = cast(AsyncFuture[Any], awaited)
+        original_set_result = future.set_result
+
+        def set_result(result: Any) -> None:
+            nonlocal delivered
+            if monotonic() < cutoff:
+                delivered = True
+            original_set_result(result)
+
+        future.set_result = set_result  # type: ignore[method-assign]
         await async_wait((future, timer), return_when=FIRST_COMPLETED)
-        if future.done() and not future.cancelled():
+        if future.done():
+            # Mark this before resuming: a failed send closes the coroutine, and
+            # cleanup must not throw into it again.
+            resumed = True
             try:
                 waiter.send(None)
-            except StopIteration:
+            except (StopIteration, AsyncCancelledError):
                 pass
-            resumed = True
         return delivered
     finally:
         handle.cancel()
-        future.set_result = original_set_result  # type: ignore[method-assign]
-        if not resumed:
-            if not future.done():
-                future.cancel()
-            try:
-                waiter.throw(AsyncCancelledError())
-            except (StopIteration, AsyncCancelledError):
-                pass
-        waiter.close()
+        if future is not None and original_set_result is not None:
+            future.set_result = original_set_result  # type: ignore[method-assign]
+        if waiter is not None:
+            if started and not resumed:
+                if future is not None and not future.done():
+                    future.cancel()
+                try:
+                    waiter.throw(AsyncCancelledError())
+                except (StopIteration, AsyncCancelledError):
+                    pass
+            if future is not None and future.done() and not future.cancelled():
+                try:
+                    future.exception()
+                except AsyncCancelledError:
+                    pass
+            waiter.close()
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -335,17 +414,26 @@ def _sleep_with_cancel(
         sleep(delay)
         return True
     end = _cancel_end(delay, cutoff)
-    deadline = _track_thread_signal(event, end)
+    deadline = _track_thread_signal(event, _SignalDeadline(end))
     try:
         while True:
             if deadline.signalled_at is not None:
                 return False
-            if monotonic() >= end:
+            now = monotonic()
+            if now >= end:
                 return True
             if _cancelled(event):
-                return False
-            if _wait_for_event(event, end - monotonic()):
+                # Read the flag before the final cutoff check: a signal at or
+                # after the cutoff cannot turn a timeout into a stop.
+                if monotonic() < end:
+                    deadline.record(monotonic())
+                    return False
+                return True
+            if not _wait_for_event(event, end - now, deadline):
                 if deadline.signalled_at is not None:
+                    return False
+                if monotonic() < end and _cancelled(event):
+                    deadline.record(monotonic())
                     return False
                 return True
     finally:
@@ -360,11 +448,8 @@ async def _async_sleep_with_cancel(
         return True
     end = _cancel_end(delay, cutoff)
     while True:
-        if _cancelled(event):
-            return False
-        remaining = end - monotonic()
-        if remaining <= 0:
-            return not _cancelled(event)
+        if monotonic() >= end:
+            return True
         if await _async_wait_for_event(event, end):
             return False
         if monotonic() >= end:
@@ -752,7 +837,7 @@ class ProoflineClient(Operations):
             raise TypeError("cancel_event must be a threading.Event.")
         url = _review_url(self._base_url, organization_id, review_id)
         if _cancelled(cancel_event):
-            return _stopped(url, None, review_id)
+            return _stopped(url, None, review_id, head_commit_sha)
         last: CustomerReviewDetail | None = None
         deadline_at = monotonic() + timeout
         deadline = _transport.DEADLINE.set(deadline_at)
@@ -760,17 +845,17 @@ class ProoflineClient(Operations):
         try:
             while (_transport.remaining() or 0) > 0:
                 if _cancelled(cancel_event):
-                    return _stopped(url, last, review_id)
+                    return _stopped(url, last, review_id, head_commit_sha)
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
                     if _cancelled(cancel_event):
-                        return _stopped(url, last, review_id)
+                        return _stopped(url, last, review_id, head_commit_sha)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
                 if _cancelled(cancel_event):
-                    return _stopped(url, last, review_id)
+                    return _stopped(url, last, review_id, head_commit_sha)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
@@ -778,10 +863,10 @@ class ProoflineClient(Operations):
                     return result
                 remaining = _transport.remaining() or 0
                 if not _sleep_with_cancel(min(interval, remaining), cancel_event, deadline_at):
-                    return _stopped(url, last, review_id)
+                    return _stopped(url, last, review_id, head_commit_sha)
                 interval = min(60, interval * 2)
             if (_transport.remaining() or 0) > 0 and _cancelled(cancel_event):
-                return _stopped(url, last, review_id)
+                return _stopped(url, last, review_id, head_commit_sha)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
@@ -1154,7 +1239,7 @@ class AsyncProoflineClient(AsyncOperations):
             raise TypeError("cancel_event must be an asyncio.Event.")
         url = _review_url(self._base_url, organization_id, review_id)
         if _cancelled(cancel_event):
-            return _stopped(url, None, review_id)
+            return _stopped(url, None, review_id, head_commit_sha)
         last: CustomerReviewDetail | None = None
         deadline_at = monotonic() + timeout
         deadline = _transport.DEADLINE.set(deadline_at)
@@ -1162,17 +1247,17 @@ class AsyncProoflineClient(AsyncOperations):
         try:
             while (_transport.remaining() or 0) > 0:
                 if _cancelled(cancel_event):
-                    return _stopped(url, last, review_id)
+                    return _stopped(url, last, review_id, head_commit_sha)
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
                     if _cancelled(cancel_event):
-                        return _stopped(url, last, review_id)
+                        return _stopped(url, last, review_id, head_commit_sha)
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
                 if _cancelled(cancel_event):
-                    return _stopped(url, last, review_id)
+                    return _stopped(url, last, review_id, head_commit_sha)
                 if (_transport.remaining() or 0) <= 0:
                     break
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
@@ -1182,10 +1267,10 @@ class AsyncProoflineClient(AsyncOperations):
                 if not await _async_sleep_with_cancel(
                     min(interval, remaining), cancel_event, deadline_at
                 ):
-                    return _stopped(url, last, review_id)
+                    return _stopped(url, last, review_id, head_commit_sha)
                 interval = min(60, interval * 2)
             if (_transport.remaining() or 0) > 0 and _cancelled(cancel_event):
-                return _stopped(url, last, review_id)
+                return _stopped(url, last, review_id, head_commit_sha)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
