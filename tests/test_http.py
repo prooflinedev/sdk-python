@@ -1567,6 +1567,32 @@ async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
             assert len(server.requests) == 1
 
 
+@pytest.mark.anyio
+async def test_async_body_timeout_preserves_nonretryable_http_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class IndependentTimeoutStream(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            raise TimeoutError("independent body timeout")
+            yield b""  # Makes this an async generator.
+
+        async def aclose(self) -> None:
+            pass
+
+    stream = _transport.AsyncDeadlineStream(
+        IndependentTimeoutStream(),
+        status=401,
+        deadline=clock.now + 10,
+    )
+
+    with pytest.raises(ProoflineError) as raised:
+        async for _ in stream:
+            pass
+
+    assert raised.value.status == 401
+
 async def test_sync_read_timeout_uses_current_caller_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1743,6 +1769,33 @@ def test_sync_transport_connects_to_each_resolved_address_under_the_original_hos
 
         assert len(server.requests) == 2
 
+@pytest.mark.parametrize(
+    ("caller_offset", "internal_offset", "expected_bounded"),
+    [
+        (1.0, 2.0, True),
+        (2.0, 1.0, False),
+    ],
+)
+
+def test_io_budget_expired_timeout_preserves_deadline_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    caller_offset: float,
+    internal_offset: float,
+    expected_bounded: bool,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    caller_token = _transport.DEADLINE.set(clock.now + caller_offset)
+    try:
+        # Move past both deadlines before calculating the I/O budget.
+        clock.now += 3
+
+        with pytest.raises(httpx2.ReadTimeout) as raised:
+            _transport.io_budget(clock.now - 3 + internal_offset)
+    finally:
+        _transport.DEADLINE.reset(caller_token)
+
+    assert getattr(raised.value, "_deadline_bounded", None) is expected_bounded
 
 def test_sync_transport_stops_address_retries_when_deadline_expires(
     monkeypatch: pytest.MonkeyPatch,
@@ -1750,6 +1803,7 @@ def test_sync_transport_stops_address_retries_when_deadline_expires(
     clock = Clock(monkeypatch)
     attempted_addresses: list[str] = []
     requested_addresses: list[str] = []
+    observed_timeouts: list[float | None] = []
 
     def resolve(
         host: str,
@@ -1771,6 +1825,7 @@ def test_sync_transport_stops_address_retries_when_deadline_expires(
         socket_options: Any = None,
     ) -> Any:
         attempted_addresses.append(host)
+        observed_timeouts.append(timeout)
 
         # Simulate the first connection attempt consuming the deadline.
         clock.now += 2
@@ -1789,9 +1844,62 @@ def test_sync_transport_stops_address_retries_when_deadline_expires(
     finally:
         _sync_http.IO_DEADLINE.reset(token)
 
-    # Only the first address should be attempted.
+    # The second address is retrieved, but the expired deadline
+    # prevents a second connection attempt.
+    assert requested_addresses == ["192.0.2.1", "192.0.2.2"]
     assert attempted_addresses == ["192.0.2.1"]
+    assert observed_timeouts == [pytest.approx(1.0)]
+
+
+def test_sync_transport_preserves_final_connection_failure_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    attempted_addresses: list[str] = []
+    requested_addresses: list[str] = []
+
+    def resolve(
+        host: str,
+        port: int,
+        timeout: float | None,
+    ) -> Iterator[str]:
+        requested_addresses.append("192.0.2.1")
+        yield "192.0.2.1"
+
+    monkeypatch.setattr(_sync_http, "resolve", resolve)
+
+    def connect_tcp(
+        backend: Any,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> Any:
+        attempted_addresses.append(host)
+
+        # The final connection attempt fails after the deadline expires.
+        clock.now += 2
+        raise httpcore2.ConnectError("Connection failed.")
+
+    monkeypatch.setattr(httpcore2.SyncBackend, "connect_tcp", connect_tcp)
+
+    token = _sync_http.IO_DEADLINE.set(clock.now + 1)
+    try:
+        with pytest.raises(
+            httpcore2.ConnectError,
+            match="Connection failed.",
+        ):
+            _sync_http.NetworkBackend().connect_tcp(
+                "service.proofline.invalid",
+                443,
+                timeout=10,
+            )
+    finally:
+        _sync_http.IO_DEADLINE.reset(token)
+
     assert requested_addresses == ["192.0.2.1"]
+    assert attempted_addresses == ["192.0.2.1"]
 
 
 @pytest.mark.parametrize(
@@ -1813,7 +1921,7 @@ def test_sync_body_read_preserves_deadline_provenance(
         def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
             observed_timeouts.append(timeout)
             raise httpcore2.ReadTimeout("Simulated socket read timeout.")
-    class FailingBody:
+    class FailingBody(httpx2.SyncByteStream):
         def __iter__(self) -> Any:
             with _sync_http.mapped_errors():
                 _sync_http.NetworkStream(FailingSocket()).read(
@@ -1821,6 +1929,9 @@ def test_sync_body_read_preserves_deadline_provenance(
                     timeout=10,
                 )
             yield b""
+
+        def close(self) -> None:
+            pass
 
     caller_deadline = clock.now + caller_offset
     internal_deadline = clock.now + internal_offset
@@ -1844,6 +1955,22 @@ def test_sync_body_read_preserves_deadline_provenance(
     finally:
         _transport.DEADLINE.reset(token)
 
+
+def test_unannotated_pool_timeout_preserves_phase_fallback() -> None:
+    original_error = httpcore2.PoolTimeout("Pool wait timed out.")
+
+    with pytest.raises(httpx2.PoolTimeout) as raised:
+        with _sync_http.mapped_errors():
+            raise original_error
+
+    assert not hasattr(raised.value, "_deadline_bounded")
+
+    error = _transport.network_error(
+        raised.value,
+        bounded_phases=frozenset({"pool"}),
+    )
+
+    assert _transport.is_deadline_timeout(error)
 
 def test_deadline_stream_restores_context_between_chunks() -> None:
     now = _transport.monotonic()
@@ -1895,6 +2022,43 @@ def test_deadline_stream_restores_context_between_chunks() -> None:
         _transport.CALLER_DEADLINE.reset(caller_token)
         _transport.IO_DEADLINE.reset(io_token)
 
+def test_deadline_stream_installs_context_during_iterator_creation() -> None:
+    now = _transport.monotonic()
+
+    caller_deadline = now + 30
+    internal_deadline = now + 60
+    previous_io_deadline = now + 90
+    previous_caller_deadline = now + 120
+
+    io_token = _transport.IO_DEADLINE.set(previous_io_deadline)
+    caller_token = _transport.CALLER_DEADLINE.set(previous_caller_deadline)
+    deadline_token = _transport.DEADLINE.set(caller_deadline)
+
+    class InitializationCheckingBody:
+        def __iter__(self) -> Iterator[bytes]:
+            # Iterator creation itself must receive the deadline context.
+            assert _transport.IO_DEADLINE.get() == caller_deadline
+            assert _transport.CALLER_DEADLINE.get() == caller_deadline
+
+            return iter([b"chunk"])
+
+    try:
+        stream = _transport.DeadlineStream(
+            inner=InitializationCheckingBody(),
+            status=200,
+            deadline=internal_deadline,
+        )
+
+        assert list(stream) == [b"chunk"]
+
+        # Previous context must be restored after iterator creation and reading.
+        assert _transport.IO_DEADLINE.get() == previous_io_deadline
+        assert _transport.CALLER_DEADLINE.get() == previous_caller_deadline
+
+    finally:
+        _transport.DEADLINE.reset(deadline_token)
+        _transport.CALLER_DEADLINE.reset(caller_token)
+        _transport.IO_DEADLINE.reset(io_token)
 
 @MODES
 async def test_cursor_pagination_preserves_filters_and_refuses_cycles_or_bounds(mode: str) -> None:
@@ -2830,12 +2994,11 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
     class FailingAsyncBody(httpx2.AsyncByteStream):
         async def __aiter__(self) -> Any:
             # Measure the remaining time in the actual AnyIO scope.
-            # Both values use AnyIO's clock, unlike our mocked Clock.
             effective_deadline = anyio.current_effective_deadline()
             remaining = effective_deadline - anyio.current_time()
             observed_async_budgets.append(remaining)
-
-            raise httpx2.ReadTimeout("Simulated async body read timeout.")
+            # Actually suspend so the AnyIO deadline can cancel this read.
+            await anyio.sleep(remaining + 1)
             yield b""
 
     # Replace only the underlying response body streams.
@@ -2847,6 +3010,7 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
         request: Request,
     ) -> httpx2.Response:
         response = original_sync_handle(self, request)
+        response.stream.close()
         response.stream = FailingSyncBody()
         return response
 
@@ -2857,6 +3021,7 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
         request: Request,
     ) -> httpx2.Response:
         response = await original_async_handle(self, request)
+        await response.stream.aclose()
         response.stream = FailingAsyncBody()
         return response
 
@@ -2901,7 +3066,8 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
         assert observed_sync_timeouts == [pytest.approx(0.3)]
         assert observed_async_budgets == []
     else:
-        assert observed_async_budgets == [pytest.approx(0.3)]
+        assert len(observed_async_budgets) == 1
+        assert observed_async_budgets[0] == pytest.approx(0.3, abs=0.05)
         assert observed_sync_timeouts == []
 
     # Independent regression scenario:

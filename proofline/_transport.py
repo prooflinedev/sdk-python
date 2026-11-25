@@ -455,11 +455,19 @@ def io_deadline(deadline: float) -> float:
     return deadline if caller is None else min(deadline, caller)
 
 
+
 def io_budget(deadline: float) -> float:
+    caller = DEADLINE.get()
+    caller_bounded = caller is not None and caller <= deadline
+
     budget = io_deadline(deadline) - monotonic()
     if budget <= 0:
-        raise httpx2.ReadTimeout("The request deadline expired.")
+        error = httpx2.ReadTimeout("The request deadline expired.")
+        setattr(error, "_deadline_bounded", caller_bounded)
+        raise error
+
     return budget
+
 
 
 class DeadlineStream(httpx2.SyncByteStream):
@@ -481,7 +489,16 @@ class DeadlineStream(httpx2.SyncByteStream):
         bounded = frozenset({"read"}) if self._read_bounded else frozenset()
 
         try:
-            iterator = iter(self._inner)
+            # Install deadline context while creating the iterator too.
+            deadline_token = IO_DEADLINE.set(io_deadline(self._deadline))
+            caller_token = CALLER_DEADLINE.set(DEADLINE.get())
+
+            try:
+                iterator = iter(self._inner)
+            finally:
+                CALLER_DEADLINE.reset(caller_token)
+                IO_DEADLINE.reset(deadline_token)
+
             while True:
                 # Set deadline context only while fetching the next chunk.
                 deadline_token = IO_DEADLINE.set(io_deadline(self._deadline))
@@ -572,14 +589,17 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
                 break
 
             except TimeoutError:
+                # Preserve non-retryable HTTP failures even if
+                # reading their response body raises a timeout.
+                if not (200 <= self._status < 300 or self._status in (429, 503)):
+                    raise unreadable_problem(self._status) from None
+
                 # Only classify this as our deadline timeout if
                 # this particular AnyIO scope caught the cancellation.
                 # An unrelated TimeoutError must remain unchanged.
+
                 if not scope.cancelled_caught:
                     raise
-
-                if not (200 <= self._status < 300 or self._status in (429, 503)):
-                    raise unreadable_problem(self._status) from None
 
                 raise timeout_error(
                     deadline_bounded=scope_caller_bounded,

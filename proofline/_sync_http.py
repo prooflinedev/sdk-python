@@ -197,15 +197,17 @@ class NetworkBackend(httpcore2.SyncBackend):
             raise
 
         while True:
-            address_timeout, caller_bounded = bounded_timeout_with_provenance(
-                timeout,
-                httpcore2.ConnectTimeout,
-            )
-
+            # First check whether another IP address is available.
             try:
                 address = next(addresses)
             except StopIteration:
                 break
+
+            # Only calculate the deadline if there is an address to try.
+            address_timeout, caller_bounded = bounded_timeout_with_provenance(
+                timeout,
+                httpcore2.ConnectTimeout,
+            )
 
             try:
                 stream = super().connect_tcp(
@@ -237,11 +239,11 @@ def mapped_errors() -> Iterator[None]:
         )
 
         mapped_error = mapped_cls("The request deadline expired.")
-        setattr(
-            mapped_error,
-            "_deadline_bounded",
-            getattr(error, "_deadline_bounded", False),
-        )
+
+        deadline_bounded = getattr(error, "_deadline_bounded", None)
+        if deadline_bounded is not None:
+            setattr(mapped_error, "_deadline_bounded", deadline_bounded)
+
         raise mapped_error from None
 
     except (httpcore2.NetworkError, httpcore2.ProtocolError):
