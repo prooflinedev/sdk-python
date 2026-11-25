@@ -36,19 +36,42 @@ _CORE_TIMEOUT_MAP: tuple[
 )
 
 
+def bounded_timeout_with_provenance(
+    timeout: float | None,
+    timeout_exc: type[httpcore2.TimeoutException] = httpcore2.ReadTimeout,
+) -> tuple[float | None, bool]:
+    """Calculate the I/O timeout and whether the caller deadline bounds it."""
+    deadline = IO_DEADLINE.get()
+    if deadline is None:
+        return timeout, False
+
+    caller = CALLER_DEADLINE.get()
+    remaining = deadline - monotonic()
+
+    caller_bounded = (
+        caller is not None and caller <= deadline and (timeout is None or remaining <= timeout)
+    )
+
+    if remaining <= 0:
+        error = timeout_exc("The request deadline expired.")
+        setattr(error, "_deadline_bounded", caller_bounded)
+        raise error
+
+    enforced_timeout = remaining if timeout is None else min(timeout, remaining)
+    return enforced_timeout, caller_bounded
+
+
 def bounded_timeout(
     timeout: float | None,
     timeout_exc: type[httpcore2.TimeoutException] = httpcore2.ReadTimeout,
 ) -> float | None:
-    deadline = IO_DEADLINE.get()
-    if deadline is None:
-        return timeout
+    enforced_timeout, _ = bounded_timeout_with_provenance(timeout, timeout_exc)
+    return enforced_timeout
 
-    remaining = deadline - monotonic()
-    if remaining <= 0:
-        raise timeout_exc("The request deadline expired.")
 
-    return remaining if timeout is None else min(timeout, remaining)
+def read_budget(timeout: float | None) -> tuple[float | None, bool]:
+    """Calculate the socket read budget and its caller-deadline provenance."""
+    return bounded_timeout_with_provenance(timeout, httpcore2.ReadTimeout)
 
 
 class Lookup:
@@ -101,33 +124,25 @@ class NetworkStream(httpcore2.NetworkStream):
         self._inner = inner
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        deadline = IO_DEADLINE.get()
-        caller = CALLER_DEADLINE.get()
-
-        remaining = None if deadline is None else deadline - monotonic()
-
-        caller_bounded = (
-            caller is not None
-            and deadline is not None
-            and caller <= deadline
-            and remaining is not None
-            and (timeout is None or remaining <= timeout)
-        )
+        enforced_timeout, caller_bounded = read_budget(timeout)
 
         try:
-            return self._inner.read(
-                max_bytes,
-                bounded_timeout(timeout, httpcore2.ReadTimeout),
-            )
+            return self._inner.read(max_bytes, enforced_timeout)
         except httpcore2.ReadTimeout as error:
             setattr(error, "_deadline_bounded", caller_bounded)
             raise
 
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        self._inner.write(
-            buffer,
-            bounded_timeout(timeout, httpcore2.WriteTimeout),
+        enforced_timeout, caller_bounded = bounded_timeout_with_provenance(
+            timeout,
+            httpcore2.WriteTimeout,
         )
+
+        try:
+            self._inner.write(buffer, enforced_timeout)
+        except httpcore2.WriteTimeout as error:
+            setattr(error, "_deadline_bounded", caller_bounded)
+            raise
 
     def close(self) -> None:
         self._inner.close()
@@ -138,13 +153,22 @@ class NetworkStream(httpcore2.NetworkStream):
         server_hostname: str | None = None,
         timeout: float | None = None,
     ) -> httpcore2.NetworkStream:
-        return NetworkStream(
-            self._inner.start_tls(
+        enforced_timeout, caller_bounded = bounded_timeout_with_provenance(
+            timeout,
+            httpcore2.ConnectTimeout,
+        )
+
+        try:
+            stream = self._inner.start_tls(
                 ssl_context,
                 server_hostname,
-                bounded_timeout(timeout, httpcore2.ConnectTimeout),
+                enforced_timeout,
             )
-        )
+        except httpcore2.ConnectTimeout as error:
+            setattr(error, "_deadline_bounded", caller_bounded)
+            raise
+
+        return NetworkStream(stream)
 
     def get_extra_info(self, info: str) -> Any:
         return self._inner.get_extra_info(info)
@@ -160,13 +184,28 @@ class NetworkBackend(httpcore2.SyncBackend):
         socket_options: Iterable[Any] | None = None,
     ) -> httpcore2.NetworkStream:
         failure: httpcore2.ConnectError | httpcore2.ConnectTimeout | None = None
-        connect_timeout = bounded_timeout(timeout, httpcore2.ConnectTimeout)
 
-        for address in resolve(host, port, connect_timeout):
-            # Calculate this outside the try block so an expired shared
-            # deadline escapes instead of being treated as a retryable
-            # connection failure for the next address.
-            address_timeout = bounded_timeout(timeout, httpcore2.ConnectTimeout)
+        connect_timeout, lookup_caller_bounded = bounded_timeout_with_provenance(
+            timeout,
+            httpcore2.ConnectTimeout,
+        )
+
+        try:
+            addresses = iter(resolve(host, port, connect_timeout))
+        except httpcore2.ConnectTimeout as error:
+            setattr(error, "_deadline_bounded", lookup_caller_bounded)
+            raise
+
+        while True:
+            address_timeout, caller_bounded = bounded_timeout_with_provenance(
+                timeout,
+                httpcore2.ConnectTimeout,
+            )
+
+            try:
+                address = next(addresses)
+            except StopIteration:
+                break
 
             try:
                 stream = super().connect_tcp(
@@ -176,7 +215,10 @@ class NetworkBackend(httpcore2.SyncBackend):
                     local_address,
                     socket_options,
                 )
-            except (httpcore2.ConnectError, httpcore2.ConnectTimeout) as error:
+            except httpcore2.ConnectTimeout as error:
+                setattr(error, "_deadline_bounded", caller_bounded)
+                failure = error
+            except httpcore2.ConnectError as error:
                 failure = error
             else:
                 return NetworkStream(stream)

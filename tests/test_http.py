@@ -14,7 +14,7 @@ import threading
 import time
 import tomllib
 import traceback
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
+import anyio
 import httpcore2
 import httpx2
 import pytest
@@ -1566,6 +1567,47 @@ async def test_body_stream_deadline_does_not_turn_authority_into_timeout(
             assert len(server.requests) == 1
 
 
+async def test_sync_read_timeout_uses_current_caller_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as patch:
+        clock = Clock(patch)
+        original_read = _sync_http.NetworkStream.read
+        read_started = False
+
+        def advance_before_read(
+            stream: _sync_http.NetworkStream,
+            max_bytes: int,
+            timeout: float | None = None,
+        ) -> bytes:
+            nonlocal read_started
+            if not read_started:
+                read_started = True
+                clock.now += 0.005
+            return original_read(stream, max_bytes, timeout)
+
+        patch.setattr(_sync_http.NetworkStream, "read", advance_before_read)
+
+        with Server(lambda request, index: Reply(body=review(), header_pause=0.1)) as server:
+            async with session("sync", server.url, timeout=0.01) as client:
+                # Keep the internal request deadline later than the caller deadline.
+                client._http._transport._timeout = 5
+
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=0.012,
+                )
+
+                assert read_started
+                assert clock.now == pytest.approx(100.005)
+                assert result.status == "TIMED_OUT"
+                assert result.review is None
+                assert result.review_url == (f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}")
+
+
 @MODES
 async def test_streaming_and_resolution_keep_deadline_outcomes_explicit(
     mode: str, monkeypatch: pytest.MonkeyPatch
@@ -1797,6 +1839,57 @@ def test_sync_body_read_preserves_deadline_provenance(
 
     finally:
         _transport.DEADLINE.reset(token)
+
+
+def test_deadline_stream_restores_context_between_chunks() -> None:
+    now = _transport.monotonic()
+
+    caller_deadline = now + 30
+    internal_deadline = now + 60
+    previous_io_deadline = now + 90
+    previous_caller_deadline = now + 120
+
+    io_token = _transport.IO_DEADLINE.set(previous_io_deadline)
+    caller_token = _transport.CALLER_DEADLINE.set(previous_caller_deadline)
+    deadline_token = _transport.DEADLINE.set(caller_deadline)
+
+    try:
+
+        def body() -> Iterator[bytes]:
+            # Deadline context must be active while fetching each chunk.
+            assert _transport.IO_DEADLINE.get() == caller_deadline
+            assert _transport.CALLER_DEADLINE.get() == caller_deadline
+
+            yield b"first"
+
+            # The context must be set again for the next read.
+            assert _transport.IO_DEADLINE.get() == caller_deadline
+            assert _transport.CALLER_DEADLINE.get() == caller_deadline
+
+            yield b"second"
+
+        stream = _transport.DeadlineStream(
+            inner=body(),
+            status=200,
+            deadline=internal_deadline,
+        )
+
+        received = []
+
+        for chunk in stream:
+            received.append(chunk)
+
+            # Once a chunk reaches the caller, both previous
+            # ContextVar values must already have been restored.
+            assert _transport.IO_DEADLINE.get() == previous_io_deadline
+            assert _transport.CALLER_DEADLINE.get() == previous_caller_deadline
+
+        assert received == [b"first", b"second"]
+
+    finally:
+        _transport.DEADLINE.reset(deadline_token)
+        _transport.CALLER_DEADLINE.reset(caller_token)
+        _transport.IO_DEADLINE.reset(io_token)
 
 
 @MODES
@@ -2713,75 +2806,102 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
     mode: str, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Clock(monkeypatch)
-    sync_iter = _transport.DeadlineStream.__iter__
-    async_aiter = _transport.AsyncDeadlineStream.__aiter__
+    observed_sync_timeouts: list[float | None] = []
+    observed_async_budgets: list[float] = []
 
-    def stalled_body() -> Any:
-        raise httpx2.ReadTimeout("stalled body read timeout")
-        yield b""
+    class FailingSocket:
+        def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            observed_sync_timeouts.append(timeout)
+            raise httpcore2.ReadTimeout("Simulated socket read timeout.")
 
-    async def stalled_async_body() -> Any:
-        raise httpx2.ReadTimeout("stalled body read timeout")
-        yield b""
+    class FailingSyncBody(httpx2.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            with _sync_http.mapped_errors():
+                _sync_http.NetworkStream(FailingSocket()).read(
+                    1024,
+                    timeout=10,
+                )
+            yield b""
 
-    def stalled_sync_iter(self: _transport.DeadlineStream) -> Any:
-        caller_deadline = _transport.DEADLINE.get()
-        assert caller_deadline is not None
-        assert self._deadline > caller_deadline
+    class FailingAsyncBody(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> Any:
+            # Measure the remaining time in the actual AnyIO scope.
+            # Both values use AnyIO's clock, unlike our mocked Clock.
+            effective_deadline = anyio.current_effective_deadline()
+            remaining = effective_deadline - anyio.current_time()
+            observed_async_budgets.append(remaining)
 
-        # The caller's deadline is still slightly in the future.
-        clock.now = caller_deadline - 0.0002
+            raise httpx2.ReadTimeout("Simulated async body read timeout.")
+            yield b""
 
-        original_inner = self._inner
-        self._inner = stalled_body()
+    # Replace only the underlying response body streams.
+    # The real DeadlineStream and AsyncDeadlineStream remain in use.
+    original_sync_handle = _transport.SyncHTTPTransport.handle_request
 
-        try:
-            yield from sync_iter(self)
-        finally:
-            self._inner = original_inner
+    def handle_sync_request(
+        self: _transport.SyncHTTPTransport,
+        request: Request,
+    ) -> httpx2.Response:
+        response = original_sync_handle(self, request)
+        response.stream = FailingSyncBody()
+        return response
 
-    async def stalled_async_aiter(self: _transport.AsyncDeadlineStream) -> Any:
-        caller_deadline = _transport.DEADLINE.get()
-        assert caller_deadline is not None
-        assert self._deadline > caller_deadline
+    original_async_handle = httpx2.AsyncHTTPTransport.handle_async_request
 
-        # The caller's deadline is still slightly in the future.
-        clock.now = caller_deadline - 0.0002
+    async def handle_async_request(
+        self: httpx2.AsyncHTTPTransport,
+        request: Request,
+    ) -> httpx2.Response:
+        response = await original_async_handle(self, request)
+        response.stream = FailingAsyncBody()
+        return response
 
-        original_inner = self._inner
-        self._inner = stalled_async_body()
-
-        try:
-            async for chunk in async_aiter(self):
-                yield chunk
-        finally:
-            self._inner = original_inner
-
-    monkeypatch.setattr(_transport.DeadlineStream, "__iter__", stalled_sync_iter)
-    monkeypatch.setattr(_transport.AsyncDeadlineStream, "__aiter__", stalled_async_aiter)
+    monkeypatch.setattr(
+        _transport.SyncHTTPTransport,
+        "handle_request",
+        handle_sync_request,
+    )
+    monkeypatch.setattr(
+        httpx2.AsyncHTTPTransport,
+        "handle_async_request",
+        handle_async_request,
+    )
 
     body = review() if status == 200 else {"detail": PRIVATE}
 
     with Server(lambda request, index: Reply(status, body)) as server:
         async with session(mode, server.url) as client:
             if status == 200:
-                result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=0.3,
+                )
                 assert result.status == "TIMED_OUT"
             else:
                 with pytest.raises(ProoflineError) as raised:
-                    await call(client, "wait_for_review", ORG, REVIEW, timeout=0.3)
+                    await call(
+                        client,
+                        "wait_for_review",
+                        ORG,
+                        REVIEW,
+                        timeout=0.3,
+                    )
                 assert raised.value.status == 403
 
-    # Additional regression scenario:
-    # The caller's deadline expires BEFORE AsyncDeadlineStream starts reading.
-    # Restore the original iterator so the earlier test wrapper
-    # does not modify the clock in this independent scenario.
-    monkeypatch.setattr(
-        _transport.AsyncDeadlineStream,
-        "__aiter__",
-        async_aiter,
-    )
+    # Verify that the actual lower-level read received the caller's
+    # approximately 0.3-second budget.
+    if mode == "sync":
+        assert observed_sync_timeouts == [pytest.approx(0.3)]
+        assert observed_async_budgets == []
+    else:
+        assert observed_async_budgets == [pytest.approx(0.3)]
+        assert observed_sync_timeouts == []
 
+    # Independent regression scenario:
+    # The caller's deadline expires BEFORE AsyncDeadlineStream starts reading.
     class EmptyStream(httpx2.AsyncByteStream):
         async def __aiter__(self) -> Any:
             if False:

@@ -173,16 +173,26 @@ def is_deadline_timeout(error: ProoflineError) -> bool:
 
 
 def network_error(
-    error: httpx2.HTTPError, *, bounded_phases: frozenset[str] = frozenset()
+    error: httpx2.HTTPError,
+    *,
+    bounded_phases: frozenset[str] = frozenset(),
 ) -> ProoflineError:
     if isinstance(error, httpx2.TimeoutException):
+        deadline_bounded = getattr(error, "_deadline_bounded", None)
+
+        if deadline_bounded is not None:
+            return timeout_error(deadline_bounded=bool(deadline_bounded))
+
         phase = next(
             (name for exc_type, name in _TIMEOUT_PHASES if isinstance(error, exc_type)),
             None,
         )
         return timeout_error(deadline_bounded=phase is not None and phase in bounded_phases)
+
     return ProoflineError(
-        0, "urn:proofline:sdk:transport-unavailable", "Could not reach the Proofline API."
+        0,
+        "urn:proofline:sdk:transport-unavailable",
+        "Could not reach the Proofline API.",
     )
 
 
@@ -468,12 +478,24 @@ class DeadlineStream(httpx2.SyncByteStream):
 
     def __iter__(self) -> Iterator[bytes]:
         size = 0
-        deadline = IO_DEADLINE.set(io_deadline(self._deadline))
-        caller_deadline = CALLER_DEADLINE.set(DEADLINE.get())
         bounded = frozenset({"read"}) if self._read_bounded else frozenset()
 
         try:
-            for chunk in self._inner:
+            iterator = iter(self._inner)
+            while True:
+                # Set deadline context only while fetching the next chunk.
+                deadline_token = IO_DEADLINE.set(io_deadline(self._deadline))
+                caller_token = CALLER_DEADLINE.set(DEADLINE.get())
+
+                try:
+                    chunk = next(iterator)
+                except StopIteration:
+                    break
+                finally:
+                    # Restore the previous context before yielding.
+                    CALLER_DEADLINE.reset(caller_token)
+                    IO_DEADLINE.reset(deadline_token)
+
                 size += len(chunk)
                 check_stream(size, self._status, self._deadline)
                 yield chunk
@@ -493,10 +515,6 @@ class DeadlineStream(httpx2.SyncByteStream):
                 error,
                 bounded_phases=(frozenset({"read"}) if read_bounded else frozenset()),
             ) from None
-
-        finally:
-            CALLER_DEADLINE.reset(caller_deadline)
-            IO_DEADLINE.reset(deadline)
 
     def close(self) -> None:
         self._inner.close()
@@ -522,38 +540,61 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
         bounded = frozenset({"read"}) if self._read_bounded else frozenset()
 
         while True:
-            # Calculate the budget before entering the timeout scope.
-            # io_budget() can raise immediately if a deadline has expired.
-            try:
-                budget = io_budget(self._deadline)
-            except httpx2.ReadTimeout as error:
+            # Take one clock reading so the remaining budget and
+            # timeout attribution are based on the same instant.
+            caller = DEADLINE.get()
+            now = monotonic()
+
+            effective_deadline = self._deadline if caller is None else min(self._deadline, caller)
+
+            budget = effective_deadline - now
+
+            # Record which deadline actually limits this read.
+            scope_caller_bounded = caller is not None and caller <= self._deadline
+
+            # The deadline may already have expired before we enter
+            # the AnyIO timeout scope.
+            if budget <= 0:
                 if not (200 <= self._status < 300 or self._status in (429, 503)):
                     raise unreadable_problem(self._status) from None
 
-                caller = DEADLINE.get()
-                deadline_bounded = caller is not None and caller <= self._deadline
-                current_bounded = frozenset({"read"}) if deadline_bounded else frozenset()
-                raise network_error(
-                    error,
-                    bounded_phases=current_bounded,
+                raise timeout_error(
+                    deadline_bounded=scope_caller_bounded,
                 ) from None
 
             try:
-                with anyio.fail_after(budget):
+                # The scope is limited by the earlier of the
+                # internal deadline and the caller's deadline.
+                with anyio.fail_after(budget) as scope:
                     chunk = await anext(iterator)
+
             except StopAsyncIteration:
                 break
+
             except TimeoutError:
+                # Only classify this as our deadline timeout if
+                # this particular AnyIO scope caught the cancellation.
+                # An unrelated TimeoutError must remain unchanged.
+                if not scope.cancelled_caught:
+                    raise
+
                 if not (200 <= self._status < 300 or self._status in (429, 503)):
                     raise unreadable_problem(self._status) from None
+
+                raise timeout_error(
+                    deadline_bounded=scope_caller_bounded,
+                ) from None
+
+            except httpx2.TimeoutException as error:
+                # This is a transport-level timeout, so use the
+                # configured read-phase timeout provenance.
+                if not (200 <= self._status < 300 or self._status in (429, 503)):
+                    raise unreadable_problem(self._status) from None
+
                 raise network_error(
-                    httpx2.ReadTimeout("The request deadline expired."),
+                    error,
                     bounded_phases=bounded,
                 ) from None
-            except httpx2.TimeoutException as error:
-                if not (200 <= self._status < 300 or self._status in (429, 503)):
-                    raise unreadable_problem(self._status) from None
-                raise network_error(error, bounded_phases=bounded) from None
 
             size += len(chunk)
             check_stream(size, self._status, self._deadline)
@@ -580,13 +621,16 @@ class RetryTransport(httpx2.BaseTransport):
                 configured_timeouts,
                 internal_deadline=deadline,
             )
-            marker = IO_DEADLINE.set(io_deadline(deadline))
+            caller = DEADLINE.get()
+            caller_marker = CALLER_DEADLINE.set(caller)
+            io_marker = IO_DEADLINE.set(io_deadline(deadline))
             try:
                 response = self._inner.handle_request(request)
             except httpx2.TimeoutException as error:
                 raise network_error(error, bounded_phases=bounded) from None
             finally:
-                IO_DEADLINE.reset(marker)
+                IO_DEADLINE.reset(io_marker)
+                CALLER_DEADLINE.reset(caller_marker)
             if 300 <= response.status_code < 400:
                 response.close()
                 raise redirect_error(response.status_code) from None
