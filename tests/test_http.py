@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import csv
 import gzip
 import inspect
@@ -2995,6 +2996,7 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
         async def __aiter__(self) -> Any:
             # Measure the remaining time in the actual AnyIO scope.
             effective_deadline = anyio.current_effective_deadline()
+            assert math.isfinite(effective_deadline)
             remaining = effective_deadline - anyio.current_time()
             observed_async_budgets.append(remaining)
             # Actually suspend so the AnyIO deadline can cancel this read.
@@ -3097,5 +3099,48 @@ async def test_body_timeout_early_preserves_caller_and_authority_semantics(
                 pass
 
         assert _transport.is_deadline_timeout(raised.value)
+    finally:
+        _transport.DEADLINE.reset(token)
+
+
+def test_sync_body_read_timeout_before_caller_deadline_is_sdk_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    observed_timeouts: list[float | None] = []
+
+    class FailingSocket:
+        def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            observed_timeouts.append(timeout)
+            raise httpcore2.ReadTimeout("Simulated internal read timeout.")
+
+    class FailingBody(httpx2.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            with _sync_http.mapped_errors():
+                _sync_http.NetworkStream(FailingSocket()).read(
+                    1024,
+                    timeout=10,
+                )
+            yield b""
+
+    # The caller has 10 seconds, but the internal read deadline is 1 second.
+    caller_deadline = clock.now + 10
+    internal_deadline = clock.now + 1
+
+    token = _transport.DEADLINE.set(caller_deadline)
+    try:
+        stream = _transport.DeadlineStream(
+            inner=FailingBody(),
+            status=200,
+            deadline=internal_deadline,
+            read_bounded=False,
+        )
+
+        with pytest.raises(ProoflineError) as raised:
+            list(stream)
+
+        assert raised.value.type == "urn:proofline:sdk:timeout"
+        assert not _transport.is_deadline_timeout(raised.value)
+        assert observed_timeouts == [pytest.approx(1.0)]
     finally:
         _transport.DEADLINE.reset(token)

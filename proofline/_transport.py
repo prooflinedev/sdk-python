@@ -596,10 +596,11 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
 
                 # Only classify this as our deadline timeout if
                 # this particular AnyIO scope caught the cancellation.
-                # An unrelated TimeoutError must remain unchanged.
+                # Normalize an independent timeout without attributing it
+                # to the caller's deadline.
 
                 if not scope.cancelled_caught:
-                    raise
+                    raise timeout_error(deadline_bounded=False) from None
 
                 raise timeout_error(
                     deadline_bounded=scope_caller_bounded,
@@ -714,10 +715,12 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
             caller = DEADLINE.get()
             deadline_bounded = caller is not None and caller <= deadline
             try:
-                with anyio.fail_after(io_budget(deadline)):
+                with anyio.fail_after(io_budget(deadline)) as scope:
                     response = await self._inner.handle_async_request(request)
             except TimeoutError:
-                raise timeout_error(deadline_bounded=deadline_bounded) from None
+                raise timeout_error(
+                    deadline_bounded=scope.cancelled_caught and deadline_bounded,
+                ) from None
             except httpx2.TimeoutException as error:
                 raise network_error(error, bounded_phases=bounded) from None
             if 300 <= response.status_code < 400:
