@@ -1749,16 +1749,18 @@ def test_sync_transport_stops_address_retries_when_deadline_expires(
 ) -> None:
     clock = Clock(monkeypatch)
     attempted_addresses: list[str] = []
+    requested_addresses: list[str] = []
 
-    monkeypatch.setattr(
-        _sync_http,
-        "resolve",
-        lambda host, port, timeout: [
-            "192.0.2.1",
-            "192.0.2.2",
-            "192.0.2.3",
-        ],
-    )
+    def resolve(
+        host: str,
+        port: int,
+        timeout: float | None,
+    ) -> Iterator[str]:
+        for address in ("192.0.2.1", "192.0.2.2", "192.0.2.3"):
+            requested_addresses.append(address)
+            yield address
+
+    monkeypatch.setattr(_sync_http, "resolve", resolve)
 
     def connect_tcp(
         backend: Any,
@@ -1789,6 +1791,7 @@ def test_sync_transport_stops_address_retries_when_deadline_expires(
 
     # Only the first address should be attempted.
     assert attempted_addresses == ["192.0.2.1"]
+    assert requested_addresses == ["192.0.2.1"]
 
 
 @pytest.mark.parametrize(
@@ -1805,11 +1808,11 @@ def test_sync_body_read_preserves_deadline_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = Clock(monkeypatch)
-
+    observed_timeouts: list[float | None] = []
     class FailingSocket:
         def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            observed_timeouts.append(timeout)
             raise httpcore2.ReadTimeout("Simulated socket read timeout.")
-
     class FailingBody:
         def __iter__(self) -> Any:
             with _sync_http.mapped_errors():
@@ -1836,6 +1839,7 @@ def test_sync_body_read_preserves_deadline_provenance(
             list(stream)
 
         assert _transport.is_deadline_timeout(raised.value) is expected
+        assert observed_timeouts == [pytest.approx(1.0)]
 
     finally:
         _transport.DEADLINE.reset(token)
