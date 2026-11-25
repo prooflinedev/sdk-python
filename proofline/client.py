@@ -234,18 +234,20 @@ async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
     async def wait_for_signal() -> None:
         nonlocal delivered
         await event.wait()
-        if not expired:
+        if not expired and monotonic() <= cutoff:
             delivered = True
 
     waiter = async_create_task(wait_for_signal())
     try:
         await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
+        if waiter.done():
+            waiter.result()
         return delivered
     finally:
         handle.cancel()
         if not waiter.done():
             waiter.cancel()
-            await async_gather(waiter, return_exceptions=True)
+        await async_gather(waiter, return_exceptions=True)
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -262,12 +264,13 @@ def _sleep_with_cancel(
         return True
     end = _cancel_end(delay, cutoff)
     while True:
+        if monotonic() >= end:
+            return True
         if _cancelled(event):
             return False
-        remaining = end - monotonic()
-        if remaining <= 0:
-            return not _cancelled(event)
-        if _wait_for_event(event, remaining):
+        if _wait_for_event(event, end - monotonic()):
+            if monotonic() >= end:
+                return True
             return False
 
 
