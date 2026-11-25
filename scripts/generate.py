@@ -99,10 +99,15 @@ def generate(destination: Path) -> None:
         "incident": revision["properties"]["incident"],
     }
     # CommitDeploy's optional arguments up to workflow_run_id are positional
-    # in the 7.4 SDK; rolled_back, github_deployment_ids and then
-    # verification_ended came later, so they follow them in that order.
+    # in the 7.4 SDK. Append newer optional arguments in release order.
     deploy = document["components"]["schemas"]["CommitDeploy"]
-    later = ("rolled_back", "github_deployment_ids", "verification_ended")
+    later = (
+        "rolled_back",
+        "github_deployment_ids",
+        "verification_ended",
+        "aws_provider",
+        "aws_run_id",
+    )
     deploy["properties"] = {
         **{k: v for k, v in deploy["properties"].items() if k not in later},
         **{k: deploy["properties"][k] for k in later},

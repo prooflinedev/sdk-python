@@ -5,6 +5,7 @@ class FindingOutcomesSelector(StrEnum):
     CODE_CHANGED = "code_changed"
     OUTCOME = "outcome"
     POST_MERGE = "post_merge"
+    PUBLISHED = "published"
 
     def __str__(self) -> str:
         return str(self.value)

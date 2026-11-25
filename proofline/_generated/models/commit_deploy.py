@@ -73,13 +73,15 @@ class CommitDeploy:
              deployment a pipeline created, or each one an Actions run's jobs
              created. A deployment outside Actions is a deploy of its own, so two
              of one commit, GitHub Environment and task read apart by this ID.
-             Every listed deploy holds one; a server from before the field existed
+             Every GitHub deploy holds one; a server from before the field existed
              omits it.
         verification_ended (bool | Unset): Whether the deploy's verification ended. A check with no `result`
              then will never be recorded, while a running verification can still
              record one that is overdue; `state` reads `UNRECORDED` for both.
              False without a verification, which `state` reads as `UNVERIFIED`.
              Older responses omit it, which reads as false. Default: False.
+        aws_provider (None | str | Unset): The provider of an AWS deploy (`AWS_CODEPIPELINE` or `AWS_AMPLIFY`).
+        aws_run_id (None | str | Unset): The `CodePipeline` execution ID or Amplify job ID.
     """
 
     checkpoints: list[DeployCoverageCheckpoint]
@@ -143,6 +145,8 @@ class CommitDeploy:
     rolled_back: bool | Unset = False
     github_deployment_ids: list[int] | Unset = UNSET
     verification_ended: bool | Unset = False
+    aws_provider: None | str | Unset = UNSET
+    aws_run_id: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -262,6 +266,18 @@ class CommitDeploy:
 
         verification_ended = self.verification_ended
 
+        aws_provider: None | str | Unset
+        if isinstance(self.aws_provider, Unset):
+            aws_provider = UNSET
+        else:
+            aws_provider = self.aws_provider
+
+        aws_run_id: None | str | Unset
+        if isinstance(self.aws_run_id, Unset):
+            aws_run_id = UNSET
+        else:
+            aws_run_id = self.aws_run_id
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -293,6 +309,10 @@ class CommitDeploy:
             field_dict["github_deployment_ids"] = github_deployment_ids
         if verification_ended is not UNSET:
             field_dict["verification_ended"] = verification_ended
+        if aws_provider is not UNSET:
+            field_dict["aws_provider"] = aws_provider
+        if aws_run_id is not UNSET:
+            field_dict["aws_run_id"] = aws_run_id
 
         return field_dict
 
@@ -1107,6 +1127,24 @@ class CommitDeploy:
 
         verification_ended = d.pop("verification_ended", UNSET)
 
+        def _parse_aws_provider(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        aws_provider = _parse_aws_provider(d.pop("aws_provider", UNSET))
+
+        def _parse_aws_run_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        aws_run_id = _parse_aws_run_id(d.pop("aws_run_id", UNSET))
+
         commit_deploy = cls(
             checkpoints=checkpoints,
             environment_id=environment_id,
@@ -1123,6 +1161,8 @@ class CommitDeploy:
             rolled_back=rolled_back,
             github_deployment_ids=github_deployment_ids,
             verification_ended=verification_ended,
+            aws_provider=aws_provider,
+            aws_run_id=aws_run_id,
         )
 
         commit_deploy.additional_properties = d
