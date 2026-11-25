@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import math
 import threading
-from asyncio import FIRST_COMPLETED
 from asyncio import Event as AsyncEvent
-from asyncio import create_task as async_create_task
-from asyncio import gather as async_gather
+from asyncio import Future as AsyncFuture
 from asyncio import sleep as async_sleep
 from asyncio import wait as async_wait
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -214,26 +212,40 @@ def _wait_for_event(event: threading.Event, timeout: float) -> bool:
     return event.wait(timeout)
 
 
-async def _async_wait_for_event(event: AsyncEvent, timeout: float) -> bool:
-    """Return True when the event woke the wait, False when it timed out."""
-    waiter = async_create_task(event.wait())
-    timer = async_create_task(async_sleep(timeout))
+async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
+    """Return True when the event is delivered before cutoff, False on timeout."""
+    waiter = event.wait()
+    future: AsyncFuture[bool] | None = None
+    finished = False
+    delivered = False
     try:
-        await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
-        if not waiter.done():
-            # A set event can resolve its waiter just as the timer fires. Let
-            # that already-scheduled waiter finish before treating it as a
-            # timeout, so a set-then-clear signal is not lost.
-            await async_sleep(0)
-        if waiter.done():
-            return waiter.result()
+        try:
+            future = waiter.send(None)
+        except StopIteration as stop:
+            finished = True
+            return bool(stop.value) and monotonic() <= cutoff
+
+        original_set_result = future.set_result
+
+        def set_result(result: bool) -> None:
+            nonlocal delivered
+            if monotonic() <= cutoff:
+                delivered = True
+            original_set_result(result)
+
+        future.set_result = set_result  # type: ignore[method-assign]
+
+        await async_wait((future,), timeout=max(0.0, cutoff - monotonic()))
+        if delivered and future.done() and not future.cancelled():
+            try:
+                waiter.send(None)
+            except StopIteration as stop:
+                finished = True
+                return bool(stop.value)
         return False
     finally:
-        pending = [task for task in (waiter, timer) if not task.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            await async_gather(*pending, return_exceptions=True)
+        if not finished:
+            waiter.close()
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -272,7 +284,7 @@ async def _async_sleep_with_cancel(
         remaining = end - monotonic()
         if remaining <= 0:
             return not _cancelled(event)
-        if await _async_wait_for_event(event, remaining):
+        if await _async_wait_for_event(event, end):
             return False
 
 
@@ -674,10 +686,10 @@ class ProoflineClient(Operations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
-                if _cancelled(cancel_event):
-                    return _stopped(url, last, review_id)
                 if (_transport.remaining() or 0) <= 0:
                     break
+                if _cancelled(cancel_event):
+                    return _stopped(url, last, review_id)
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
@@ -685,7 +697,7 @@ class ProoflineClient(Operations):
                 if not _sleep_with_cancel(min(interval, remaining), cancel_event, deadline_at):
                     return _stopped(url, last, review_id)
                 interval = min(60, interval * 2)
-            if _cancelled(cancel_event):
+            if (_transport.remaining() or 0) > 0 and _cancelled(cancel_event):
                 return _stopped(url, last, review_id)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
@@ -1076,10 +1088,10 @@ class AsyncProoflineClient(AsyncOperations):
                     if error.status == 0 and (_transport.remaining() or 0) <= 0:
                         break
                     raise
-                if _cancelled(cancel_event):
-                    return _stopped(url, last, review_id)
                 if (_transport.remaining() or 0) <= 0:
                     break
+                if _cancelled(cancel_event):
+                    return _stopped(url, last, review_id)
                 result = outcome(last, url, review_id=review_id, head_commit_sha=head_commit_sha)
                 if result is not None:
                     return result
@@ -1089,7 +1101,7 @@ class AsyncProoflineClient(AsyncOperations):
                 ):
                     return _stopped(url, last, review_id)
                 interval = min(60, interval * 2)
-            if _cancelled(cancel_event):
+            if (_transport.remaining() or 0) > 0 and _cancelled(cancel_event):
                 return _stopped(url, last, review_id)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)

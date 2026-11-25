@@ -124,8 +124,8 @@ class Clock:
         self.sleep(timeout)
         return bool(event.is_set())
 
-    async def async_wait_for_event(self, event: Any, timeout: float) -> bool:
-        self.sleep(timeout)
+    async def async_wait_for_event(self, event: Any, cutoff: float) -> bool:
+        self.sleep(max(0.0, cutoff - self.now))
         await asyncio.sleep(0)
         return bool(event.is_set())
 
@@ -1425,59 +1425,21 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
         assert len(server.requests) == 8
 
 
-async def test_async_wait_for_event_prefers_resolved_waiter_when_timer_wins(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    loop = asyncio.get_running_loop()
-    real_sleep = asyncio.sleep
-    timer_gate: asyncio.Future[None] = loop.create_future()
+async def test_async_wait_for_event_latches_a_set_then_clear() -> None:
+    event = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.01, lambda: (event.set(), event.clear()))
+    assert await client_module._async_wait_for_event(event, time.monotonic() + 1.0) is True
 
-    async def fake_sleep(delay: float) -> None:
-        if delay == 0:
-            await real_sleep(0)
-        else:
-            await timer_gate
 
-    monkeypatch.setattr(client_module, "async_sleep", fake_sleep)
-
-    class GatedEvent:
-        def __init__(self) -> None:
-            self._flag = False
-            self._waiter: asyncio.Future[bool] = loop.create_future()
-
-        def is_set(self) -> bool:
-            return self._flag
-
-        def set(self) -> None:
-            self._flag = True
-            if not self._waiter.done():
-                self._waiter.set_result(True)
-
-        def clear(self) -> None:
-            self._flag = False
-
-        async def wait(self) -> bool:
-            result = await self._waiter
-            self._waiter = loop.create_future()
-            return result
-
-    event = GatedEvent()
-    task = asyncio.create_task(client_module._async_wait_for_event(event, 5))
-    await real_sleep(0)
-
-    # The timer wins, then the signal arrives and is cleared before the event
-    # waiter resumes. The resolved waiter must still beat the timeout.
-    timer_gate.set_result(None)
-    await real_sleep(0)
+async def test_async_wait_for_event_ignores_a_signal_after_cutoff() -> None:
+    event = asyncio.Event()
+    assert await client_module._async_wait_for_event(event, time.monotonic() - 1.0) is False
     event.set()
-    event.clear()
-
-    assert await asyncio.wait_for(task, 1.0) is True
 
 
 async def test_async_wait_for_event_propagates_external_cancellation() -> None:
     event = asyncio.Event()
-    task = asyncio.create_task(client_module._async_wait_for_event(event, 10))
+    task = asyncio.create_task(client_module._async_wait_for_event(event, time.monotonic() + 10.0))
     await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1511,6 +1473,7 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
     thread: threading.Thread | None = None
     task: asyncio.Task[None] | None = None
+    poll_task: asyncio.Task[Any] | None = None
     wait_elapsed: list[float] = []
     event: Any
 
@@ -1605,10 +1568,10 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
         event = SignallingEventAsync()
         real_async_wait = client_module._async_wait_for_event
 
-        async def async_wait_for_event(wait_event: Any, timeout: float) -> bool:
+        async def async_wait_for_event(wait_event: Any, cutoff: float) -> bool:
             started = time.monotonic()
             try:
-                return await real_async_wait(wait_event, timeout)
+                return await real_async_wait(wait_event, cutoff)
             finally:
                 wait_elapsed.append(time.monotonic() - started)
 
@@ -1623,15 +1586,34 @@ async def test_wait_for_review_cancel_event_wakes_real_backoff(
     try:
         with Server(lambda request, index: Reply(body=body)) as server:
             async with session(mode, server.url) as client:
-                result = await call(
-                    client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
-                )
+                if task is None:
+                    result = await call(
+                        client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+                    )
+                else:
+                    poll_task = asyncio.create_task(
+                        call(
+                            client,
+                            "wait_for_review",
+                            ORG,
+                            REVIEW,
+                            timeout=100,
+                            cancel_event=event,
+                        )
+                    )
+                    await asyncio.wait((poll_task, task), return_when=asyncio.FIRST_COMPLETED)
+                    await task
+                    result = await asyncio.wait_for(poll_task, 5.0)
             assert len(server.requests) == 1
     finally:
         if thread is not None:
             thread.join()
-        if task is not None:
-            task.cancel()
+        supervised = [item for item in (poll_task, task) if item is not None]
+        for item in supervised:
+            if not item.done():
+                item.cancel()
+        if supervised:
+            await asyncio.gather(*supervised, return_exceptions=True)
 
     assert event.waiter_registered.is_set()
     assert wait_elapsed
