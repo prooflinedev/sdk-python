@@ -76,6 +76,36 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Deploy verifications and scans
+
+Inspect deployment verification records for a specific commit SHA using `get_commit_deploy_verifications`:
+
+```python
+verifications = client.get_commit_deploy_verifications(organization_id, repository_id, commit_sha)
+for deploy in verifications.deploys:
+    print(deploy.environment_id, deploy.state)
+```
+
+To request an ad-hoc scan on a repository, use `request_scan`:
+
+```python
+from uuid import uuid4
+from proofline import ScanRequestBody
+
+response = client.request_scan(
+    organization_id,
+    repository_id,
+    body=ScanRequestBody(
+        budget_credits=100,
+        commit_sha=commit_sha,
+        request_id=uuid4(),
+    ),
+)
+print(response.outcome, response.resolution_id)
+```
+
+Both methods accept canonical `organization_id` / `repository_id` or `org_id` / `repo_id` aliases. `get_commit_deploy_verifications` validates that `commit_sha` is a full 40- or 64-character hexadecimal SHA before sending the request.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
