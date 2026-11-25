@@ -539,6 +539,19 @@ class ProoflineClient(Operations):
             params["cursor"] = cursor
         raise _pagination_limit()
 
+    def get_review_outcome(
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        head_commit_sha: str | None = None,
+    ) -> ReviewOutcome | None:
+        """Fetch and classify a review once, returning None if it is still pending."""
+        _head_commit(head_commit_sha)
+        url = _review_url(self._base_url, organization_id, review_id)
+        review = self.get_review(organization_id, review_id)
+        return outcome(review, url, review_id=review_id, head_commit_sha=head_commit_sha)
+
     def wait_for_review(
         self,
         organization_id: UUID,
@@ -933,6 +946,19 @@ class AsyncProoflineClient(AsyncOperations):
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
+
+    async def get_review_outcome(
+        self,
+        organization_id: UUID,
+        review_id: UUID,
+        *,
+        head_commit_sha: str | None = None,
+    ) -> ReviewOutcome | None:
+        """Fetch and classify a review once, returning None if it is still pending."""
+        _head_commit(head_commit_sha)
+        url = _review_url(self._base_url, organization_id, review_id)
+        review = await self.get_review(organization_id, review_id)
+        return outcome(review, url, review_id=review_id, head_commit_sha=head_commit_sha)
 
     async def wait_for_review(
         self,
