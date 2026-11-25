@@ -1257,6 +1257,32 @@ def gap_facts(result: Any) -> list[tuple[Any, str, tuple[str, ...]]]:
 
 
 @MODES
+async def test_get_review_outcome_reads_once_and_checks_the_head(mode: str) -> None:
+    bodies = [review_at(HEAD, "PENDING"), review_at(HEAD), review_at(HEAD, "RUNNING")]
+    with Server(lambda request, index: Reply(body=bodies[index])) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError, match="full 40 or 64 character"):
+                await call(client, "get_review_outcome", ORG, REVIEW, head_commit_sha="bad")
+            assert server.requests == []
+
+            result = await call(client, "get_review_outcome", ORG, REVIEW, head_commit_sha=HEAD)
+            assert result is None
+            assert len(server.requests) == 1
+
+            result = await call(client, "get_review_outcome", ORG, REVIEW, head_commit_sha=HEAD)
+            assert (result.status, result.gaps) == ("COMPLETED", ())
+            assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
+            assert len(server.requests) == 2
+
+            result = await call(
+                client, "get_review_outcome", ORG, REVIEW, head_commit_sha=OTHER_HEAD
+            )
+            assert result.status == "INCOMPLETE"
+            assert gap_facts(result)[-1] == PINNED_ELSEWHERE
+            assert len(server.requests) == 3
+
+
+@MODES
 async def test_wait_held_to_a_head_commit_never_completes_for_another(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
