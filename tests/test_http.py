@@ -1408,6 +1408,16 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
     clock = Clock(monkeypatch)
     body = review("RUNNING")
     body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+
+    def unexpected_event_wait(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("event wait called without cancel_event")
+
+    async def unexpected_async_event_wait(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("async event wait called without cancel_event")
+
+    monkeypatch.setattr(client_module, "_wait_for_event", unexpected_event_wait)
+    monkeypatch.setattr(client_module, "_async_wait_for_event", unexpected_async_event_wait)
+
     with Server(lambda request, index: Reply(body=body)) as server:
         async with session(mode, server.url) as client:
             result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0)
@@ -1453,9 +1463,71 @@ async def test_async_wait_for_event_ignores_a_signal_after_cutoff(
             return result
 
     event = RecordingEvent()
-    asyncio.get_running_loop().call_later(0.02, event.set)
-    assert await client_module._async_wait_for_event(event, time.monotonic() + 0.01) is False
+    cutoff = time.monotonic() + 0.01
+    delay = max(0.0, cutoff - time.monotonic()) + 0.01
+
+    def send_late_signal() -> None:
+        event.set()
+
+    asyncio.get_running_loop().call_later(delay, send_late_signal)
+    assert await client_module._async_wait_for_event(event, cutoff) is False
     assert late_signal_delivered is True
+
+
+async def test_async_wait_for_event_latches_delivery_before_a_late_resume() -> None:
+    class SlowResumeEvent(asyncio.Event):
+        async def wait(self) -> bool:
+            result = await super().wait()
+            await asyncio.sleep(0.1)
+            return result
+
+    event = SlowResumeEvent()
+    cutoff = time.monotonic() + 0.05
+    delay = max(0.0, cutoff - time.monotonic()) / 2
+
+    def send_early_signal() -> None:
+        event.set()
+
+    asyncio.get_running_loop().call_later(delay, send_early_signal)
+    assert await client_module._async_wait_for_event(event, cutoff) is True
+
+
+async def test_async_wait_for_event_does_not_join_a_persistent_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PersistentEvent(asyncio.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stop = False
+
+        async def wait(self) -> bool:
+            try:
+                await super().wait()
+            except asyncio.CancelledError:
+                while not self.stop:
+                    await asyncio.sleep(0.01)
+            return False
+
+    created: list[asyncio.Task[Any]] = []
+    real_create_task = client_module.async_create_task
+
+    def create_task(coro: Any) -> asyncio.Task[Any]:
+        task = real_create_task(coro)
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(client_module, "async_create_task", create_task)
+
+    event = PersistentEvent()
+    task = asyncio.create_task(client_module._async_wait_for_event(event, time.monotonic() + 0.01))
+    try:
+        assert await asyncio.wait_for(task, 1.0) is False
+    finally:
+        event.stop = True
+        for item in created:
+            item.cancel()
+        if created:
+            await asyncio.gather(*created, return_exceptions=True)
 
 
 def test_sleep_with_cancel_ignores_a_signal_set_at_deadline(
@@ -1472,6 +1544,23 @@ def test_sleep_with_cancel_ignores_a_signal_set_at_deadline(
     monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
 
     assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is True
+    assert clock.delays == [1.0]
+
+
+def test_sleep_with_cancel_latches_delivery_before_a_late_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+
+    def wait_for_event(wait_event: Any, timeout: float) -> bool:
+        wait_event.set()
+        clock.sleep(timeout)
+        return True
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
     assert clock.delays == [1.0]
 
 

@@ -8,7 +8,6 @@ from asyncio import FIRST_COMPLETED
 from asyncio import Event as AsyncEvent
 from asyncio import Future as AsyncFuture
 from asyncio import create_task as async_create_task
-from asyncio import gather as async_gather
 from asyncio import get_running_loop as async_get_running_loop
 from asyncio import sleep as async_sleep
 from asyncio import wait as async_wait
@@ -217,15 +216,27 @@ def _wait_for_event(event: threading.Event, timeout: float) -> bool:
 
 
 async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
-    """Return True when the event is delivered before cutoff, False on timeout."""
+    """Return True when the event is signalled before cutoff, False on timeout."""
     loop = async_get_running_loop()
     timer: AsyncFuture[None] = loop.create_future()
-    delivered = False
-    expired = False
+    delivered = event.is_set() and monotonic() < cutoff
+    original_set: Any = None
+    wrapped_set = False
+    try:
+        original_set = event.set
+
+        def set_with_delivery_time() -> None:
+            nonlocal delivered
+            if monotonic() < cutoff:
+                delivered = True
+            original_set()
+
+        event.set = set_with_delivery_time  # type: ignore[method-assign]
+        wrapped_set = True
+    except (AttributeError, TypeError):
+        pass
 
     def expire() -> None:
-        nonlocal expired
-        expired = True
         if not timer.done():
             timer.set_result(None)
 
@@ -234,10 +245,17 @@ async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
     async def wait_for_signal() -> None:
         nonlocal delivered
         await event.wait()
-        if not expired and monotonic() <= cutoff:
+        # A subclass may complete its waiter directly instead of through set().
+        if not delivered and monotonic() < cutoff:
             delivered = True
 
     waiter = async_create_task(wait_for_signal())
+
+    def retrieve(task: Any) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    waiter.add_done_callback(retrieve)
     try:
         await async_wait((waiter, timer), return_when=FIRST_COMPLETED)
         if waiter.done():
@@ -245,9 +263,10 @@ async def _async_wait_for_event(event: AsyncEvent, cutoff: float) -> bool:
         return delivered
     finally:
         handle.cancel()
+        if wrapped_set:
+            event.set = original_set  # type: ignore[method-assign]
         if not waiter.done():
             waiter.cancel()
-        await async_gather(waiter, return_exceptions=True)
 
 
 def _cancel_end(delay: float, cutoff: float | None) -> float:
@@ -263,15 +282,38 @@ def _sleep_with_cancel(
         sleep(delay)
         return True
     end = _cancel_end(delay, cutoff)
-    while True:
-        if monotonic() >= end:
-            return True
-        if _cancelled(event):
-            return False
-        if _wait_for_event(event, end - monotonic()):
+    signalled_at: float | None = None
+    original_set: Any = None
+    wrapped_set = False
+    try:
+        original_set = event.set
+
+        def set_with_delivery_time() -> None:
+            nonlocal signalled_at
+            now = monotonic()
+            if signalled_at is None and now < end:
+                signalled_at = now
+            original_set()
+
+        event.set = set_with_delivery_time  # type: ignore[method-assign]
+        wrapped_set = True
+    except (AttributeError, TypeError):
+        pass
+    try:
+        while True:
+            if signalled_at is not None:
+                return False
             if monotonic() >= end:
                 return True
-            return False
+            if _cancelled(event):
+                return False
+            if _wait_for_event(event, end - monotonic()):
+                if signalled_at is not None:
+                    return False
+                return True
+    finally:
+        if wrapped_set:
+            event.set = original_set  # type: ignore[method-assign]
 
 
 async def _async_sleep_with_cancel(
