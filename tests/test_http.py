@@ -2302,6 +2302,54 @@ async def test_fixes_preserve_unavailable_context_and_never_retry(mode: str) -> 
 
 
 @MODES
+async def test_mcp_requests_send_text_as_utf8_within_the_request_limit(mode: str) -> None:
+    # 2,000 characters is the documented note limit. Escaped as \uXXXX this note is
+    # 12,292 bytes; as UTF-8 it is 4,292, inside the 8,192-byte request limit.
+    note = "تم إصلاح الحالة الفارغة " * 83 + "✅" * 8
+    assert len(note) == 2_000
+    lone = "fixed \udc80 case"
+    bodies: list[bytes] = []
+
+    def respond(request: Request, index: int) -> Reply:
+        body = json.loads(request.body)
+        if body["method"] == "initialize":
+            return Reply(
+                body={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-11-25"}}
+            )
+        if body["method"] == "notifications/initialized":
+            return Reply(status=202, body=b"")
+        bodies.append(request.body)
+        return Reply(
+            body={"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": ""}]}}
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+
+            async def reverify(text: str) -> Any:
+                answer = client.fixes.request_reverification(
+                    str(REVIEW), [str(REVIEW)], "a" * 40, note=text
+                )
+                return await answer if inspect.isawaitable(answer) else answer
+
+            await reverify(note)
+            await reverify(lone)
+            before = len(server.requests)
+            with pytest.raises(ValueError, match="8192"):
+                await reverify("🚀" * 2_100)
+            # The size check runs before the handshake: nothing is sent.
+            assert len(server.requests) == before
+    assert len(bodies) == 2
+    sent, escaped = bodies
+    assert len(sent) <= 8192
+    assert note.encode("utf-8") in sent
+    assert json.loads(sent)["params"]["arguments"]["note"] == note
+    # A lone surrogate has no UTF-8 form, so it keeps its JSON escape.
+    assert b"\\udc80" in escaped
+    assert json.loads(escaped)["params"]["arguments"]["note"] == lone
+
+
+@MODES
 async def test_shared_review_outcome_contract(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
     Clock(monkeypatch)
     fixture = json.loads((Path(__file__).parent / "fixtures/review-outcomes.json").read_text())

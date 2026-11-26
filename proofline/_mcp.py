@@ -33,7 +33,10 @@ def _body(method: str, params: dict[str, Any] | None, identity: int | None) -> b
         value["id"] = identity
     if params is not None:
         value["params"] = params
-    data = json.dumps(value).encode("utf-8")
+    # Send text as UTF-8, as the MCP bridge does. Escaping each non-ASCII character
+    # as \uXXXX would let a 2,000-character note exceed the limit. A lone surrogate
+    # has no UTF-8 form, so it keeps its JSON escape.
+    data = json.dumps(value, ensure_ascii=False).encode("utf-8", "backslashreplace")
     if len(data) > 8192:
         raise ValueError("MCP request exceeds 8192 bytes.")
     return data
