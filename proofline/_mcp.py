@@ -58,6 +58,7 @@ def _decode(response: httpx2.Response, identity: int | None) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or value.get("jsonrpc") != "2.0"
+        or isinstance(value.get("id"), bool)
         or value.get("id") != identity
         or "error" in value
         or not isinstance(value.get("result"), dict)
