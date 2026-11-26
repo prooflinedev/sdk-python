@@ -35,7 +35,7 @@ def _body(method: str, params: dict[str, Any] | None, identity: int | None) -> b
         value["params"] = params
     data = json.dumps(value).encode("utf-8")
     if len(data) > 8192:
-        raise ValueError("MCP request exceeds 8192 bytes.")
+        raise ProoflineError(0, "urn:proofline:sdk:mcp", "MCP request exceeds 8192 bytes.")
     return data
 
 
