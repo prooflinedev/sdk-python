@@ -91,8 +91,9 @@ class CustomerReviewDetail:
              orientation only. Null when no pull request state is recorded.
         change_diagram (ChangeDiagramView | None | Unset): The change-level diagram: the changed call path from the
             pinned code
-             index and the relations World declares. Absent when the review
-             recorded none.
+             index. A diagram recorded by the check evaluator Proofline retired on
+             2026-11-05 can also show the environment relations it returned.
+             Absent when the review recorded none.
         change_summary (ChangeSummary | None | Unset): What the change does and which files the review read at which
             depth
              (§55). Null until the review's publication records it, and for a

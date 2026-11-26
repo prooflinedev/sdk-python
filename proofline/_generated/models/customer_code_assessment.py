@@ -22,7 +22,7 @@ T = TypeVar("T", bound="CustomerCodeAssessment")
 @_attrs_define
 class CustomerCodeAssessment:
     """The review's code assessment as it recorded its run. Its findings
-    rest on the pinned code alone, never on World evidence.
+    rest on the pinned code alone, never on infrastructure evidence.
 
        Attributes:
            base_commit_sha (str): The base commit the code assessment compared the head with.

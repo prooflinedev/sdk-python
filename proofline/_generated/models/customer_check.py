@@ -19,11 +19,11 @@ T = TypeVar("T", bound="CustomerCheck")
 class CustomerCheck:
     """
     Attributes:
-        files (list[CheckFile]): The files World cited as evidence for this result, once each in
-             World's order, with the revision World read each at. Empty when World
-             cited no file, and on results recorded before World cited files.
+        files (list[CheckFile]): The files the evaluator cited as evidence for this result, once each
+             in the evaluator's order, with the revision it read each at. Empty
+             when it cited no file, and on results recorded before it cited files.
         lifecycle (Literal['GATING'] | Literal['QUARANTINED'] | Literal['RETIRED'] | Literal['SHADOW'] |
-            Literal['UNKNOWN']): World's lifecycle disclosure for the evaluator version that answered, as
+            Literal['UNKNOWN']): The lifecycle the evaluator disclosed for the version that answered, as
              the receipt recorded it. A deployment gate counts only `GATING` results
              (`DeterministicCoverage::gate_effective_status`), and only when it
              evaluates a deployment; the lifecycle alone permits or blocks nothing.
@@ -31,12 +31,13 @@ class CustomerCheck:
         outcome (str): The outcome the receipt recorded, which is the outcome a deployment
              gate weighed: `READY`, `BLOCKED`, `UNRESOLVED`, `UNAVAILABLE`,
              `NOT_APPLICABLE` or `NOT_ASKED`. A verdict never rewrites it.
-        detail (None | str | Unset): Why World refused the check, or otherwise World's recorded explanation
-             of the result. Null when neither is recorded.
-        evaluated_at (None | str | Unset): When World evaluated this answer. A reused answer is evidence from
-             this instant, which can precede the assessment.
+        detail (None | str | Unset): Why the evaluator refused the check, or otherwise its recorded
+             explanation of the result. Null when neither is recorded.
+        evaluated_at (None | str | Unset): When the evaluator produced this answer. A reused answer is evidence
+             from this instant, which can precede the assessment.
         unresolved_reason (Literal['NEEDS_EVIDENCE'] | Literal['REGENERATE_SCENARIO'] | Literal['UNSUPPORTED'] | None |
-            Unset): Why an `UNRESOLVED` check did not settle, as World's verdict gave it.
+            Unset): Why an `UNRESOLVED` check did not settle, as the evaluator's verdict
+             gave it.
              Absent on every other outcome, and on an unresolved receipt whose
              verdict names none of these reasons.
     """

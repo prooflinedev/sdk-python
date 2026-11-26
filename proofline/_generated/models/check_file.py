@@ -15,7 +15,7 @@ T = TypeVar("T", bound="CheckFile")
 
 @_attrs_define
 class CheckFile:
-    """One file World cited for a check's result.
+    """One file the evaluator cited for a check's result.
 
     Attributes:
         path (UntrustedText): Text that came out of the reviewer model, or out of a repository the model
