@@ -40,6 +40,7 @@ from ._sync_http import Transport as SyncHTTPTransport
 
 VERSION = "10.2.2"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+TIMEOUT_TYPE = "urn:proofline:sdk:timeout"
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 FULL_WEEKDAY = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
 MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
@@ -65,6 +66,10 @@ RunNowRefusal: TypeAlias = (
     | RunNowRefusalViewType9
 )
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
+# Whether DEADLINE, not the attempt's own timeout, bounds the latest attempt. A wait
+# reads it to learn which deadline ended a request: its clock can trail the clock the
+# request stopped on, by up to 15.6 ms on Windows before Python 3.13.
+DEADLINE_BOUND: ContextVar[bool] = ContextVar("proofline_deadline_bound", default=False)
 
 
 class BearerAuth(httpx2.Auth):
@@ -174,7 +179,7 @@ def operation_errors() -> Iterator[None]:
 
 
 def timeout_error() -> ProoflineError:
-    return ProoflineError(0, "urn:proofline:sdk:timeout", "The request deadline expired.")
+    return ProoflineError(0, TIMEOUT_TYPE, "The request deadline expired.")
 
 
 def remaining() -> float | None:
@@ -187,6 +192,8 @@ def limit_timeout(request: httpx2.Request) -> None:
     if budget is None:
         return
     if budget <= 0:
+        # Only the caller's budget is spent here, so DEADLINE ends this attempt.
+        DEADLINE_BOUND.set(True)
         raise timeout_error()
     configured = request.extensions.get("timeout", {})
     request.extensions["timeout"] = {
@@ -377,6 +384,14 @@ def io_deadline(deadline: float) -> float:
     return deadline if caller is None else min(deadline, caller)
 
 
+def attempt_deadline(timeout: float) -> float:
+    """Return an attempt's own deadline and record whether DEADLINE comes first."""
+    deadline = monotonic() + timeout
+    caller = DEADLINE.get()
+    DEADLINE_BOUND.set(caller is not None and caller <= deadline)
+    return deadline
+
+
 def io_budget(deadline: float) -> float:
     budget = io_deadline(deadline) - monotonic()
     if budget <= 0:
@@ -441,7 +456,7 @@ class RetryTransport(httpx2.BaseTransport):
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
             limit_timeout(request)
-            deadline = monotonic() + self._timeout
+            deadline = attempt_deadline(self._timeout)
             marker = IO_DEADLINE.set(io_deadline(deadline))
             try:
                 response = self._inner.handle_request(request)
@@ -492,7 +507,7 @@ class AsyncRetryTransport(httpx2.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
             limit_timeout(request)
-            deadline = monotonic() + self._timeout
+            deadline = attempt_deadline(self._timeout)
             try:
                 with anyio.fail_after(io_budget(deadline)):
                     response = await self._inner.handle_async_request(request)

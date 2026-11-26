@@ -562,13 +562,22 @@ class ProoflineClient(Operations):
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        bound = _transport.DEADLINE_BOUND.set(False)
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
+                # Only this poll's own attempts can show that the wait deadline ended it.
+                _transport.DEADLINE_BOUND.set(False)
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    # TIMED_OUT only when the wait deadline, not the request's timeout, ended
+                    # it. An HTTP problem can carry any type, so the SDK's timeout has status 0.
+                    if (
+                        error.status == 0
+                        and error.type == _transport.TIMEOUT_TYPE
+                        and _transport.DEADLINE_BOUND.get()
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
@@ -581,6 +590,7 @@ class ProoflineClient(Operations):
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
+            _transport.DEADLINE_BOUND.reset(bound)
             _transport.DEADLINE.reset(deadline)
 
 
@@ -948,13 +958,22 @@ class AsyncProoflineClient(AsyncOperations):
         url = _review_url(self._base_url, organization_id, review_id)
         last: CustomerReviewDetail | None = None
         deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        bound = _transport.DEADLINE_BOUND.set(False)
         interval = 5.0
         try:
             while (_transport.remaining() or 0) > 0:
+                # Only this poll's own attempts can show that the wait deadline ended it.
+                _transport.DEADLINE_BOUND.set(False)
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    # TIMED_OUT only when the wait deadline, not the request's timeout, ended
+                    # it. An HTTP problem can carry any type, so the SDK's timeout has status 0.
+                    if (
+                        error.status == 0
+                        and error.type == _transport.TIMEOUT_TYPE
+                        and _transport.DEADLINE_BOUND.get()
+                    ):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
@@ -967,4 +986,5 @@ class AsyncProoflineClient(AsyncOperations):
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
+            _transport.DEADLINE_BOUND.reset(bound)
             _transport.DEADLINE.reset(deadline)
