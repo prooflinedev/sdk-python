@@ -141,6 +141,20 @@ with ProoflineClient() as client:
 
 The response names the recorded report and its covered and instrumented line counts. An identical upload returns that report with `created=False`. Refused reports raise `ProoflineError`. Uploading a report does not establish a check verdict.
 
+To upload report files straight from disk, use `upload_coverage_files`. It reads each file as UTF-8 text and names it by its path relative to `root`, which defaults to the working directory. Pass `CoverageFile(path, name)` to choose a different report name. Every check runs before a request is sent: a short or non-hexadecimal SHA, a report count outside 1 to 50, a duplicate name, a file outside `root`, a name containing `..`, non-UTF-8 content and a body over 30 MiB all raise `ValueError`. A missing file raises the usual `OSError`. The async client has the same method as a coroutine.
+
+```python
+from proofline import CoverageFile, ProoflineClient
+
+with ProoflineClient() as client:
+    report = client.upload_coverage_files(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        UUID(os.environ["PROOFLINE_REPOSITORY_ID"]),
+        tested_sha=os.environ["TESTED_SHA"],
+        files=["coverage/lcov.info", CoverageFile("go/cover.out", "go/coverage.out")],
+    )
+```
+
 ## MCP organization selection
 
 With an MCP OAuth credential approved for several organizations, discover its currently authorized targets with `client.mcp.list_organizations()`. It returns a `KnowledgeResult`; inspect `isError` before reading `structuredContent["data"]["organizations"]`. Each entry contains `organization_id`, `github_login`, and `scopes`.

@@ -34,6 +34,7 @@ from ._generated.models import (
 from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
+from .coverage import CoverageFile
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
@@ -46,6 +47,7 @@ __all__ = [
     "CheckGap",
     "CommitReviewRequest",
     "CommitReviewResponse",
+    "CoverageFile",
     "CoverageUploadRequest",
     "CoverageUploadResponse",
     "CustomerAssessmentDetail",
