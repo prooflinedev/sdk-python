@@ -34,10 +34,10 @@ Repository = "https://github.com/prooflinedev/sdk-python"
 [project.optional-dependencies]
 dev = [
     "openapi-python-client==0.30.0",
-    "ruff==0.17.5",
+    "ruff==0.17.6",
     "mypy==2.4.1",
     "pytest==9.2.0",
-    "pytest-asyncio==1.4.1",
+    "pytest-asyncio==1.5.0",
     "build==1.6.1",
     "hatchling==1.33.0",
 ]
