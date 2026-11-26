@@ -20,6 +20,15 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output.
 
+Both clients accept `rate_limit` to pace HTTP request attempts, including retries and calls made through the shared MCP, knowledge, fixes, and export clients. The value is a finite positive number of attempts per second; `None` (the default) disables pacing. The limit applies to one client instance and is not shared across processes or separate client instances. Waiting for a request counts against the configured HTTP timeout and any active wait deadline.
+
+The configured HTTP `timeout` bounds a complete HTTP operation, including request pacing, retry attempts, retry waits, and response reading. An active `wait_for_review` deadline can shorten that budget.
+
+```python
+with ProoflineClient(rate_limit=2.0) as client:
+    ...  # At most one request attempt every 0.5 seconds on average.
+```
+
 With `AsyncProoflineClient`, use `await` for a single result, such as `await client.list_reviews(organization_id)` for one page. Use `async for` with `iter_reviews` to read individual reviews across pages, or with `iter_export_pages` to read export pages.
 
 ```python
@@ -75,6 +84,28 @@ if outcome.status != "COMPLETED":
 ```
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
+
+Pass `on_update` to receive each pending `CustomerReviewDetail` as the wait polls. The synchronous client takes a synchronous callback. The asynchronous client accepts either a synchronous callback or an `async` callback and awaits it. Callbacks do not run for terminal or timed-out results, and callback exceptions propagate to the caller.
+
+```python
+def show_progress(review):
+    print(review.status)
+
+
+with ProoflineClient() as client:
+    outcome = client.wait_for_review(organization_id, review_id, on_update=show_progress)
+```
+
+```python
+async def show_progress(review):
+    print(review.status)
+
+
+async with AsyncProoflineClient() as client:
+    outcome = await client.wait_for_review(organization_id, review_id, on_update=show_progress)
+```
+
+Callbacks run inline while the wait's deadline is active. Callback execution itself is not interrupted when the timeout expires, so keep callbacks quick; the wait checks the deadline again after the callback returns.
 
 ## Review exports
 
