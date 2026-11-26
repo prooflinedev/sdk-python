@@ -146,9 +146,13 @@ class ResponseStream(httpx2.SyncByteStream):
 
 
 class Transport(httpx2.BaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, *, ssl_context: ssl.SSLContext | None = None) -> None:
         self._pool = httpcore2.ConnectionPool(
-            ssl_context=httpcore2.default_ssl_context(),
+            ssl_context=(
+                ssl_context
+                if ssl_context is not None
+                else httpcore2.default_ssl_context(_trust_env=False)
+            ),
             network_backend=NetworkBackend(),
             max_connections=100,
             max_keepalive_connections=20,
