@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -28,6 +29,25 @@ class ExportPage:
     version: int
     settled_until: str
     next_cursor: str | None
+
+
+def _settled_instant(horizon: str) -> tuple[datetime, str]:
+    # datetime handles offsets, but truncates fractional seconds after six digits.
+    fraction = re.search(r"[.,]([0-9]{7,})(?=Z$|[+-][0-9]{2}:[0-9]{2}$)", horizon)
+    remainder = fraction[1][6:].rstrip("0") if fraction else ""
+    return datetime.fromisoformat(horizon), remainder
+
+
+def checked_export_horizon(horizon: str, first: str | None) -> str:
+    if first is None:
+        return horizon
+    if horizon != first and _settled_instant(horizon) != _settled_instant(first):
+        raise ProoflineError(
+            0,
+            "urn:proofline:sdk:invalid-pagination",
+            "The export settled horizon changed between pages.",
+        )
+    return first
 
 
 def decode_export(

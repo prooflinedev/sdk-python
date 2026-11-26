@@ -111,7 +111,7 @@ with ProoflineClient() as client:
             print(row)
 ```
 
-Use `async for` with `AsyncProoflineClient`. Each yielded page retains its raw text, decoded rows, and metadata; CSV pages retain their individual headers. Pass `cursor=` to resume an export. Iteration stops only when the server omits the next cursor, including when an intermediate page has no rows. Empty or repeated continuation cursors raise `ProoflineError` with type `urn:proofline:sdk:invalid-pagination`, and the page that carries such a cursor is never yielded. The default bound is 100 pages; set `max_pages` to an integer from 1 to 1000. Exhausting that bound while a cursor remains raises `urn:proofline:sdk:pagination-limit`, so a partial export cannot silently appear complete. Stop iteration early when only a prefix is needed.
+Use `async for` with `AsyncProoflineClient`. Each yielded page retains its raw text, decoded rows, and metadata; CSV pages retain their individual headers. Pass `cursor=` to resume an export. Iteration stops only when the server omits the next cursor, including when an intermediate page has no rows. Empty or repeated continuation cursors, or a page whose settled horizon differs from the first page read by the iterator, raise `ProoflineError` with type `urn:proofline:sdk:invalid-pagination`, and the invalid page is never yielded. The default bound is 100 pages; set `max_pages` to an integer from 1 to 1000. Exhausting that bound while a cursor remains raises `urn:proofline:sdk:pagination-limit`, so a partial export cannot silently appear complete. Stop iteration early when only a prefix is needed.
 
 ## Coverage uploads
 
