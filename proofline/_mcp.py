@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, NotRequired, TypedDict, cast
+from uuid import UUID
 
 import httpx2
 
@@ -27,13 +28,19 @@ def _refused() -> ProoflineError:
     return ProoflineError(0, "urn:proofline:sdk:mcp", "Invalid or refused MCP response.")
 
 
+def _json_default(obj: Any) -> Any:
+    if isinstance(obj, UUID):
+        return str(obj)
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
 def _body(method: str, params: dict[str, Any] | None, identity: int | None) -> bytes:
     value: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
     if identity is not None:
         value["id"] = identity
     if params is not None:
         value["params"] = params
-    data = json.dumps(value).encode("utf-8")
+    data = json.dumps(value, default=_json_default).encode("utf-8")
     if len(data) > 8192:
         raise ValueError("MCP request exceeds 8192 bytes.")
     return data
@@ -96,7 +103,7 @@ class McpTools:
         self._http = http
 
     def _call(
-        self, name: str, args: dict[str, Any], *, organization_id: str | None = None
+        self, name: str, args: dict[str, Any], *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         if organization_id is not None:
             args = {**args, "organization_id": organization_id}
@@ -145,7 +152,7 @@ class AsyncMcpTools:
         self._http = http
 
     async def _call(
-        self, name: str, args: dict[str, Any], *, organization_id: str | None = None
+        self, name: str, args: dict[str, Any], *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         if organization_id is not None:
             args = {**args, "organization_id": organization_id}

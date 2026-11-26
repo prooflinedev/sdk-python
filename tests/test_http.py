@@ -2586,3 +2586,198 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+async def test_mcp_uuid_parameters_serialize(mode: str) -> None:
+    observed: list[dict[str, Any]] = []
+
+    def respond(request: Request, index: int) -> Reply:
+        body = json.loads(request.body)
+        if body["method"] == "initialize":
+            return Reply(
+                body={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-11-25"}}
+            )
+        if body["method"] == "notifications/initialized":
+            return Reply(status=202, body=b"")
+        params = body["params"]
+        observed.append(params)
+        return Reply(
+            body={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "content": [{"type": "text", "text": "{}"}],
+                    "structuredContent": {"arguments": params["arguments"]},
+                },
+            }
+        )
+
+    cases = [
+        # Knowledge methods:
+        (
+            "knowledge",
+            "list_wiki_pages",
+            ("owner/name",),
+            {"commit": "a" * 40, "organization_id": ORG},
+            {"repository": "owner/name", "commit": "a" * 40, "organization_id": str(ORG)},
+        ),
+        (
+            "knowledge",
+            "get_wiki_page",
+            ("owner/name", "index"),
+            {"commit": "a" * 40, "organization_id": ORG},
+            {
+                "repository": "owner/name",
+                "commit": "a" * 40,
+                "page_key": "index",
+                "organization_id": str(ORG),
+            },
+        ),
+        (
+            "knowledge",
+            "ask_codebase",
+            ("owner/name", "How?"),
+            {"commit": "a" * 40, "organization_id": ORG},
+            {
+                "repository": "owner/name",
+                "commit": "a" * 40,
+                "question": "How?",
+                "organization_id": str(ORG),
+            },
+        ),
+        (
+            "knowledge",
+            "get_architecture_document",
+            (ASSESSMENT,),
+            {"organization_id": ORG},
+            {"environment_id": str(ASSESSMENT), "organization_id": str(ORG)},
+        ),
+        (
+            "knowledge",
+            "get_plan",
+            (REVIEW,),
+            {"organization_id": ORG},
+            {"plan_id": str(REVIEW), "organization_id": str(ORG)},
+        ),
+        (
+            "knowledge",
+            "start_plan_implementation",
+            (REVIEW,),
+            {"organization_id": ORG},
+            {"plan_id": str(REVIEW), "organization_id": str(ORG)},
+        ),
+        (
+            "knowledge",
+            "get_plan_implementation",
+            (REVIEW,),
+            {"organization_id": ORG},
+            {"implementation_id": str(REVIEW), "organization_id": str(ORG)},
+        ),
+        # Fixes methods:
+        (
+            "fixes",
+            "list_open_findings",
+            ("owner/name", 7),
+            {"organization_id": ORG},
+            {"repository": "owner/name", "pull_request_number": 7, "organization_id": str(ORG)},
+        ),
+        (
+            "fixes",
+            "get_fix_context",
+            (FINDING,),
+            {"organization_id": ORG},
+            {"finding_id": str(FINDING), "organization_id": str(ORG)},
+        ),
+        (
+            "fixes",
+            "request_reverification",
+            (REVIEW, [FINDING], "a" * 40),
+            {"note": "fixed", "organization_id": ORG},
+            {
+                "review_id": str(REVIEW),
+                "finding_ids": [str(FINDING)],
+                "commit_sha": "a" * 40,
+                "note": "fixed",
+                "organization_id": str(ORG),
+            },
+        ),
+        (
+            "fixes",
+            "request_reverification",
+            (REVIEW, (FINDING,), "a" * 40),
+            {"note": "fixed", "organization_id": ORG},
+            {
+                "review_id": str(REVIEW),
+                "finding_ids": [str(FINDING)],
+                "commit_sha": "a" * 40,
+                "note": "fixed",
+                "organization_id": str(ORG),
+            },
+        ),
+        (
+            "fixes",
+            "get_reverification",
+            (REVIEW,),
+            {"organization_id": ORG},
+            {"request_id": str(REVIEW), "organization_id": str(ORG)},
+        ),
+    ]
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+
+            async def invoke(group: str, name: str, *args: Any, **kwargs: Any) -> Any:
+                result = getattr(getattr(client, group), name)(*args, **kwargs)
+                return await result if inspect.isawaitable(result) else result
+
+            for group, name, args, kwargs, expected in cases:
+                observed.clear()
+                answer = await invoke(group, name, *args, **kwargs)
+                assert answer["structuredContent"]["arguments"] == expected
+                assert len(observed) == 1
+                assert observed[0]["name"] == name
+                assert observed[0]["arguments"] == expected
+
+
+@MODES
+async def test_mcp_unserializable_object_raises_type_error(mode: str) -> None:
+    class CustomObject:
+        pass
+
+    with Server(lambda request, index: Reply(status=200, body=b"{}")) as server:
+        async with session(mode, server.url) as client:
+
+            async def invoke(group: str, name: str, *args: Any, **kwargs: Any) -> Any:
+                result = getattr(getattr(client, group), name)(*args, **kwargs)
+                return await result if inspect.isawaitable(result) else result
+
+            with pytest.raises(TypeError, match="is not JSON serializable"):
+                await invoke("fixes", "get_fix_context", CustomObject(), organization_id=ORG)  # type: ignore[arg-type]
+
+            with pytest.raises(TypeError, match="is not JSON serializable"):
+                await invoke("knowledge", "get_plan", CustomObject(), organization_id=ORG)  # type: ignore[arg-type]
+
+            # Passing a set for finding_ids still raises TypeError
+            with pytest.raises(TypeError, match="is not JSON serializable"):
+                await invoke(
+                    "fixes",
+                    "request_reverification",
+                    REVIEW,
+                    {FINDING},  # type: ignore[arg-type]
+                    "a" * 40,
+                    organization_id=ORG,
+                )
+
+            # Cyclic containers still raise ValueError
+            cyclic: list[Any] = []
+            cyclic.append(cyclic)
+            with pytest.raises(ValueError, match="Circular reference detected"):
+                await invoke(
+                    "fixes",
+                    "request_reverification",
+                    REVIEW,
+                    cyclic,
+                    "a" * 40,
+                    organization_id=ORG,
+                )

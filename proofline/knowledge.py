@@ -1,11 +1,19 @@
 """Published knowledge operations through the scoped MCP server."""
 
+from __future__ import annotations
+
+from uuid import UUID
+
 from ._mcp import AsyncMcpTools, KnowledgeResult, McpTools, _repository
 
 
 class KnowledgeClient(McpTools):
     def list_wiki_pages(
-        self, repository: str, *, commit: str | None = None, organization_id: str | None = None
+        self,
+        repository: str,
+        *,
+        commit: str | None = None,
+        organization_id: UUID | str | None = None,
     ) -> KnowledgeResult:
         return self._call(
             "list_wiki_pages", _repository(repository, commit), organization_id=organization_id
@@ -17,7 +25,7 @@ class KnowledgeClient(McpTools):
         page_key: str,
         *,
         commit: str | None = None,
-        organization_id: str | None = None,
+        organization_id: UUID | str | None = None,
     ) -> KnowledgeResult:
         return self._call(
             "get_wiki_page",
@@ -31,7 +39,7 @@ class KnowledgeClient(McpTools):
         question: str,
         *,
         commit: str | None = None,
-        organization_id: str | None = None,
+        organization_id: UUID | str | None = None,
     ) -> KnowledgeResult:
         return self._call(
             "ask_codebase",
@@ -40,7 +48,7 @@ class KnowledgeClient(McpTools):
         )
 
     def get_architecture_document(
-        self, environment_id: str, *, organization_id: str | None = None
+        self, environment_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return self._call(
             "get_architecture_document",
@@ -48,18 +56,20 @@ class KnowledgeClient(McpTools):
             organization_id=organization_id,
         )
 
-    def get_plan(self, plan_id: str, *, organization_id: str | None = None) -> KnowledgeResult:
+    def get_plan(
+        self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
+    ) -> KnowledgeResult:
         return self._call("get_plan", {"plan_id": plan_id}, organization_id=organization_id)
 
     def start_plan_implementation(
-        self, plan_id: str, *, organization_id: str | None = None
+        self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return self._call(
             "start_plan_implementation", {"plan_id": plan_id}, organization_id=organization_id
         )
 
     def get_plan_implementation(
-        self, implementation_id: str, *, organization_id: str | None = None
+        self, implementation_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return self._call(
             "get_plan_implementation",
@@ -70,7 +80,11 @@ class KnowledgeClient(McpTools):
 
 class AsyncKnowledgeClient(AsyncMcpTools):
     async def list_wiki_pages(
-        self, repository: str, *, commit: str | None = None, organization_id: str | None = None
+        self,
+        repository: str,
+        *,
+        commit: str | None = None,
+        organization_id: UUID | str | None = None,
     ) -> KnowledgeResult:
         return await self._call(
             "list_wiki_pages", _repository(repository, commit), organization_id=organization_id
@@ -82,7 +96,7 @@ class AsyncKnowledgeClient(AsyncMcpTools):
         page_key: str,
         *,
         commit: str | None = None,
-        organization_id: str | None = None,
+        organization_id: UUID | str | None = None,
     ) -> KnowledgeResult:
         return await self._call(
             "get_wiki_page",
@@ -96,7 +110,7 @@ class AsyncKnowledgeClient(AsyncMcpTools):
         question: str,
         *,
         commit: str | None = None,
-        organization_id: str | None = None,
+        organization_id: UUID | str | None = None,
     ) -> KnowledgeResult:
         return await self._call(
             "ask_codebase",
@@ -105,7 +119,7 @@ class AsyncKnowledgeClient(AsyncMcpTools):
         )
 
     async def get_architecture_document(
-        self, environment_id: str, *, organization_id: str | None = None
+        self, environment_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return await self._call(
             "get_architecture_document",
@@ -114,19 +128,19 @@ class AsyncKnowledgeClient(AsyncMcpTools):
         )
 
     async def get_plan(
-        self, plan_id: str, *, organization_id: str | None = None
+        self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return await self._call("get_plan", {"plan_id": plan_id}, organization_id=organization_id)
 
     async def start_plan_implementation(
-        self, plan_id: str, *, organization_id: str | None = None
+        self, plan_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return await self._call(
             "start_plan_implementation", {"plan_id": plan_id}, organization_id=organization_id
         )
 
     async def get_plan_implementation(
-        self, implementation_id: str, *, organization_id: str | None = None
+        self, implementation_id: UUID | str, *, organization_id: UUID | str | None = None
     ) -> KnowledgeResult:
         return await self._call(
             "get_plan_implementation",
