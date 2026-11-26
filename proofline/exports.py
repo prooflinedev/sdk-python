@@ -46,16 +46,22 @@ def decode_export(
         if datetime.fromisoformat(horizon.replace("Z", "+00:00")).tzinfo is None:
             raise ValueError
         text = response.content.decode("utf-8")
+
         if format == "csv":
             records = parse_csv(text)
             columns = records.pop(0)
-            if len(set(columns)) != len(columns) or any(
-                len(row) != len(columns) for row in records
+
+            if (
+                "dataset_version" not in columns
+                or len(set(columns)) != len(columns)
+                or any(len(row) != len(columns) for row in records)
             ):
                 raise ValueError
+
             rows = [dict(zip(columns, row, strict=True)) for row in records]
         else:
             rows = [json.loads(line) for line in text.split("\n") if line.strip()]
+
         if any(
             not isinstance(row, dict) or str(row.get("dataset_version")) != version for row in rows
         ):
