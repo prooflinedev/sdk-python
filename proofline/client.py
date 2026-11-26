@@ -189,6 +189,20 @@ def _pagination_limit(resource: str = "Review") -> ProoflineError:
     )
 
 
+def _export_path(organization_id: UUID, dataset: ExportDataset) -> str:
+    # This path is built by hand rather than by a generated operation, so the
+    # organization must become one canonical UUID segment. Any other text could
+    # add segments, leave the organization through dot segments, or replace the
+    # dataset through "?" or "#", and the page would still decode as `dataset`.
+    try:
+        organization = (
+            organization_id if isinstance(organization_id, UUID) else UUID(organization_id)
+        )
+    except (TypeError, ValueError, AttributeError):
+        raise ValueError("Export organization_id must be a UUID.") from None
+    return f"/api/v1/organizations/{organization}/exports/{dataset}"
+
+
 def _export_page_limit(max_pages: int) -> None:
     if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= 1_000:
         raise ValueError("Export pagination requires max_pages 1..1000.")
@@ -290,6 +304,7 @@ class ProoflineClient(Operations):
             raise ValueError("Unknown export dataset.")
         if format not in ("csv", "ndjson"):
             raise ValueError("Export format must be csv or ndjson.")
+        path = _export_path(organization_id, dataset)
         params = {"from": from_time, "to": to_time, "format": format}
         if cursor is not None:
             params["cursor"] = cursor
@@ -297,7 +312,7 @@ class ProoflineClient(Operations):
             params["group_by"] = group_by
         try:
             response = self._http.get(
-                f"/api/v1/organizations/{organization_id}/exports/{dataset}",
+                path,
                 params=params,
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )
@@ -660,6 +675,7 @@ class AsyncProoflineClient(AsyncOperations):
             raise ValueError("Unknown export dataset.")
         if format not in ("csv", "ndjson"):
             raise ValueError("Export format must be csv or ndjson.")
+        path = _export_path(organization_id, dataset)
         params = {"from": from_time, "to": to_time, "format": format}
         if cursor is not None:
             params["cursor"] = cursor
@@ -667,7 +683,7 @@ class AsyncProoflineClient(AsyncOperations):
             params["group_by"] = group_by
         try:
             response = await self._http.get(
-                f"/api/v1/organizations/{organization_id}/exports/{dataset}",
+                path,
                 params=params,
                 headers={"Accept": "text/csv" if format == "csv" else "application/x-ndjson"},
             )

@@ -1992,6 +1992,81 @@ async def test_export_iterator_validates_bound_before_requests(mode: str, bound:
         assert not server.requests
 
 
+EXPORT_WINDOW: dict[str, Any] = {
+    "from_time": "2026-10-01T00:00:00Z",
+    "to_time": "2026-10-25T00:00:00Z",
+}
+
+
+# Each value would otherwise change the request target: dot segments leave the
+# organization, a slash adds path segments, and "?" or "#" replace the dataset.
+@MODES
+@pytest.mark.parametrize(
+    "organization_id",
+    [
+        "..",
+        ".",
+        "",
+        f"{ORG}/../../reviews",
+        f"{ORG}/exports/spend?x=",
+        f"{ORG}#",
+        "not-a-uuid",
+        ORG.int,
+        None,
+    ],
+)
+async def test_export_refuses_an_organization_id_that_is_not_a_uuid(
+    mode: str, organization_id: Any
+) -> None:
+    with Server(lambda request, index: Reply(status=404, body={"detail": "no"})) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError, match="organization_id"):
+                await call(client, "export_reviews", organization_id, "reviews", **EXPORT_WINDOW)
+            iterator = client.iter_export_pages(organization_id, "reviews", **EXPORT_WINDOW)
+            with pytest.raises(ValueError, match="organization_id"):
+                await next_export(iterator)
+        assert not server.requests
+
+
+# ORG has no hex letters, so its upper-case spelling would equal its string.
+LETTERED_ORG = UUID("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+ORG_SPELLINGS = [
+    LETTERED_ORG,
+    str(LETTERED_ORG),
+    str(LETTERED_ORG).upper(),
+    f"{{{LETTERED_ORG}}}",
+    LETTERED_ORG.hex.upper(),
+]
+
+
+def test_organization_spellings_are_distinct() -> None:
+    assert len({repr(spelling) for spelling in ORG_SPELLINGS}) == len(ORG_SPELLINGS)
+
+
+@MODES
+@pytest.mark.parametrize("organization_id", ORG_SPELLINGS)
+async def test_export_sends_the_canonical_organization_path(
+    mode: str, organization_id: Any
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        return Reply(
+            body=b'{"dataset_version":1}\n',
+            headers={
+                "Content-Type": "application/x-ndjson",
+                "X-Proofline-Export-Version": "1",
+                "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+            },
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            page = await call(client, "export_reviews", organization_id, "reviews", **EXPORT_WINDOW)
+            assert page.rows == [{"dataset_version": 1}]
+        assert urlsplit(server.requests[0].path).path == (
+            f"/api/v1/organizations/{LETTERED_ORG}/exports/reviews"
+        )
+
+
 @MODES
 @pytest.mark.parametrize(
     ("cursors", "resume", "yielded"),
