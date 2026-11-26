@@ -1922,6 +1922,56 @@ async def test_export_iterator_preserves_filters_and_streams_empty_pages(
 
 
 @MODES
+@pytest.mark.parametrize(
+    ("first_horizon", "next_horizon", "empty", "valid"),
+    [
+        ("2026-10-25T00:00:00Z", "2026-10-24T20:00:00-04:00", False, True),
+        ("2026-10-25T00:00:00Z", "2026-10-25T00:00:01Z", False, False),
+        ("2026-10-25T00:00:00Z", "2026-10-25T00:00:01Z", True, False),
+        ("2026-10-25T00:00:00.1234567Z", "2026-10-25T00:00:00.1234568Z", False, False),
+        ("2026-10-25T00:00:00.1234567Z", "2026-10-25T00:00:00.123456700Z", False, True),
+    ],
+    ids=["equivalent-offset", "changed", "changed-empty", "submicrosecond", "trailing-zeroes"],
+)
+async def test_export_iterator_requires_frozen_horizon(
+    mode: str, first_horizon: str, next_horizon: str, empty: bool, valid: bool
+) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        query = parse_qs(urlsplit(request.path).query)
+        assert query.get("cursor") == (["resume"] if index == 0 else ["next"])
+        headers = {
+            "Content-Type": "application/x-ndjson",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": first_horizon if index == 0 else next_horizon,
+        }
+        if index == 0:
+            headers["X-Proofline-Export-Next-Cursor"] = "next"
+        return Reply(
+            body=b"" if index == 1 and empty else b'{"dataset_version":1}\n',
+            headers=headers,
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            iterator = client.iter_export_pages(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+                cursor="resume",
+            )
+            assert (await next_export(iterator)).settled_until == first_horizon
+            if valid:
+                assert (await next_export(iterator)).settled_until == next_horizon
+            else:
+                with pytest.raises(ProoflineError) as raised:
+                    await next_export(iterator)
+                assert raised.value.type == "urn:proofline:sdk:invalid-pagination"
+                assert raised.value.detail == "The export settled horizon changed between pages."
+        assert len(server.requests) == 2
+
+
+@MODES
 @pytest.mark.parametrize("failure", ["empty", "repeat", "resume", "cycle", "bound", "refused"])
 async def test_export_iterator_refuses_invalid_continuations_and_bounds(
     mode: str, failure: str

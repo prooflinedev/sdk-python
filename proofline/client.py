@@ -72,7 +72,7 @@ from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
-from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
+from .exports import ExportDataset, ExportFormat, ExportPage, checked_export_horizon, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
@@ -317,9 +317,10 @@ class ProoflineClient(Operations):
         group_by: str | None = None,
         max_pages: int = 100,
     ) -> Iterator[ExportPage]:
-        """Stream export pages, refusing cursor cycles and incomplete bounded traversals."""
+        """Stream export pages while checking cursors, the settled horizon, and page bounds."""
         _export_page_limit(max_pages)
         seen = {cursor} if cursor is not None else set()
+        horizon: str | None = None
         for _ in range(max_pages):
             page = self.export_reviews(
                 organization_id,
@@ -331,6 +332,7 @@ class ProoflineClient(Operations):
                 group_by=group_by,
             )
             cursor = _export_next_cursor(page, seen)
+            horizon = checked_export_horizon(page.settled_until, horizon)
             yield page
             if cursor is None:
                 return
@@ -687,9 +689,10 @@ class AsyncProoflineClient(AsyncOperations):
         group_by: str | None = None,
         max_pages: int = 100,
     ) -> AsyncIterator[ExportPage]:
-        """Stream export pages, refusing cursor cycles and incomplete bounded traversals."""
+        """Stream export pages while checking cursors, the settled horizon, and page bounds."""
         _export_page_limit(max_pages)
         seen = {cursor} if cursor is not None else set()
+        horizon: str | None = None
         for _ in range(max_pages):
             page = await self.export_reviews(
                 organization_id,
@@ -701,6 +704,7 @@ class AsyncProoflineClient(AsyncOperations):
                 group_by=group_by,
             )
             cursor = _export_next_cursor(page, seen)
+            horizon = checked_export_horizon(page.settled_until, horizon)
             yield page
             if cursor is None:
                 return
