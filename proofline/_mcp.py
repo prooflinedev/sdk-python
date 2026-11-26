@@ -49,7 +49,7 @@ def _decode(response: httpx2.Response, identity: int | None) -> dict[str, Any]:
         if response.content:
             raise _refused()
         return {}
-    if response.headers.get("content-type", "").split(";")[0].strip() != "application/json":
+    if response.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
         raise _refused()
     try:
         value = response.json()
