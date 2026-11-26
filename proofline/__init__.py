@@ -6,6 +6,8 @@ from ._generated import models
 from ._generated.models import (
     AgentSession,
     AgentVendor,
+    CommitDeploy,
+    CommitDeployVerifications,
     CommitReviewRequest,
     CommitReviewResponse,
     CoverageUploadRequest,
@@ -13,6 +15,7 @@ from ._generated.models import (
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
+    DeployCheckpoint,
     FileReviewRequest,
     FileReviewResponse,
     PatchReviewRequest,
@@ -34,6 +37,12 @@ from ._generated.models import (
 from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
+from .deploys import (
+    DeployReading,
+    DeploySelector,
+    DeployVerificationOutcome,
+    judge_deploy_verifications,
+)
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
@@ -44,6 +53,8 @@ __all__ = [
     "AssessmentGap",
     "AsyncProoflineClient",
     "CheckGap",
+    "CommitDeploy",
+    "CommitDeployVerifications",
     "CommitReviewRequest",
     "CommitReviewResponse",
     "CoverageUploadRequest",
@@ -51,6 +62,10 @@ __all__ = [
     "CustomerAssessmentDetail",
     "CustomerFinding",
     "CustomerReviewDetail",
+    "DeployCheckpoint",
+    "DeployReading",
+    "DeploySelector",
+    "DeployVerificationOutcome",
     "ExportDataset",
     "ExportFormat",
     "ExportPage",
@@ -79,5 +94,6 @@ __all__ = [
     "StopResponse",
     "UploadedReport",
     "__version__",
+    "judge_deploy_verifications",
     "models",
 ]

@@ -76,6 +76,36 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Deploy verification
+
+`wait_for_deploy_verifications` waits until Proofline records a check of the deploys of one commit, then returns what those checks recorded. It follows the same rules as `proofline ci deploy`.
+
+```python
+from proofline import DeploySelector
+
+outcome = client.wait_for_deploy_verifications(
+    organization_id,
+    repository_id,
+    commit_sha,
+    until="MINUTES_20",
+    selector=DeploySelector(github_environment="production", deployment_task="deploy:web"),
+    timeout=1800,
+)
+if outcome.status != "NO_REGRESSION":
+    print(outcome.status, outcome.reason)
+```
+
+`until` is the check to wait for: `LANDING` (the default), `MINUTES_20`, `HOUR_1` or `DAY_1`, and the checks before it count too. `commit_sha` is a full 40-character lowercase SHA; any other value raises `ValueError` before a request. `selector` narrows the deploys by `environment_id`, `github_environment`, `deployment_task`, `github_deployment_id`, `workflow_run_id`, `workflow_run_attempt` or `aws_run_id`; without it every recorded deploy of the commit counts.
+
+The outcome's `status` is one of:
+
+- `REGRESSED`: a selected deploy failed or any of its checks recorded `REGRESSED`. This ends the wait at once.
+- `NO_REGRESSION`: every check through `until` recorded `HEALTHY` with no gap. This means no regression was observed, not that the deploy is free of problems.
+- `INCOMPLETE`: the check will not be recorded, or it is recorded but does not establish the result, for example a gap, a superseded or inactive deploy, deploy checks that ended early, or a state this SDK does not know.
+- `TIMED_OUT`: the check was not recorded, or no selected deploy was recorded, before `timeout` seconds passed.
+
+`outcome.readings` holds each selected deploy with its own reading, and `reason` explains any status other than `NO_REGRESSION`. To judge a single read yourself, pass the result of `get_commit_deploy_verifications` to `judge_deploy_verifications(read, until, selector)`; a check not recorded yet then reads `INCOMPLETE`. `AsyncProoflineClient` offers the same methods with `await`.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.

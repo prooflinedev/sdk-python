@@ -20,6 +20,7 @@ from ._generated.api.default import (
     get_agent_session,
     get_agent_session_prompt,
     get_assessment,
+    get_commit_deploy_verifications,
     get_deployment_review,
     get_finding,
     get_finding_fix_prompt,
@@ -44,6 +45,7 @@ from ._generated.client import AuthenticatedClient
 from ._generated.models.agent_session import AgentSession
 from ._generated.models.agent_session_prompt_type_0 import AgentSessionPromptType0
 from ._generated.models.agent_session_prompt_type_1 import AgentSessionPromptType1
+from ._generated.models.commit_deploy_verifications import CommitDeployVerifications
 from ._generated.models.commit_review_request import CommitReviewRequest
 from ._generated.models.commit_review_response import CommitReviewResponse
 from ._generated.models.coverage_upload_request import CoverageUploadRequest
@@ -51,6 +53,7 @@ from ._generated.models.coverage_upload_response import CoverageUploadResponse
 from ._generated.models.customer_assessment_detail import CustomerAssessmentDetail
 from ._generated.models.customer_finding import CustomerFinding
 from ._generated.models.customer_review_detail import CustomerReviewDetail
+from ._generated.models.deploy_checkpoint import DeployCheckpoint
 from ._generated.models.file_review_request import FileReviewRequest
 from ._generated.models.file_review_response import FileReviewResponse
 from ._generated.models.finding_fix_prompt_type_0 import FindingFixPromptType0
@@ -72,6 +75,13 @@ from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
+from .deploys import (
+    Checkpoint,
+    DeploySelector,
+    DeployVerificationOutcome,
+    checkpoint_name,
+    conclude,
+)
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
@@ -161,6 +171,23 @@ def _head_commit(value: str | None) -> None:
         or any(character not in hexdigits for character in value)
     ):
         raise ValueError("The head commit must be a full 40 or 64 character hexadecimal SHA.")
+
+
+def _commit_sha(value: str) -> None:
+    # The deploy route accepts only a full lowercase SHA; refuse anything else before a request.
+    if (
+        not isinstance(value, str)
+        or len(value) != 40
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("The commit must be a full 40 character lowercase hexadecimal SHA.")
+
+
+def _deploy_wait(timeout: float, commit_sha: str, until: str) -> Checkpoint:
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("The deploy timeout must be a finite nonnegative number of seconds.")
+    _commit_sha(commit_sha)
+    return checkpoint_name(until)
 
 
 def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
@@ -538,6 +565,59 @@ class ProoflineClient(Operations):
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
+
+    def get_commit_deploy_verifications(
+        self, organization_id: UUID, repository_id: UUID, commit_sha: str
+    ) -> CommitDeployVerifications:
+        _commit_sha(commit_sha)
+        return self._call(
+            get_commit_deploy_verifications.sync_detailed,
+            CommitDeployVerifications,
+            organization_id,
+            repository_id,
+            commit_sha,
+        )
+
+    def wait_for_deploy_verifications(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        commit_sha: str,
+        *,
+        until: Checkpoint | DeployCheckpoint = "LANDING",
+        selector: DeploySelector | None = None,
+        timeout: float = 1800,
+    ) -> DeployVerificationOutcome:
+        """Wait until the selected deploys record the `until` check, or return TIMED_OUT.
+
+        A regression ends the wait at once. NO_REGRESSION means every check
+        through `until` recorded HEALTHY with no gap; any other settled read is
+        INCOMPLETE.
+        """
+        checkpoint = _deploy_wait(timeout, commit_sha, until)
+        last: CommitDeployVerifications | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = self.get_commit_deploy_verifications(
+                        organization_id, repository_id, commit_sha
+                    )
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                result = conclude(last, checkpoint, selector, None)
+                if result is not None:
+                    return result
+                sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            return cast(
+                DeployVerificationOutcome, conclude(last, checkpoint, selector, "TIMED_OUT")
+            )
+        finally:
+            _transport.DEADLINE.reset(deadline)
 
     def wait_for_review(
         self,
@@ -933,6 +1013,53 @@ class AsyncProoflineClient(AsyncOperations):
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
+
+    async def get_commit_deploy_verifications(
+        self, organization_id: UUID, repository_id: UUID, commit_sha: str
+    ) -> CommitDeployVerifications:
+        _commit_sha(commit_sha)
+        return await self._call(
+            get_commit_deploy_verifications.asyncio_detailed,
+            CommitDeployVerifications,
+            organization_id,
+            repository_id,
+            commit_sha,
+        )
+
+    async def wait_for_deploy_verifications(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        commit_sha: str,
+        *,
+        until: Checkpoint | DeployCheckpoint = "LANDING",
+        selector: DeploySelector | None = None,
+        timeout: float = 1800,
+    ) -> DeployVerificationOutcome:
+        checkpoint = _deploy_wait(timeout, commit_sha, until)
+        last: CommitDeployVerifications | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = await self.get_commit_deploy_verifications(
+                        organization_id, repository_id, commit_sha
+                    )
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                result = conclude(last, checkpoint, selector, None)
+                if result is not None:
+                    return result
+                await async_sleep(min(interval, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            return cast(
+                DeployVerificationOutcome, conclude(last, checkpoint, selector, "TIMED_OUT")
+            )
+        finally:
+            _transport.DEADLINE.reset(deadline)
 
     async def wait_for_review(
         self,
