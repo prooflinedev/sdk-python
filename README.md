@@ -76,6 +76,31 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Reviewing local changes
+
+`request_patch_review_from_git` reviews a checkout's unpushed changes, as `proofline review` does in the CLI. Nothing is pushed: GitHub needs only the base commit.
+
+```python
+from proofline import NoLocalChanges, SecretInPatch
+
+try:
+    requested = client.request_patch_review_from_git(organization_id, repository_id, cwd=".")
+except NoLocalChanges:
+    print("Nothing to review.")
+except SecretInPatch as refusal:
+    print(refusal)  # names the path, line and kind of credential, never the credential
+else:
+    outcome = client.wait_for_review(organization_id, requested.review_id)
+```
+
+By default the patch compares tracked work-tree files, staged or not, with the merge-base of `HEAD` and its upstream branch, or with `origin`'s default branch when there is no upstream. `selection="staged"` reads only the index and `selection="untracked"` also adds untracked files Git does not ignore. `base=` names another base, and `base=` with `head=` reviews only the committed range. Revisions resolve once to full commit SHAs. `verify_finding_ids` re-verifies up to 20 open findings against the patch, and `trigger_source` names the Git hook that sent it.
+
+Git runs once under fixed options, so personal configuration such as `diff.noprefix`, `color.ui`, `diff.relative`, `diff.external` or copy detection cannot change the patch. Selected bytes are collected in a copied index, so the repository's index is never modified, and Git takes no optional locks, so the call can run inside a commit hook. The async client runs Git in a worker thread.
+
+Each refusal raises a `LocalChangesError`, a `ValueError`, before any request: no changes (`NoLocalChanges`), a binary change, symbolic link, submodule or unresolved conflict, text or paths that are not UTF-8, more than 3,000 files, or a patch over 5 MiB. Every uploaded line is then checked as the CLI checks it. `SecretInPatch` refuses a `.env` or `.env.*` path, a private-key marker, or a listed credential shape (AWS access-key IDs, GitHub, Slack, Google, Stripe live, model-provider and Proofline tokens) on an added, removed or context line or a hunk heading. Pass an exact repository-relative path in `allow_paths` to skip it. The check recognizes only these shapes: finding none says nothing else about the patch.
+
+`read_local_changes` and `check_secrets` are exported for callers who build the request themselves; `LocalPatch.request()` returns the `PatchReviewRequest` body.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
