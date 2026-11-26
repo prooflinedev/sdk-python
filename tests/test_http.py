@@ -28,6 +28,7 @@ from pydantic import SecretStr
 
 from proofline import (
     AsyncProoflineClient,
+    CommitDeployVerifications,
     CommitReviewRequest,
     CommitReviewResponse,
     CoverageUploadRequest,
@@ -35,6 +36,8 @@ from proofline import (
     CustomerAssessmentDetail,
     CustomerFinding,
     CustomerReviewDetail,
+    DeployCheckpoint,
+    DeploySelector,
     FileReviewRequest,
     FileReviewResponse,
     PatchReviewRequest,
@@ -52,6 +55,7 @@ from proofline import (
     UploadedReport,
     _sync_http,
     _transport,
+    judge_deploy_verifications,
     models,
 )
 from proofline import client as client_module
@@ -2586,3 +2590,251 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+DEPLOY_COMMIT = "89abcdef0123456789abcdef0123456789abcdef"
+DEPLOY_PATH = (
+    f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}"
+    f"/commits/{DEPLOY_COMMIT}/deploy-verifications"
+)
+
+
+def deploy(*results: str | None, **fields: Any) -> dict[str, Any]:
+    """A deploy of one task in run 7 whose checks recorded `results` in order, the rest not yet."""
+    checkpoints = ("LANDING", "MINUTES_20", "HOUR_1", "DAY_1")
+    return {
+        "environment_id": str(ASSESSMENT),
+        "github_environment": "production",
+        "deployment_task": "deploy",
+        "workflow_run_id": 7,
+        "workflow_run_attempts": [1],
+        "state": "NOT_YET_DUE",
+        "regressed": "REGRESSED" in results,
+        "checkpoints": [
+            {"checkpoint": name, "result": result, "due_at": "2026-11-21T00:00:00Z"}
+            for name, result in zip(checkpoints, (*results, None, None, None, None))
+        ],
+        "gaps": [],
+        **fields,
+    }
+
+
+def verifications(*deploys: dict[str, Any]) -> dict[str, Any]:
+    return {"recorded": bool(deploys), "deploys": list(deploys)}
+
+
+def gap_at_minutes_20() -> dict[str, Any]:
+    # Newer servers report each check's own gaps beside the deploy-wide ones.
+    recorded = deploy("HEALTHY", "HEALTHY", "HEALTHY", gaps=["SIGNAL_NO_DATA"])
+    for index, check in enumerate(recorded["checkpoints"]):
+        check["gaps"] = ["SIGNAL_NO_DATA"] if index == 1 else []
+    return recorded
+
+
+HEALTHY = deploy("HEALTHY", "HEALTHY", "HEALTHY")
+ENDED = deploy("HEALTHY", "HEALTHY", state="UNRECORDED", verification_ended=True)
+
+
+@MODES
+@pytest.mark.parametrize(
+    ("until", "recorded", "status"),
+    [
+        ("LANDING", HEALTHY, "NO_REGRESSION"),
+        ("HOUR_1", HEALTHY, "NO_REGRESSION"),
+        ("LANDING", deploy("REGRESSED"), "REGRESSED"),
+        ("LANDING", deploy("HEALTHY", "REGRESSED"), "REGRESSED"),
+        ("LANDING", deploy("HEALTHY", state="FAILED"), "REGRESSED"),
+        ("LANDING", deploy("HEALTHY", gaps=["SIGNAL_NO_DATA"]), "INCOMPLETE"),
+        ("LANDING", gap_at_minutes_20(), "NO_REGRESSION"),
+        ("MINUTES_20", gap_at_minutes_20(), "INCOMPLETE"),
+        ("HOUR_1", gap_at_minutes_20(), "INCOMPLETE"),
+        ("LANDING", deploy("INCOMPLETE"), "INCOMPLETE"),
+        ("LANDING", deploy("SUPERSEDED"), "INCOMPLETE"),
+        ("HOUR_1", deploy("HEALTHY", "SUPERSEDED"), "INCOMPLETE"),
+        ("LANDING", deploy(state="UNVERIFIED"), "INCOMPLETE"),
+        ("LANDING", deploy(state="INACTIVE"), "INCOMPLETE"),
+        ("HOUR_1", ENDED, "INCOMPLETE"),
+        ("MINUTES_20", ENDED, "NO_REGRESSION"),
+        ("LANDING", deploy("HEALTHY", state="ROLLING_OUT"), "INCOMPLETE"),
+        ("LANDING", deploy("HEALTHY", "REGRESSED", state="ROLLING_OUT"), "REGRESSED"),
+        ("LANDING", deploy("HEALTHY", "INCOMPLETE", state="INCOMPLETE"), "NO_REGRESSION"),
+    ],
+    ids=[
+        "healthy",
+        "healthy-at-1h",
+        "regressed-at-landing",
+        "regressed-after-the-named-check",
+        "failed",
+        "deploy-wide-gap",
+        "gap-after-the-named-check",
+        "gap-at-the-named-check",
+        "gap-before-the-named-check",
+        "incomplete",
+        "superseded",
+        "superseded-before-1h",
+        "unverified",
+        "inactive",
+        "checks-ended-before-1h",
+        "checks-ended-after-20m",
+        "unknown-state",
+        "unknown-state-regressed",
+        "later-incomplete-on-known-state",
+    ],
+)
+async def test_deploy_wait_settles_each_reading_on_the_first_read(
+    mode: str, until: str, recorded: dict[str, Any], status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body=verifications(recorded))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_deploy_verifications", ORG, REPOSITORY, DEPLOY_COMMIT, until=until
+            )
+        assert result.status == status
+        assert result.checkpoint == until
+        assert (result.reason is None) == (status == "NO_REGRESSION")
+        assert len(result.readings) == 1
+        assert len(server.requests) == 1
+
+
+@MODES
+async def test_deploy_wait_polls_until_the_check_is_recorded_or_times_out(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    answers = [
+        verifications(),
+        verifications(deploy("HEALTHY")),
+        verifications(deploy("HEALTHY", "HEALTHY")),
+    ]
+    with Server(lambda request, index: Reply(body=answers[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_deploy_verifications",
+                ORG,
+                REPOSITORY,
+                DEPLOY_COMMIT,
+                until=DeployCheckpoint.MINUTES_20,
+            )
+        assert result.status == "NO_REGRESSION"
+        assert clock.delays == [5.0, 10.0]
+        assert [request.path for request in server.requests] == [DEPLOY_PATH] * 3
+        assert server.requests[0].headers["Authorization"] == f"Bearer {TOKEN}"
+
+    clock.delays.clear()
+    with Server(lambda request, index: Reply(body=verifications(deploy()))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_deploy_verifications", ORG, REPOSITORY, DEPLOY_COMMIT, timeout=30
+            )
+            assert result.status == "TIMED_OUT"
+            assert result.reason == "The LANDING check is not recorded."
+            assert clock.delays == [5.0, 10.0, 15.0]
+            assert len(server.requests) == 3
+            result = await call(
+                client, "wait_for_deploy_verifications", ORG, REPOSITORY, DEPLOY_COMMIT, timeout=0
+            )
+            assert result.status == "TIMED_OUT"
+        assert len(server.requests) == 3
+
+
+@MODES
+async def test_deploy_reads_refuse_bad_arguments_before_a_request(mode: str) -> None:
+    with Server(lambda request, index: Reply(body=verifications())) as server:
+        async with session(mode, server.url) as client:
+            for sha in (
+                "main",
+                DEPLOY_COMMIT[:12],
+                DEPLOY_COMMIT.upper(),
+                DEPLOY_COMMIT + "0",
+                "g" * 40,
+                "a" * 64,
+            ):
+                for operation in (
+                    "get_commit_deploy_verifications",
+                    "wait_for_deploy_verifications",
+                ):
+                    with pytest.raises(ValueError, match="commit"):
+                        await call(client, operation, ORG, REPOSITORY, sha)
+            for kwargs in ({"until": "2h"}, {"timeout": -1}, {"timeout": float("inf")}):
+                with pytest.raises(ValueError):
+                    await call(
+                        client,
+                        "wait_for_deploy_verifications",
+                        ORG,
+                        REPOSITORY,
+                        DEPLOY_COMMIT,
+                        **kwargs,
+                    )
+        assert not server.requests
+    with pytest.raises(ValueError, match="workflow_run_id"):
+        DeploySelector(workflow_run_attempt=2)
+
+
+@MODES
+async def test_deploy_read_decodes_the_commit_and_refuses_malformed_deploys(mode: str) -> None:
+    malformed = [
+        deploy(state=7),
+        deploy(regressed="no"),
+        deploy(gaps=[7]),
+        {**deploy(), "checkpoints": [{"checkpoint": "HOUR_2", "due_at": "2026-11-21T00:00:00Z"}]},
+    ]
+    bodies = [verifications(deploy("HEALTHY", rolled_back=True))] + [
+        verifications(body) for body in malformed
+    ]
+    with Server(lambda request, index: Reply(body=bodies[index])) as server:
+        async with session(mode, server.url) as client:
+            read = await call(
+                client, "get_commit_deploy_verifications", ORG, REPOSITORY, DEPLOY_COMMIT
+            )
+            assert isinstance(read, CommitDeployVerifications)
+            assert read.recorded is True
+            assert read.deploys[0].rolled_back is True
+            for _ in malformed:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(
+                        client, "wait_for_deploy_verifications", ORG, REPOSITORY, DEPLOY_COMMIT
+                    )
+                assert raised.value.type == "urn:proofline:sdk:invalid-response"
+        assert len(server.requests) == len(bodies)
+
+
+def test_deploy_selector_decides_which_deploys_count() -> None:
+    web = deploy("HEALTHY", deployment_task="deploy:web", github_deployment_ids=[101])
+    api = deploy(
+        "REGRESSED",
+        deployment_task="deploy:api",
+        workflow_run_attempts=[1, 2],
+        github_deployment_ids=[102],
+    )
+    # An older server omits github_deployment_ids, so no deployment ID selects this one.
+    aws = deploy(
+        "HEALTHY",
+        environment_id=str(REVIEW),
+        aws_provider="AWS_CODEPIPELINE",
+        aws_run_id="execution-1",
+        workflow_run_id=None,
+        workflow_run_attempts=[],
+    )
+    read = CommitDeployVerifications.from_dict(verifications(web, api, aws))
+    for selector, status, tasks in [
+        (None, "REGRESSED", ["deploy:web", "deploy:api", "deploy"]),
+        (DeploySelector(deployment_task="deploy:web"), "NO_REGRESSION", ["deploy:web"]),
+        (DeploySelector(github_deployment_id=102), "REGRESSED", ["deploy:api"]),
+        (DeploySelector(github_deployment_id=103), "INCOMPLETE", []),
+        (DeploySelector(workflow_run_id=7, workflow_run_attempt=2), "REGRESSED", ["deploy:api"]),
+        (DeploySelector(workflow_run_id=7, workflow_run_attempt=3), "INCOMPLETE", []),
+        (DeploySelector(aws_run_id="execution-1"), "NO_REGRESSION", ["deploy"]),
+        (DeploySelector(environment_id=REVIEW), "NO_REGRESSION", ["deploy"]),
+        (DeploySelector(github_environment="staging"), "INCOMPLETE", []),
+    ]:
+        result = judge_deploy_verifications(read, "LANDING", selector)
+        assert result.status == status, selector
+        assert [reading.deploy.deployment_task for reading in result.readings] == tasks
+    empty = judge_deploy_verifications(read, "LANDING", DeploySelector(github_environment="x"))
+    assert empty.reason == "No recorded deploy matches the selector."
+    pending = judge_deploy_verifications(
+        CommitDeployVerifications.from_dict(verifications(deploy())), DeployCheckpoint.HOUR_1
+    )
+    assert (pending.status, pending.reason) == ("INCOMPLETE", "The HOUR_1 check is not recorded.")
