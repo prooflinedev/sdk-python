@@ -2463,13 +2463,59 @@ async def test_mcp_per_call_organizations_and_refusals(mode: str) -> None:
                 ("fixes", "get_reverification", (str(REVIEW),), {}, {"request_id": str(REVIEW)}),
             ]
             for group, name, args, kwargs, expected in cases:
-                for target in (first, second):
+                for target in (first, second, UUID(first), UUID(second)):
                     answer = await invoke(group, name, *args, **kwargs, organization_id=target)
-                    assert answer["structuredContent"]["data"]["organization_id"] == target
+                    assert answer["structuredContent"]["data"]["organization_id"] == str(target)
                     assert observed[-1] == {
                         "name": name,
-                        "arguments": {**expected, "organization_id": target},
+                        "arguments": {**expected, "organization_id": str(target)},
                     }
+
+            uuid_cases = [
+                (
+                    "knowledge",
+                    "get_architecture_document",
+                    (REVIEW,),
+                    {},
+                    {"environment_id": str(REVIEW)},
+                ),
+                ("knowledge", "get_plan", (REVIEW,), {}, {"plan_id": str(REVIEW)}),
+                (
+                    "knowledge",
+                    "start_plan_implementation",
+                    (REVIEW,),
+                    {},
+                    {"plan_id": str(REVIEW)},
+                ),
+                (
+                    "knowledge",
+                    "get_plan_implementation",
+                    (REVIEW,),
+                    {},
+                    {"implementation_id": str(REVIEW)},
+                ),
+                ("fixes", "get_fix_context", (REVIEW,), {}, {"finding_id": str(REVIEW)}),
+                (
+                    "fixes",
+                    "request_reverification",
+                    (REVIEW, [REVIEW], "a" * 40),
+                    {"note": "fixed"},
+                    {
+                        "review_id": str(REVIEW),
+                        "finding_ids": [str(REVIEW)],
+                        "commit_sha": "a" * 40,
+                        "note": "fixed",
+                    },
+                ),
+                ("fixes", "get_reverification", (REVIEW,), {}, {"request_id": str(REVIEW)}),
+            ]
+            for group, name, args, kwargs, expected in uuid_cases:
+                answer = await invoke(group, name, *args, **kwargs, organization_id=UUID(first))
+                assert answer["structuredContent"]["data"]["organization_id"] == first
+                assert observed[-1] == {
+                    "name": name,
+                    "arguments": {**expected, "organization_id": first},
+                }
 
             if mode == "async":
                 concurrent = True
@@ -2517,19 +2563,34 @@ async def test_mcp_per_call_organizations_and_refusals(mode: str) -> None:
 def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> None:
     # Compile consumer code through the public entry point; dynamic HTTP tests
     # cannot catch a missing keyword in just one sync/async method signature.
-    lines = ["from proofline import ProoflineClient, AsyncProoflineClient, KnowledgeResult"]
+    lines = [
+        "from uuid import UUID",
+        "from proofline import ProoflineClient, AsyncProoflineClient, KnowledgeResult",
+    ]
     calls = [
         'knowledge.list_wiki_pages("owner/name", commit="a" * 40)',
         'knowledge.get_wiki_page("owner/name", "index")',
         'knowledge.ask_codebase("owner/name", "How?")',
         'knowledge.get_architecture_document("environment-id")',
+        'knowledge.get_architecture_document(UUID("00000000-0000-7000-8000-000000000001"))',
         'knowledge.get_plan("plan-id")',
+        'knowledge.get_plan(UUID("00000000-0000-7000-8000-000000000001"))',
         'knowledge.start_plan_implementation("plan-id")',
+        'knowledge.start_plan_implementation(UUID("00000000-0000-7000-8000-000000000001"))',
         'knowledge.get_plan_implementation("implementation-id")',
+        'knowledge.get_plan_implementation(UUID("00000000-0000-7000-8000-000000000001"))',
         'fixes.list_open_findings("owner/name", 7)',
         'fixes.get_fix_context("finding-id")',
+        'fixes.get_fix_context(UUID("00000000-0000-7000-8000-000000000001"))',
         'fixes.request_reverification("review-id", ["finding-id"], "a" * 40, note="fixed")',
+        (
+            "fixes.request_reverification("
+            'UUID("00000000-0000-7000-8000-000000000001"), '
+            '[UUID("00000000-0000-7000-8000-000000000002")], '
+            '"a" * 40, note="fixed")'
+        ),
         'fixes.get_reverification("request-id")',
+        'fixes.get_reverification(UUID("00000000-0000-7000-8000-000000000001"))',
     ]
     for prefix, kind, wait in [
         ("", "ProoflineClient", ""),
@@ -2539,12 +2600,34 @@ def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> No
         lines.append(f"    result: KnowledgeResult = {wait}client.mcp.list_organizations()")
         for expression in calls:
             lines.append(f"    result = {wait}client.{expression}")
-            targeted = expression[:-1] + ', organization_id="00000000-0000-7000-8000-000000000001")'
-            lines.append(f"    result = {wait}client.{targeted}")
+            targeted_str = (
+                expression[:-1] + ', organization_id="00000000-0000-7000-8000-000000000001")'
+            )
+            lines.append(f"    result = {wait}client.{targeted_str}")
+            targeted_uuid = (
+                expression[:-1] + ', organization_id=UUID("00000000-0000-7000-8000-000000000001"))'
+            )
+            lines.append(f"    result = {wait}client.{targeted_uuid}")
     fixture = tmp_path / "mcp_types.py"
     fixture.write_text("\n".join(lines))
     # Use the same mypy configuration as the SDK qualification gate.
     subprocess.run([sys.executable, "-m", "mypy", str(fixture)], check=True)
+
+
+def test_mcp_body_serializes_uuid_and_rejects_unserializable_types() -> None:
+    from proofline._mcp import _body
+
+    uid = UUID("00000000-0000-7000-8000-000000000001")
+    raw = _body("tools/call", {"organization_id": uid, "ids": [uid]}, 1)
+    decoded = json.loads(raw.decode("utf-8"))
+    assert decoded["params"]["organization_id"] == str(uid)
+    assert decoded["params"]["ids"] == [str(uid)]
+
+    class Unserializable:
+        pass
+
+    with pytest.raises(TypeError):
+        _body("tools/call", {"custom": Unserializable()}, 1)
 
 
 @MODES
