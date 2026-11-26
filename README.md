@@ -1,6 +1,6 @@
 # proofline-sdk
 
-`proofline-sdk` provides typed synchronous (`ProoflineClient`) and asynchronous (`AsyncProoflineClient`) Python clients for the [Proofline](https://proofline.sh) review API. The clients read and request reviews with a scoped API token, and include pagination, waiting for a review, retries, and typed errors. The import package is `proofline`. Python 3.11 or newer is required.
+`proofline-sdk` provides typed synchronous (`ProoflineClient`) and asynchronous (`AsyncProoflineClient`) Python clients for the [Proofline](https://proofline.sh) review API. The clients read and request reviews with a scoped API token, and include pagination, waiting for a review or a re-verification, retries, and typed errors. The import package is `proofline`. Python 3.11 or newer is required.
 
 This repository is the published distribution of the Proofline Python SDK. The public OpenAPI contract in `openapi.public.json` generates the client and models in `proofline/_generated/`. [Open an issue](https://github.com/prooflinedev/sdk-python/issues) for changes to the OpenAPI contract, generated code, or workflows. Pull requests are welcome for the hand-written client in `proofline/client.py`, transport and helpers outside `proofline/_generated/`, and tests in `tests/`.
 
@@ -208,6 +208,16 @@ result = client.fixes.request_reverification(
 if result.get("isError"):
     raise RuntimeError("Re-verification was refused.")
 ```
+
+`wait_for_reverification` polls `get_reverification` for the request id that call returned. It is a method on both clients; use `await` with `AsyncProoflineClient`. The optional `organization_id` keyword applies to every read in the wait. The first pause is 5 seconds, and each later pause doubles up to 60 seconds. The default `timeout` is 300 seconds.
+
+```python
+settled = client.wait_for_reverification(request_id)
+if settled.get("isError"):
+    raise RuntimeError("Re-verification was refused.")
+```
+
+The public contract records each finding's re-verification as `LocalReverificationOutcome`. `PENDING` means the review is still running, so the wait continues while any finding is `PENDING` or has not recorded an outcome. `RESOLVED_VERIFIED`, `STILL_PRESENT`, and `NOT_VERIFIED` are finished outcomes and stop the wait. `NOT_VERIFIED` does not establish a fix. A tool result with `isError` returns immediately. Any other `ProoflineError` propagates and is not retried. When the deadline expires first, the call raises `ProoflineError` with type `urn:proofline:sdk:timeout`.
 
 Calls under `client.fixes` never retry. Results retain untrusted-text wrappers, availability, assessment gaps, and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix, and a tool request never records a human disposition.
 
