@@ -42,6 +42,7 @@ from proofline import (
     ProoflineClient,
     ProoflineError,
     RepositoryGuidance,
+    RepositoryName,
     RepositoryNames,
     RerunResponse,
     ReviewPage,
@@ -1737,6 +1738,143 @@ async def test_cursor_pagination_preserves_filters_and_refuses_cycles_or_bounds(
             with pytest.raises(ProoflineError) as raised:
                 await collect(client, max_items=1, filters={"cursor": "initial"})
             assert raised.value.type == "urn:proofline:sdk:pagination-limit"
+
+
+SIBLING = UUID("00000000-0000-4000-8000-000000000007")
+OTHER_OWNER = UUID("00000000-0000-4000-8000-000000000008")
+
+
+def repository_names(*entries: tuple[UUID, str]) -> dict[str, Any]:
+    return {
+        "repositories": [
+            {"id": str(identifier), "full_name": full_name} for identifier, full_name in entries
+        ]
+    }
+
+
+@MODES
+async def test_find_repository_resolves_owner_name_to_its_stable_id(mode: str) -> None:
+    listed = repository_names(
+        (SIBLING, "octo-org/api-docs"),
+        (REPOSITORY, "octo-org/api"),
+        (OTHER_OWNER, "other-org/api"),
+    )
+
+    def respond(request: Request, index: int) -> Reply:
+        assert request.method == "GET"
+        assert urlsplit(request.path).path == f"/api/v1/organizations/{ORG}/repository-names"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        return Reply(body=listed)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            found = await call(client, "find_repository", ORG, "octo-org/api")
+            assert isinstance(found, RepositoryName)
+            assert (found.id, found.full_name) == (REPOSITORY, "octo-org/api")
+            # GitHub owner/name comparisons ignore case, e.g. GITHUB_REPOSITORY spellings.
+            found = await call(client, "find_repository", ORG, "Octo-Org/API")
+            assert (found.id, found.full_name) == (REPOSITORY, "octo-org/api")
+            found = await call(client, "find_repository", ORG, "other-org/api")
+            assert found.id == OTHER_OWNER
+        assert len(server.requests) == 3
+
+
+@MODES
+async def test_find_repository_prefers_the_exact_spelling_and_refuses_ambiguity(
+    mode: str,
+) -> None:
+    listed = repository_names((SIBLING, "acme/Tool"), (REPOSITORY, "acme/tool"))
+    with Server(lambda request, index: Reply(body=listed)) as server:
+        async with session(mode, server.url) as client:
+            assert (await call(client, "find_repository", ORG, "acme/tool")).id == REPOSITORY
+            assert (await call(client, "find_repository", ORG, "acme/Tool")).id == SIBLING
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "find_repository", ORG, "ACME/TOOL")
+            assert raised.value.status == 0
+            assert raised.value.type == "urn:proofline:sdk:ambiguous-repository"
+            assert raised.value.repository_name == "ACME/TOOL"
+    duplicated = repository_names((SIBLING, "acme/tool"), (REPOSITORY, "acme/tool"))
+    with Server(lambda request, index: Reply(body=duplicated)) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "find_repository", ORG, "acme/tool")
+            assert raised.value.type == "urn:proofline:sdk:ambiguous-repository"
+
+
+@MODES
+async def test_find_repository_reports_a_name_the_token_cannot_see(mode: str) -> None:
+    listed = repository_names((REPOSITORY, "octo-org/api"), (SIBLING, "octo-org/kit"))
+    with Server(lambda request, index: Reply(body=listed)) as server:
+        async with session(mode, server.url) as client:
+            # Only ASCII letters fold; the Kelvin sign U+212A lowercases to k in Unicode.
+            assert "\u212ait".lower() == "kit"
+            for missing in [
+                "octo-org/web",
+                "octo-org/ap",
+                "octo-org/api-v2",
+                "octo/api",
+                "octo-org/\u212ait",
+            ]:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, "find_repository", ORG, missing)
+                assert raised.value.status == 0
+                assert raised.value.type == "urn:proofline:sdk:repository-not-found"
+                assert raised.value.repository_name == missing
+                assert missing in raised.value.detail
+                assert TOKEN not in raised.value.detail
+                assert repr(raised.value) == "ProoflineError(status=0)"
+    with Server(lambda request, index: Reply(body=repository_names())) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "find_repository", ORG, "octo-org/api")
+            assert raised.value.type == "urn:proofline:sdk:repository-not-found"
+
+
+@MODES
+async def test_find_repository_keeps_the_server_problem(mode: str) -> None:
+    problem = {
+        "type": "https://proofline.sh/problems/forbidden",
+        "title": "Forbidden",
+        "status": 403,
+        "detail": "The token lacks reviews:read.",
+    }
+    with Server(
+        lambda request, index: Reply(
+            status=403, body=problem, headers={"Content-Type": "application/problem+json"}
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "find_repository", ORG, "octo-org/api")
+            assert raised.value.status == 403
+            assert raised.value.type == problem["type"]
+        assert len(server.requests) == 1
+
+
+@MODES
+async def test_find_repository_validates_the_name_before_any_request(mode: str) -> None:
+    refused: list[Any] = [
+        "",
+        "api",
+        "/api",
+        "octo-org/",
+        "/",
+        "octo-org/api/extra",
+        " octo-org/api",
+        "octo-org/api ",
+        "octo-org /api",
+        "octo-org/api\n",
+        None,
+        7,
+        b"octo-org/api",
+    ]
+    listed = repository_names((REPOSITORY, "octo-org/api"))
+    with Server(lambda request, index: Reply(body=listed)) as server:
+        async with session(mode, server.url) as client:
+            for value in refused:
+                with pytest.raises(ValueError, match="owner/name"):
+                    await call(client, "find_repository", ORG, value)
+            assert server.requests == []
 
 
 def test_token_environment_and_https_origin_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
