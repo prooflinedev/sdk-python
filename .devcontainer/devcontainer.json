@@ -1,0 +1,87 @@
+{
+  "name": "proofline-sdk",
+  // CI runs Python 3.13.12; scripts/check.py uses the container's interpreter (>= 3.11).
+  "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
+  "containerEnv": {
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1"
+  },
+  // The container is the isolation boundary, so there is no .venv: the hash-pinned tools from
+  // requirements-dev.txt and the SDK's metadata go into the container user's site-packages
+  // (~/.local, already on PATH). Imports of `proofline` still resolve to the workspace sources.
+  // scripts/check.py keeps building its own throwaway environments for the full gate.
+  "postCreateCommand": "python -m pip install --user --require-hashes --only-binary=:all: -r requirements-dev.txt && python -m pip install --user --no-deps --no-build-isolation .",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Python: language support, Pylance, debugging, and the two checkers the gate runs.
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "ms-python.mypy-type-checker",
+        "charliermarsh.ruff",
+        // templates/**/*.py.jinja
+        "samuelcolvin.jinjahtml",
+        // pyproject.toml
+        "tamasfe.even-better-toml",
+        // .github/**/*.yml (schema-aware YAML, workflow syntax and expressions)
+        "redhat.vscode-yaml",
+        "github.vscode-github-actions"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.terminal.activateEnvironment": false,
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": ["tests"],
+
+        // mypy (pinned in requirements-dev.txt, configured in pyproject.toml) is the project's
+        // type checker. Pylance provides navigation, completion and import/syntax diagnostics
+        // only, so the editor does not show a second, conflicting set of type errors.
+        "python.languageServer": "Pylance",
+        "python.analysis.typeCheckingMode": "off",
+        "python.analysis.diagnosticMode": "openFilesOnly",
+        "python.analysis.extraPaths": ["scripts"],
+        "python.analysis.exclude": ["**/__pycache__", "**/.*", "dist"],
+        "mypy-type-checker.importStrategy": "fromEnvironment",
+        "mypy-type-checker.args": ["--config-file=pyproject.toml"],
+        "ruff.importStrategy": "fromEnvironment",
+
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+          }
+        },
+        "[toml]": {
+          "editor.defaultFormatter": "tamasfe.even-better-toml"
+        },
+
+        "files.associations": {
+          "*.py.jinja": "jinja-py",
+          "requirements*.txt": "pip-requirements",
+          "LICENSE*": "plaintext"
+        },
+        // Generator templates must stay byte-exact; never reformat them on save.
+        "[jinja-py]": {
+          "editor.formatOnSave": false
+        },
+        "files.exclude": {
+          "**/__pycache__": true,
+          "**/.mypy_cache": true,
+          "**/.pytest_cache": true,
+          "**/.ruff_cache": true
+        },
+        "files.watcherExclude": {
+          "**/.tools/**": true,
+          "**/.venv/**": true
+        },
+        "search.exclude": {
+          "**/.tools": true,
+          "**/.venv": true,
+          "openapi.public.json": true
+        }
+      }
+    }
+  }
+}
