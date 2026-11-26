@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import array
 import asyncio
 import csv
 import gzip
@@ -14,6 +15,7 @@ import threading
 import time
 import tomllib
 import traceback
+import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -1294,18 +1296,200 @@ async def test_wait_ends_on_the_read_that_names_another_head(
         assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
         assert len(server.requests) == 3
         assert clock.delays == [5, 10]
+    # Mismatch without on_poll ends on the read that names another head (2 requests)
     with Server(lambda request, index: Reply(body=responses[index])) as server:
         async with session(mode, server.url) as client:
             result = await call(
-                client, "wait_for_review", ORG, REVIEW, timeout=100, head_commit_sha=OTHER_HEAD
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=100,
+                head_commit_sha=OTHER_HEAD,
             )
         assert result.status == "INCOMPLETE"
         assert result.review.status == "RUNNING"
+        assert result.review.head_commit_sha == HEAD
+        assert gap_facts(result) == [PINNED_ELSEWHERE]
+        assert result.reason == "The review is pinned to another head commit."
+        assert len(server.requests) == 2
+        assert clock.delays == [5, 10, 5]
+
+    # Mismatch with on_poll also ends on the read that names another head (2 requests)
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        polled_reviews: list[tuple[Any, int]] = []
+        captured_mismatch_fields: list[tuple[str, Any, int]] = []
+        if mode == "async":
+            first_cb_event = asyncio.Event()
+            second_cb_reached = asyncio.Event()
+            cb_completed = False
+            waiter_task: asyncio.Task[Any] | None = None
+
+            class CallbackSignalFuture(asyncio.Future[None]):
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    super().__init__(*args, **kwargs)
+                    self.signal_registered = asyncio.Event()
+
+                def add_done_callback(self, fn: Any, *args: Any, **kwargs: Any) -> None:
+                    super().add_done_callback(fn, *args, **kwargs)
+                    self.signal_registered.set()
+
+            loop = asyncio.get_running_loop()
+            cb_signal_fut = CallbackSignalFuture(loop=loop)
+
+            def async_mismatch_cb(r: Any) -> Any:
+                captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
+                polled_reviews.append((r, len(server.requests)))
+                r.status = "MUTATED"
+                if len(polled_reviews) == 2:
+                    r.head_commit_sha = OTHER_HEAD
+                    assert waiter_task is not None
+                    assert not waiter_task.done()
+                    second_cb_reached.set()
+                    return cb_signal_fut
+                else:
+                    r.head_commit_sha = "mutated_sha"
+                    first_cb_event.set()
+                    return None
+
+            cb: Any = async_mismatch_cb
+        else:
+
+            def sync_mismatch_cb(r: Any) -> None:
+                captured_mismatch_fields.append((r.status, r.head_commit_sha, len(server.requests)))
+                polled_reviews.append((r, len(server.requests)))
+                r.status = "MUTATED"
+                if len(polled_reviews) == 2:
+                    r.head_commit_sha = OTHER_HEAD
+                else:
+                    r.head_commit_sha = "mutated_sha"
+
+            cb = sync_mismatch_cb
+        async with session(mode, server.url) as client:
+            if mode == "async":
+                waiter_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100,
+                        head_commit_sha=OTHER_HEAD,
+                        on_poll=cb,
+                    )
+                )
+                try:
+                    first_waiter = asyncio.create_task(first_cb_event.wait())
+                    try:
+                        done_first, _ = await asyncio.wait(
+                            {first_waiter, waiter_task},
+                            timeout=5.0,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if waiter_task in done_first:
+                            await waiter_task
+                        assert first_cb_event.is_set()
+                    finally:
+                        if not first_waiter.done():
+                            first_waiter.cancel()
+
+                    signal_waiter = asyncio.create_task(cb_signal_fut.signal_registered.wait())
+                    try:
+                        done_sig, _ = await asyncio.wait(
+                            {signal_waiter, waiter_task},
+                            timeout=5.0,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if waiter_task in done_sig:
+                            await waiter_task
+                        assert cb_signal_fut.signal_registered.is_set(), (
+                            "waiter_task did not wait on callback completion signal"
+                        )
+                    finally:
+                        if not signal_waiter.done():
+                            signal_waiter.cancel()
+
+                    # Assert that the waiter's pending wait is tied to the callback
+                    # completion future before resolving it:
+                    registered_cbs = [
+                        cb_item[0] if isinstance(cb_item, tuple) else cb_item
+                        for cb_item in (getattr(cb_signal_fut, "_callbacks", None) or [])
+                    ]
+                    done_cbs = [
+                        cb_item
+                        for cb_item in registered_cbs
+                        if getattr(cb_item, "__name__", "") == "_on_future_done"
+                    ]
+                    assert done_cbs, "Callback completion signal _on_future_done not found"
+                    target_cb = done_cbs[0]
+                    closure_vars = {
+                        name: cell.cell_contents
+                        for name, cell in zip(
+                            target_cb.__code__.co_freevars, target_cb.__closure__ or ()
+                        )
+                    }
+                    comp_fut = closure_vars.get("completion_fut")
+                    assert comp_fut is not None, "completion_fut missing from callback closure"
+                    assert not comp_fut.done(), "completion_fut already settled"
+                    on_comp_cbs = [
+                        c[0] if isinstance(c, tuple) else c
+                        for c in (getattr(comp_fut, "_callbacks", None) or [])
+                    ]
+                    assert on_comp_cbs, "No completion waiter registered on completion_fut"
+                    on_comp_closure = {
+                        name: cell.cell_contents
+                        for name, cell in zip(
+                            on_comp_cbs[0].__code__.co_freevars,
+                            on_comp_cbs[0].__closure__ or (),
+                        )
+                    }
+                    comp_waiter = on_comp_closure.get("waiter")
+                    assert getattr(waiter_task, "_fut_waiter", None) is comp_waiter, (
+                        "waiter_task is not awaiting callback completion_fut"
+                    )
+                    assert comp_waiter is not None and not comp_waiter.done()
+                    assert not cb_completed
+                    assert not waiter_task.done()
+
+                    cb_completed = True
+                    cb_signal_fut.set_result(None)
+                    done_w, _ = await asyncio.wait({waiter_task}, timeout=5.0)
+                    if waiter_task not in done_w:
+                        pytest.fail("waiter_task did not complete in 5.0s")
+                    result = waiter_task.result()
+                    assert cb_completed
+                finally:
+                    if not cb_signal_fut.done():
+                        cb_signal_fut.set_result(None)
+                    if waiter_task is not None and not waiter_task.done():
+                        waiter_task.cancel()
+                    if waiter_task is not None:
+                        await asyncio.wait({waiter_task}, timeout=1.0)
+            else:
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=100,
+                    head_commit_sha=OTHER_HEAD,
+                    on_poll=cb,
+                )
+            assert captured_mismatch_fields == [
+                ("PENDING", UNSET, 1),
+                ("RUNNING", HEAD, 2),
+            ]
+            assert [p[0].status for p in polled_reviews] == ["MUTATED", "MUTATED"]
+            assert [p[1] for p in polled_reviews] == [1, 2]
+            assert polled_reviews[0][0].head_commit_sha == "mutated_sha"
+            assert polled_reviews[1][0].head_commit_sha == OTHER_HEAD
+        assert result.status == "INCOMPLETE"
+        assert result.review.status == "RUNNING"
+        assert result.review.head_commit_sha == HEAD
+        assert result.review is not polled_reviews[-1][0]
         assert gap_facts(result) == [PINNED_ELSEWHERE]
         assert result.reason == "The review is pinned to another head commit."
         # The second read names the head, so the review that would complete is never read.
         assert len(server.requests) == 2
-        assert clock.delays == [5, 10, 5]
+        assert clock.delays == [5, 10, 5, 5]
 
 
 @MODES
@@ -2586,3 +2770,3445 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+async def test_wait_for_review_invokes_on_poll_callback(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    calls: list[tuple[str, int]] = []
+    responses = [review("RUNNING"), review()]
+
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+
+        def sync_poll_callback(review_detail: Any) -> None:
+            calls.append((f"sync:{review_detail.status}", len(server.requests)))
+            if review_detail.status == "RUNNING":
+                assert review_detail.completed_at is UNSET
+
+        async def async_poll_callback(review_detail: Any) -> None:
+            calls.append((f"async:{review_detail.status}", len(server.requests)))
+            if review_detail.status == "RUNNING":
+                assert review_detail.completed_at is UNSET
+            review_detail.status = "MUTATED"
+
+        async with session(mode, server.url) as client:
+            cb = async_poll_callback if mode == "async" else sync_poll_callback
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=100,
+                on_poll=cb,
+            )
+            assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+            prefix = "async" if mode == "async" else "sync"
+            assert calls == [(f"{prefix}:RUNNING", 1), (f"{prefix}:COMPLETED", 2)]
+            assert result.review.status == "COMPLETED"
+        assert len(server.requests) == 2
+        assert clock.delays == [5]
+
+    # Assert async client also works with regular synchronous callbacks returning None
+    if mode == "async":
+        async_nested_responses = [dict(responses[0]), dict(responses[1])]
+        for resp in async_nested_responses:
+            resp["nested_meta"] = {"key": "original", "tags": ["a", "b"]}
+        with Server(lambda request, index: Reply(body=async_nested_responses[index])) as server:
+            sync_calls: list[tuple[str, int]] = []
+
+            def inline_sync_cb(r: Any) -> None:
+                sync_calls.append((r.status, len(server.requests)))
+                r.status = "MUTATED"
+                r.actions.publish = True
+                r.additional_properties["mutated"] = "mutated_value"
+                assert len(r.assessments) > 0
+                assert r.assessments[0].checks.receipt_recorded is True
+                r.assessments[0].checks.receipt_recorded = False
+                r.additional_properties["nested_meta"]["key"] = "mutated"
+                r.additional_properties["nested_meta"]["tags"].append("c")
+
+            async with session("async", server.url) as client:
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=100,
+                    on_poll=inline_sync_cb,
+                )
+                assert result.status == "COMPLETED"
+                assert sync_calls == [("RUNNING", 1), ("COMPLETED", 2)]
+                assert result.review.status == "COMPLETED"
+                assert result.review.actions.publish is False
+                assert "mutated" not in result.review.additional_properties
+                assert result.review.assessments[0].checks.receipt_recorded is True
+                assert result.review.additional_properties["nested_meta"]["key"] == "original"
+                assert result.review.additional_properties["nested_meta"]["tags"] == ["a", "b"]
+
+        # Assert callback TimeoutError before deadline propagates
+        async def failing_callback(r: Any) -> None:
+            raise TimeoutError("callback failure")
+
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(TimeoutError, match="callback failure"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=failing_callback,
+                    )
+
+        # Assert already-done failed future propagates inline
+        failed_inline_futs: list[asyncio.Future[None]] = []
+        call_start_inline = clock.now
+
+        class ClockAdvancingDoneFuture(asyncio.Future[None]):
+            def done(self) -> bool:
+                clock.now = call_start_inline + 10.0
+                return super().done()
+
+        def failed_future_callback(r: Any) -> asyncio.Future[None]:
+            loop = asyncio.get_running_loop()
+            fut = ClockAdvancingDoneFuture(loop=loop)
+            fut.set_exception(ValueError("inline future error"))
+            failed_inline_futs.append(fut)
+            return fut
+
+        try:
+            with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="inline future error"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=10,
+                            on_poll=failed_future_callback,
+                        )
+        finally:
+            for ff in failed_inline_futs:
+                try:
+                    if not ff.cancelled():
+                        ff.exception()
+                except BaseException:
+                    pass
+
+        # Assert already-failed future returned at exact fake-clock deadline preserves COMPLETED
+        failed_at_deadline_futs: list[asyncio.Future[None]] = []
+        call_start = clock.now
+
+        def failed_future_at_deadline_callback(r: Any) -> asyncio.Future[None]:
+            clock.now = call_start + 10.0
+            loop = asyncio.get_running_loop()
+            fut: asyncio.Future[None] = loop.create_future()
+            fut.set_exception(ValueError("already-failed future exactly at deadline"))
+            failed_at_deadline_futs.append(fut)
+            return fut
+
+        try:
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    outcome_at_dl = await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=failed_future_at_deadline_callback,
+                    )
+                    assert outcome_at_dl.status == "COMPLETED"
+        finally:
+            for ff in failed_at_deadline_futs:
+                try:
+                    if not ff.cancelled():
+                        ff.exception()
+                except BaseException:
+                    pass
+
+        # Run the watchdog cases in a subprocess with a hard timeout so cancellation-resistant
+        # tasks cannot stall teardown.
+        watchdog_code = """
+import sys
+import asyncio
+import pytest
+import time
+import weakref
+from typing import Any
+from proofline import AsyncProoflineClient
+import proofline.client as client_module
+import proofline._transport as transport_module
+from proofline._generated.models.customer_review_detail import CustomerReviewDetail
+from tests.test_http import review, ORG, REVIEW, Server, Reply
+
+class ControlledClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def time(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+async def main() -> None:
+    clock = ControlledClock()
+    client_module.monotonic = clock.time
+    transport_module.monotonic = clock.time
+
+    sleep_forbidden = False
+    orig_async_sleep = client_module.async_sleep
+
+    async def guarded_async_sleep(delay: float) -> None:
+        if sleep_forbidden:
+            raise AssertionError(
+                "Ordinary polling sleep occurred before watchdog advanced callback deadline"
+            )
+        await orig_async_sleep(delay)
+
+    client_module.async_sleep = guarded_async_sleep
+
+    running_detail = CustomerReviewDetail.from_dict(review("RUNNING"))
+    completed_detail = CustomerReviewDetail.from_dict(review())
+
+    async def fake_running(org: Any, rev: Any) -> Any:
+        return running_detail
+
+    async def fake_completed(org: Any, rev: Any) -> Any:
+        return completed_detail
+
+    async with AsyncProoflineClient(
+        token="test_token", base_url="https://api.proofline.sh"
+    ) as client:
+        async_wait_calls_1 = 0
+        orig_async_wait_1 = client_module.async_wait
+
+        async def counting_async_wait_1(*args: Any, **kwargs: Any) -> Any:
+            nonlocal async_wait_calls_1
+            async_wait_calls_1 += 1
+            return await orig_async_wait_1(*args, **kwargs)
+
+        client_module.async_wait = counting_async_wait_1
+
+        # Case 1: Pending same-loop Future that times out is detached without cancelling
+        # Assert it is still pending before advancing the controlled deadline
+        class SignallingFuture(asyncio.Future[None]):
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.wait_entered = asyncio.Event()
+                self.active_callbacks: list[Any] = []
+                self.removed_callbacks: list[Any] = []
+
+            def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+                super().add_done_callback(fn, context=context)
+                self.active_callbacks.append(fn)
+                if "_on_future_done" in getattr(fn, "__name__", ""):
+                    clock.advance(1.0)
+                self.wait_entered.set()
+
+            def remove_done_callback(self, fn: Any) -> int:
+                count = super().remove_done_callback(fn)
+                if count > 0:
+                    self.removed_callbacks.append(fn)
+                    self.active_callbacks = [cb for cb in self.active_callbacks if cb != fn]
+                return count
+
+        pending_fut: SignallingFuture | None = None
+        cb_1_started = asyncio.Event()
+
+        def pending_future_callback(r: Any) -> SignallingFuture:
+            nonlocal pending_fut
+            loop = asyncio.get_running_loop()
+            pending_fut = SignallingFuture(loop=loop)
+            cb_1_started.set()
+            return pending_fut
+
+        client.get_review = fake_running  # type: ignore
+
+        waiter_task_1 = asyncio.create_task(
+            client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=0.2,
+                on_poll=pending_future_callback,
+            )
+        )
+        startup_waiter_1 = asyncio.create_task(cb_1_started.wait())
+        try:
+            done_1, _ = await asyncio.wait(
+                {startup_waiter_1, waiter_task_1},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if waiter_task_1 in done_1:
+                await waiter_task_1
+            assert pending_fut is not None
+            done_waiter_1, _ = await asyncio.wait({waiter_task_1}, timeout=1.0)
+            assert waiter_task_1 in done_waiter_1
+            res_1 = waiter_task_1.result()
+            assert res_1.status == "TIMED_OUT"
+            assert not pending_fut.cancelled()
+            assert not pending_fut.done()
+            assert async_wait_calls_1 == 0
+            assert id(pending_fut) in client_module._DETACHED_FUTURES
+            assert len(pending_fut.removed_callbacks) > 0
+            assert any(
+                "_on_future_done" in getattr(cb, "__name__", "")
+                for cb in pending_fut.removed_callbacks
+            )
+            assert not any(
+                "_on_future_done" in getattr(cb, "__name__", "")
+                for cb in pending_fut.active_callbacks
+            )
+            pending_fut.set_result(None)
+            await asyncio.sleep(0)
+            assert id(pending_fut) not in client_module._DETACHED_FUTURES
+        finally:
+            client_module.async_wait = orig_async_wait_1
+            if pending_fut is not None and not pending_fut.done():
+                pending_fut.set_result(None)
+            if not startup_waiter_1.done():
+                startup_waiter_1.cancel()
+            try:
+                await startup_waiter_1
+            except (asyncio.CancelledError, BaseException):
+                pass
+            if not waiter_task_1.done():
+                waiter_task_1.cancel()
+            try:
+                done_clean_1, _ = await asyncio.wait({waiter_task_1}, timeout=1.0)
+            except BaseException:
+                pass
+
+        # Case 2: Pending same-loop Future that completes within budget without cancellation
+        completed_fut = asyncio.get_running_loop().create_future()
+        complete_fut_task: asyncio.Task[None] | None = None
+
+        async def complete_fut_soon() -> None:
+            await asyncio.sleep(0.01)
+            completed_fut.set_result(None)
+
+        def completing_future_callback(r: Any) -> asyncio.Future[None]:
+            nonlocal complete_fut_task
+            complete_fut_task = asyncio.create_task(complete_fut_soon())
+            return completed_fut
+
+        client.get_review = fake_completed  # type: ignore
+
+        try:
+            res = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=10.0,
+                on_poll=completing_future_callback,
+            )
+            assert res.status == "COMPLETED"
+            assert completed_fut.done()
+            assert not completed_fut.cancelled()
+        finally:
+            if complete_fut_task is not None:
+                if not complete_fut_task.done():
+                    complete_fut_task.cancel()
+                try:
+                    await complete_fut_task
+                except BaseException:
+                    pass
+            try:
+                if not completed_fut.done():
+                    completed_fut.cancel()
+                elif not completed_fut.cancelled():
+                    completed_fut.exception()
+            except BaseException:
+                pass
+
+        # Case 3: Overdue callback continues running without cancellation on non-terminal review
+        callback_running = asyncio.Event()
+        callback_finished = asyncio.Event()
+        release_callback = asyncio.Event()
+        cb_task_3: asyncio.Task[Any] | None = None
+        orig_create_task_3 = client_module.async_create_task
+
+        def tracking_create_task_3(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
+            nonlocal cb_task_3
+            t = orig_create_task_3(coro_arg, **kwargs)
+            cb_task_3 = t
+            return t
+
+        client_module.async_create_task = tracking_create_task_3
+
+        async def continuing_coro(r: Any) -> None:
+            callback_running.set()
+            await release_callback.wait()
+            callback_finished.set()
+
+        client.get_review = fake_running  # type: ignore
+
+        sleep_forbidden = True
+        try:
+            waiter_task_3 = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=continuing_coro,
+                )
+            )
+            startup_waiter_3 = asyncio.create_task(callback_running.wait())
+            try:
+                done_3, _ = await asyncio.wait(
+                    {startup_waiter_3, waiter_task_3},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter_task_3 in done_3:
+                    await waiter_task_3
+                assert not waiter_task_3.done()
+                clock.advance(1.0)
+                done_w3, _ = await asyncio.wait({waiter_task_3}, timeout=1.0)
+                if waiter_task_3 not in done_w3:
+                    print("Pending task: waiter_task_3", file=sys.stderr)
+                assert waiter_task_3 in done_w3
+                res_3 = waiter_task_3.result()
+                assert res_3.status == "TIMED_OUT"
+                assert callback_running.is_set()
+                assert not callback_finished.is_set()
+                release_callback.set()
+                assert cb_task_3 is not None
+                finish_waiter_3 = asyncio.create_task(callback_finished.wait())
+                try:
+                    done_fin_3, _ = await asyncio.wait(
+                        {finish_waiter_3, cb_task_3},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if cb_task_3.cancelled():
+                        pytest.fail("Callback wrapper task was cancelled unexpectedly")
+                    if not callback_finished.is_set():
+                        if cb_task_3.done() and cb_task_3.exception():
+                            raise cb_task_3.exception()
+                        pytest.fail("Callback wrapper exited without setting completion event")
+                finally:
+                    if not finish_waiter_3.done():
+                        finish_waiter_3.cancel()
+                    try:
+                        await finish_waiter_3
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                done_cb3_fin, _ = await asyncio.wait({cb_task_3}, timeout=1.0)
+                assert cb_task_3 in done_cb3_fin
+                assert cb_task_3.result() is None
+            finally:
+                if not startup_waiter_3.done():
+                    startup_waiter_3.cancel()
+                try:
+                    await startup_waiter_3
+                except (asyncio.CancelledError, BaseException):
+                    pass
+        finally:
+            client_module.async_create_task = orig_create_task_3
+            sleep_forbidden = False
+            release_callback.set()
+            if not waiter_task_3.done():
+                waiter_task_3.cancel()
+            try:
+                done_w3_clean, _ = await asyncio.wait({waiter_task_3}, timeout=1.0)
+                if waiter_task_3 not in done_w3_clean:
+                    print("Pending task: waiter_task_3", file=sys.stderr)
+            except (asyncio.CancelledError, BaseException):
+                pass
+            if cb_task_3 is not None:
+                if not cb_task_3.done():
+                    cb_task_3.cancel()
+                try:
+                    done_cb3_clean, _ = await asyncio.wait({cb_task_3}, timeout=1.0)
+                    if cb_task_3 not in done_cb3_clean:
+                        print("Pending task: cb_task_3", file=sys.stderr)
+                except (asyncio.CancelledError, BaseException):
+                    pass
+
+        # Case 3b: Return a Task from a synchronous callback, release it after the polling deadline
+        # and waiter exit, and assert its client request succeeds against the local test server.
+        task_worker_started = asyncio.Event()
+        task_release_3b = asyncio.Event()
+        task_success_3b = asyncio.Event()
+        cb_task_3b: asyncio.Task[None] | None = None
+
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as test_server:
+            async with AsyncProoflineClient(
+                token="test_token", base_url=test_server.url
+            ) as real_client:
+                async def task_worker_3b() -> None:
+                    task_worker_started.set()
+                    await task_release_3b.wait()
+                    # Real SDK request against the local test server checking deadline:
+                    rev_res = await real_client.get_review(ORG, REVIEW)
+                    assert rev_res.status == "RUNNING"
+                    task_success_3b.set()
+
+                def sync_cb_returning_task(r: Any) -> Any:
+                    nonlocal cb_task_3b
+                    cb_task_3b = asyncio.create_task(task_worker_3b())
+                    return cb_task_3b
+
+                waiter_task_3b = asyncio.create_task(
+                    real_client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=0.2,
+                        on_poll=sync_cb_returning_task,
+                    )
+                )
+                startup_waiter = asyncio.create_task(task_worker_started.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {startup_waiter, waiter_task_3b},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_task_3b in done:
+                        await waiter_task_3b
+                    assert cb_task_3b is not None
+                    assert not cb_task_3b.done()
+                    clock.advance(1.0)
+                    done_w3b, _ = await asyncio.wait({waiter_task_3b}, timeout=1.0)
+                    if waiter_task_3b not in done_w3b:
+                        print("Pending task: waiter_task_3b", file=sys.stderr)
+                    assert waiter_task_3b in done_w3b
+                    res_3b = waiter_task_3b.result()
+                    assert res_3b.status == "TIMED_OUT"
+                    assert not cb_task_3b.done()
+                    task_release_3b.set()
+                    done_c3b, _ = await asyncio.wait({cb_task_3b}, timeout=1.0)
+                    if cb_task_3b not in done_c3b:
+                        print("Pending task: cb_task_3b", file=sys.stderr)
+                    assert cb_task_3b in done_c3b
+                    cb_task_3b.result()
+                    assert task_success_3b.is_set()
+                finally:
+                    task_release_3b.set()
+                    if not startup_waiter.done():
+                        startup_waiter.cancel()
+                    try:
+                        done_sw, _ = await asyncio.wait({startup_waiter}, timeout=0.5)
+                        if startup_waiter not in done_sw:
+                            print("Pending task: startup_waiter", file=sys.stderr)
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                    if not waiter_task_3b.done():
+                        waiter_task_3b.cancel()
+                    try:
+                        done_w3b_clean, _ = await asyncio.wait({waiter_task_3b}, timeout=0.5)
+                        if waiter_task_3b not in done_w3b_clean:
+                            print("Pending task: waiter_task_3b", file=sys.stderr)
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                    if cb_task_3b is not None:
+                        if not cb_task_3b.done():
+                            cb_task_3b.cancel()
+                        try:
+                            done_cb3b_clean, _ = await asyncio.wait({cb_task_3b}, timeout=0.5)
+                            if cb_task_3b not in done_cb3b_clean:
+                                print("Pending task: cb_task_3b", file=sys.stderr)
+                        except (asyncio.CancelledError, BaseException):
+                            pass
+
+        # Case 4: Overdue callback continues running without cancellation on terminal review
+        orig_create_task_4 = client_module.async_create_task
+        captured_case4_wrappers: list[Any] = []
+
+        def tracked_create_task_4(coro: Any, *args: Any, **kwargs: Any) -> Any:
+            t = orig_create_task_4(coro, *args, **kwargs)
+            t.exception_calls = 0
+            orig_exc = t.exception
+
+            def tracked_exc() -> Any:
+                t.exception_calls += 1
+                return orig_exc()
+
+            t.exception = tracked_exc
+            captured_case4_wrappers.append(t)
+            return t
+
+        client_module.async_create_task = tracked_create_task_4
+
+        callback_running_term = asyncio.Event()
+        callback_finished_term = asyncio.Event()
+        release_callback_term = asyncio.Event()
+
+        async def continuing_coro_term(r: Any) -> None:
+            callback_running_term.set()
+            await release_callback_term.wait()
+            callback_finished_term.set()
+
+        client.get_review = fake_completed  # type: ignore
+
+        try:
+            waiter_task_4 = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=continuing_coro_term,
+                )
+            )
+            startup_waiter_4 = asyncio.create_task(callback_running_term.wait())
+            try:
+                done_4, _ = await asyncio.wait(
+                    {startup_waiter_4, waiter_task_4},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter_task_4 in done_4:
+                    await waiter_task_4
+            finally:
+                if not startup_waiter_4.done():
+                    startup_waiter_4.cancel()
+                try:
+                    await startup_waiter_4
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            assert not waiter_task_4.done()
+            clock.advance(1.0)
+            done_w4, _ = await asyncio.wait({waiter_task_4}, timeout=1.0)
+            assert waiter_task_4 in done_w4
+            res_4 = waiter_task_4.result()
+            assert res_4.status == "COMPLETED"
+            assert not callback_finished_term.is_set()
+
+            assert len(captured_case4_wrappers) == 1
+            wrapper_4 = captured_case4_wrappers[0]
+            wrapper_4_cbs = [
+                cb[0] if isinstance(cb, tuple) else cb
+                for cb in (getattr(wrapper_4, "_callbacks", None) or [])
+            ]
+            assert not any(getattr(cb, "__name__", "") == "_on_task_done" for cb in wrapper_4_cbs)
+
+            release_callback_term.set()
+            finish_waiter_4 = asyncio.create_task(callback_finished_term.wait())
+            try:
+                done_fin_4, _ = await asyncio.wait(
+                    {finish_waiter_4, wrapper_4},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if wrapper_4.cancelled():
+                    pytest.fail("Callback wrapper task was cancelled unexpectedly")
+                if not callback_finished_term.is_set():
+                    if wrapper_4.done() and wrapper_4.exception():
+                        raise wrapper_4.exception()
+                    pytest.fail("Callback wrapper exited without setting completion event")
+            finally:
+                if not finish_waiter_4.done():
+                    finish_waiter_4.cancel()
+                try:
+                    await finish_waiter_4
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            assert callback_running_term.is_set()
+            assert callback_finished_term.is_set()
+            done_w4_wrap, _ = await asyncio.wait({wrapper_4}, timeout=1.0)
+            assert wrapper_4 in done_w4_wrap
+            assert wrapper_4.result() is None
+        finally:
+            release_callback_term.set()
+            if not waiter_task_4.done():
+                waiter_task_4.cancel()
+            try:
+                await asyncio.wait({waiter_task_4}, timeout=1.0)
+            except (asyncio.CancelledError, BaseException):
+                pass
+            client_module.async_create_task = orig_create_task_4
+            for w in captured_case4_wrappers:
+                if not w.done():
+                    w.cancel()
+                try:
+                    await asyncio.wait({w}, timeout=1.0)
+                except (asyncio.CancelledError, BaseException):
+                    pass
+
+        # Case 5: Suspending callback that succeeds within budget
+        resumed_within_budget = False
+
+        async def suspending_callback(r: Any) -> None:
+            nonlocal resumed_within_budget
+            await asyncio.sleep(0.01)
+            resumed_within_budget = True
+
+        client.get_review = fake_completed  # type: ignore
+
+        res = await client.wait_for_review(
+            ORG,
+            REVIEW,
+            timeout=10.0,
+            on_poll=suspending_callback,
+        )
+        assert res.status == "COMPLETED"
+        assert resumed_within_budget
+
+        # Case 6: Overdue callback failure is observed without leaking to loop handler
+        unhandled_exceptions: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: unhandled_exceptions.append(ctx))
+        coro_trigger: asyncio.Event | None = None
+        waiter_coro_task: asyncio.Task[Any] | None = None
+        failing_fut: asyncio.Future[None] | None = None
+        orig_create_task_6: Any = None
+        captured_case6_wrappers: list[asyncio.Task[Any]] = []
+        try:
+            waiter_fut_task: asyncio.Task[Any] | None = None
+            case6a_cancelled = False
+            try:
+                # 6a: Future callback cancelled after startup
+                failing_fut = loop.create_future()
+                future_started = asyncio.Event()
+
+                def failing_future_cb(r: Any) -> asyncio.Future[None]:
+                    future_started.set()
+                    assert failing_fut is not None
+                    return failing_fut
+
+                client.get_review = fake_running  # type: ignore
+                waiter_fut_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10.0,
+                        on_poll=failing_future_cb,
+                    )
+                )
+                startup_waiter_6a = asyncio.create_task(future_started.wait())
+                try:
+                    done_6a, _ = await asyncio.wait(
+                        {startup_waiter_6a, waiter_fut_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_fut_task in done_6a:
+                        await waiter_fut_task
+                finally:
+                    if not startup_waiter_6a.done():
+                        startup_waiter_6a.cancel()
+                    try:
+                        await startup_waiter_6a
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                waiter_fut_task.cancel()
+                done_6a_c, _ = await asyncio.wait({waiter_fut_task}, timeout=1.0)
+                assert waiter_fut_task in done_6a_c
+                assert waiter_fut_task.cancelled()
+                try:
+                    await waiter_fut_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
+                case6a_cancelled = True
+            finally:
+                if not case6a_cancelled:
+                    if failing_fut is not None and not failing_fut.done():
+                        failing_fut.cancel()
+                    if waiter_fut_task is not None and not waiter_fut_task.done():
+                        waiter_fut_task.cancel()
+                    if waiter_fut_task is not None:
+                        try:
+                            await asyncio.wait({waiter_fut_task}, timeout=1.0)
+                        except BaseException:
+                            pass
+
+            assert id(failing_fut) in client_module._DETACHED_FUTURES
+            failing_fut_cbs = [
+                cb[0] if isinstance(cb, tuple) else cb
+                for cb in (getattr(failing_fut, "_callbacks", None) or [])
+            ]
+            assert not any(
+                getattr(cb, "__name__", "") == "_on_future_done" for cb in failing_fut_cbs
+            )
+            failing_fut.set_exception(RuntimeError("error in cancelled future callback"))
+            await asyncio.sleep(0)
+            assert id(failing_fut) not in client_module._DETACHED_FUTURES
+            failing_fut = None
+            import gc
+
+            gc.collect()
+            assert unhandled_exceptions == []
+
+            # 6b: Pre-start wrapper cancellation: hold wrapper before entry,
+            # cancel waiter with budget remaining, run queued runner and
+            # assert callback body never starts
+            import inspect
+
+            hold_wrapper = asyncio.Event()
+            wrapper_tasks: list[asyncio.Task[Any]] = []
+            orig_create_task = client_module.async_create_task
+
+            runner_executed = False
+            captured_runners: list[Any] = []
+
+            def holding_create_task(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
+                captured_runners.append(coro_arg)
+
+                async def held_wrapper() -> Any:
+                    nonlocal runner_executed
+                    try:
+                        await hold_wrapper.wait()
+                        runner_executed = True
+                        return await coro_arg
+                    except asyncio.CancelledError:
+                        if hasattr(coro_arg, "close"):
+                            coro_arg.close()
+                        raise
+
+                t = orig_create_task(held_wrapper(), **kwargs)
+                wrapper_tasks.append(t)
+                return t
+
+            client_module.async_create_task = holding_create_task
+
+            user_coro_created: list[Any] = []
+            cb_body_started = False
+
+            async def dummy_pre_start_coro(r: Any) -> None:
+                nonlocal cb_body_started
+                cb_body_started = True
+
+            def pre_start_cb(r: Any) -> Any:
+                c = dummy_pre_start_coro(r)
+                user_coro_created.append(c)
+                return c
+
+            pre_waiter_task: asyncio.Task[Any] | None = None
+            try:
+                pre_waiter_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10.0,
+                        on_poll=pre_start_cb,
+                    )
+                )
+                await asyncio.sleep(0)
+                if pre_waiter_task.done():
+                    await pre_waiter_task
+                assert len(wrapper_tasks) == 1
+                assert not wrapper_tasks[0].done()
+
+                # Queue the wrapper before cancelling the waiter in the same loop turn:
+                hold_wrapper.set()
+                pre_waiter_task.cancel()
+                await asyncio.sleep(0)
+
+                assert runner_executed is True
+
+                assert not cb_body_started
+                assert len(user_coro_created) == 1
+                assert inspect.getcoroutinestate(user_coro_created[0]) == inspect.CORO_CLOSED
+                assert wrapper_tasks[0].done()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await pre_waiter_task
+            finally:
+                client_module.async_create_task = orig_create_task
+                if pre_waiter_task is not None:
+                    if not pre_waiter_task.done():
+                        pre_waiter_task.cancel()
+                    try:
+                        await pre_waiter_task
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                for wt in wrapper_tasks:
+                    if not wt.done():
+                        wt.cancel()
+                    try:
+                        await wt
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                for c in user_coro_created:
+                    try:
+                        if (
+                            inspect.iscoroutine(c)
+                            and inspect.getcoroutinestate(c) == inspect.CORO_CREATED
+                        ):
+                            c.close()
+                    except BaseException:
+                        pass
+                for cr in captured_runners:
+                    try:
+                        if (
+                            inspect.iscoroutine(cr)
+                            and inspect.getcoroutinestate(cr) == inspect.CORO_CREATED
+                        ):
+                            cr.close()
+                        elif hasattr(cr, "close"):
+                            cr.close()
+                    except BaseException:
+                        pass
+
+            waiter_coro_task: asyncio.Task[Any] | None = None
+            case6c_cancelled = False
+            try:
+                # Coroutine callback cancelled after startup
+                coro_started = asyncio.Event()
+                coro_trigger = asyncio.Event()
+                about_to_raise = asyncio.Event()
+                captured_case6_wrappers.clear()
+                orig_create_task_6 = client_module.async_create_task
+
+                def tracked_create_task_6(coro: Any, *args: Any, **kwargs: Any) -> Any:
+                    t = orig_create_task_6(coro, *args, **kwargs)
+                    t.exception_calls = 0
+                    orig_exc = t.exception
+
+                    def tracked_exc() -> Any:
+                        t.exception_calls += 1
+                        return orig_exc()
+
+                    t.exception = tracked_exc
+                    captured_case6_wrappers.append(t)
+                    return t
+
+                client_module.async_create_task = tracked_create_task_6
+
+                async def failing_overdue_coro(r: Any) -> None:
+                    coro_started.set()
+                    await coro_trigger.wait()
+                    about_to_raise.set()
+                    raise RuntimeError("error in overdue callback")
+
+                waiter_coro_task = asyncio.create_task(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10.0,
+                        on_poll=failing_overdue_coro,
+                    )
+                )
+                startup_waiter_6c = asyncio.create_task(coro_started.wait())
+                try:
+                    done_6c, _ = await asyncio.wait(
+                        {startup_waiter_6c, waiter_coro_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter_coro_task in done_6c:
+                        await waiter_coro_task
+                finally:
+                    if not startup_waiter_6c.done():
+                        startup_waiter_6c.cancel()
+                    try:
+                        await startup_waiter_6c
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                waiter_coro_task.cancel()
+                done_c, _ = await asyncio.wait({waiter_coro_task}, timeout=1.0)
+                assert waiter_coro_task in done_c
+                assert waiter_coro_task.cancelled()
+                try:
+                    await waiter_coro_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
+                case6c_cancelled = True
+            finally:
+                if not case6c_cancelled:
+                    if coro_trigger is not None:
+                        coro_trigger.set()
+                    if waiter_coro_task is not None and not waiter_coro_task.done():
+                        waiter_coro_task.cancel()
+                    if waiter_coro_task is not None:
+                        try:
+                            await asyncio.wait({waiter_coro_task}, timeout=1.0)
+                        except BaseException:
+                            pass
+
+            assert len(client_module._DETACHED_TASKS) == 1
+            detached_task_id = next(iter(client_module._DETACHED_TASKS.keys()))
+            detached_task = client_module._DETACHED_TASKS[detached_task_id]
+            detached_cbs = [
+                cb[0] if isinstance(cb, tuple) else cb
+                for cb in (getattr(detached_task, "_callbacks", None) or [])
+            ]
+            assert not any(getattr(cb, "__name__", "") == "_on_task_done" for cb in detached_cbs)
+
+            coro_trigger.set()
+            await asyncio.wait_for(about_to_raise.wait(), timeout=1.0)
+            await asyncio.sleep(0.01)
+
+            assert detached_task_id not in client_module._DETACHED_TASKS
+            assert detached_task.done()
+            assert not detached_task.cancelled()
+            assert getattr(detached_task, "exception_calls", 0) > 0
+            # import weakref (already imported at module level)
+
+            dt_ref = weakref.ref(detached_task)
+            del detached_task
+            captured_case6_wrappers.clear()
+            gc.collect()
+            assert dt_ref() is None
+            assert unhandled_exceptions == []
+        finally:
+            if orig_create_task_6 is not None:
+                client_module.async_create_task = orig_create_task_6
+            if failing_fut is not None:
+                if not failing_fut.done():
+                    failing_fut.cancel()
+                elif not failing_fut.cancelled():
+                    try:
+                        failing_fut.exception()
+                    except BaseException:
+                        pass
+            if waiter_fut_task is not None:
+                if not waiter_fut_task.done():
+                    waiter_fut_task.cancel()
+                try:
+                    await asyncio.wait({waiter_fut_task}, timeout=1.0)
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            if coro_trigger is not None:
+                coro_trigger.set()
+            if waiter_coro_task is not None:
+                if not waiter_coro_task.done():
+                    waiter_coro_task.cancel()
+                try:
+                    await asyncio.wait({waiter_coro_task}, timeout=1.0)
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            for t in captured_case6_wrappers:
+                if hasattr(t, "done") and not t.done():
+                    t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            for t in list(client_module._DETACHED_TASKS.values()):
+                if hasattr(t, "done") and not t.done():
+                    t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            await asyncio.sleep(0.01)
+            loop.set_exception_handler(old_handler)
+
+        # Case 7: Overdue callback awaiting the polling task is not cancelled
+        polling_waiter_task: asyncio.Task[Any] | None = None
+        callback_completed_7 = asyncio.Event()
+        cb_7_started = asyncio.Event()
+
+        async def awaiting_runner_callback(r: Any) -> None:
+            cb_7_started.set()
+            assert polling_waiter_task is not None
+            outcome_inner = await polling_waiter_task
+            assert outcome_inner.status == "TIMED_OUT"
+            callback_completed_7.set()
+
+        client.get_review = fake_running  # type: ignore
+        sleep_forbidden = True
+        try:
+            polling_waiter_task = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=0.2,
+                    on_poll=awaiting_runner_callback,
+                )
+            )
+            startup_waiter_7 = asyncio.create_task(cb_7_started.wait())
+            try:
+                done_7, _ = await asyncio.wait(
+                    {startup_waiter_7, polling_waiter_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if polling_waiter_task in done_7:
+                    await polling_waiter_task
+            finally:
+                if not startup_waiter_7.done():
+                    startup_waiter_7.cancel()
+                try:
+                    await startup_waiter_7
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            assert not polling_waiter_task.done()
+            clock.advance(1.0)
+            done_7_res, _ = await asyncio.wait({polling_waiter_task}, timeout=1.0)
+            assert polling_waiter_task in done_7_res, "polling_waiter_task deadlocked on callback"
+            res_7 = polling_waiter_task.result()
+            assert res_7.status == "TIMED_OUT"
+            done_cb7, _ = await asyncio.wait(
+                {asyncio.create_task(callback_completed_7.wait())}, timeout=1.0
+            )
+            assert callback_completed_7.is_set()
+        finally:
+            sleep_forbidden = False
+
+asyncio.run(main())
+"""
+        checkout_root = Path(__file__).resolve().parent.parent
+        subprocess.run(
+            [sys.executable, "-"],
+            input=watchdog_code,
+            text=True,
+            cwd=str(checkout_root),
+            check=True,
+            timeout=10,
+        )
+
+    # Assert callback modifying review does not mutate returned review in both sync and async
+    mutated_count = 0
+    resp_with_nested = dict(responses[1])
+    resp_with_nested["nested_meta"] = {"key": "original", "tags": ["a", "b"]}
+
+    def sync_mutating_callback(r: Any) -> None:
+        nonlocal mutated_count
+        mutated_count += 1
+        r.status = "MUTATED"
+        r.actions.publish = True
+        r.additional_properties["mutated"] = "mutated_value"
+        assert len(r.assessments) > 0
+        assert r.assessments[0].checks.receipt_recorded is True
+        r.assessments[0].checks.receipt_recorded = False
+        r.additional_properties["nested_meta"]["key"] = "mutated"
+        r.additional_properties["nested_meta"]["tags"].append("c")
+
+    async def async_mutating_callback(r: Any) -> None:
+        nonlocal mutated_count
+        mutated_count += 1
+        await asyncio.sleep(0.01)
+        r.status = "MUTATED"
+        r.actions.publish = True
+        r.additional_properties["mutated"] = "mutated_value"
+        assert len(r.assessments) > 0
+        assert r.assessments[0].checks.receipt_recorded is True
+        r.assessments[0].checks.receipt_recorded = False
+        r.additional_properties["nested_meta"]["key"] = "mutated"
+        r.additional_properties["nested_meta"]["tags"].append("c")
+
+    with Server(lambda request, index: Reply(body=resp_with_nested)) as server:
+        async with session(mode, server.url) as client:
+            mut_cb = async_mutating_callback if mode == "async" else sync_mutating_callback
+            res = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=10,
+                on_poll=mut_cb,
+            )
+            assert mutated_count == 1
+            assert res.review.status != "MUTATED"
+            assert res.review.actions.publish is False
+            assert "mutated" not in res.review.additional_properties
+            assert res.review.assessments[0].checks.receipt_recorded is True
+            assert res.review.additional_properties["nested_meta"]["key"] == "original"
+            assert res.review.additional_properties["nested_meta"]["tags"] == ["a", "b"]
+
+    # Test snapshot directly with an in-memory deep extension and custom tuple to bypass HTTP JSON
+    deep_container: dict[str, Any] = {}
+    curr = deep_container
+    for _ in range(3000):
+        curr["child"] = {}
+        curr = curr["child"]
+    curr["val"] = "deepest"
+
+    detail = CustomerReviewDetail.from_dict(responses[1])
+    detail.additional_properties["deep"] = deep_container
+    detail.additional_properties["custom_tuple"] = ({"nested": "val"}, None, 42)
+    detail.additional_properties["none_frozenset_tuple"] = (None, frozenset({1}))
+
+    from proofline.client import _snapshot_review
+
+    snap = _snapshot_review(detail)
+    assert snap is not None
+    assert snap is not detail
+    assert snap.additional_properties is not detail.additional_properties
+
+    # Walk all 3,000 levels, assert the leaf value, and verify mutation leaves original unchanged
+    walk_snap = snap.additional_properties["deep"]
+    walk_orig = detail.additional_properties["deep"]
+    for _ in range(3000):
+        assert walk_snap is not walk_orig
+        walk_snap = walk_snap["child"]
+        walk_orig = walk_orig["child"]
+    assert walk_snap["val"] == "deepest"
+    assert walk_orig["val"] == "deepest"
+
+    walk_snap["val"] = "mutated_leaf"
+    assert walk_orig["val"] == "deepest"
+
+    custom_t = snap.additional_properties["custom_tuple"]
+    orig_t = detail.additional_properties["custom_tuple"]
+    assert isinstance(custom_t, tuple)
+    assert custom_t[0] is not orig_t[0]
+    assert custom_t[0]["nested"] == "val"
+    assert custom_t[1] is None
+    assert custom_t[2] == 42
+    custom_t[0]["nested"] = "mutated_nested"
+    assert orig_t[0]["nested"] == "val"
+
+    assert "none_frozenset_tuple" in snap.additional_properties
+    nft = snap.additional_properties["none_frozenset_tuple"]
+    assert isinstance(nft, tuple)
+    assert len(nft) == 2
+    assert nft[0] is None
+    assert nft[1] == frozenset({1})
+
+    # Tuple with deeply nested list must snapshot iteratively without RecursionError
+    deep_nested_list: Any = "leaf"
+    for _ in range(3000):
+        deep_nested_list = [deep_nested_list]
+    detail.additional_properties["tuple_with_deep_list"] = (deep_nested_list, 999)
+    snap_nested = _snapshot_review(detail)
+    assert snap_nested is not None
+    assert isinstance(snap_nested.additional_properties["tuple_with_deep_list"], tuple)
+    orig_l = detail.additional_properties["tuple_with_deep_list"][0]
+    curr_l = snap_nested.additional_properties["tuple_with_deep_list"][0]
+    for _ in range(3000):
+        assert curr_l is not orig_l
+        curr_l = curr_l[0]
+        orig_l = orig_l[0]
+    assert curr_l == "leaf"
+    assert orig_l == "leaf"
+
+    # Assert pending future on closed loop or foreign loop raises ValueError
+    if mode == "async":
+        other_loop = asyncio.new_event_loop()
+        closed_fut = other_loop.create_future()
+        other_loop.close()
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(ValueError, match="running event loop"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=lambda r: closed_fut,
+                    )
+        assert not closed_fut.done()
+
+        foreign_loop = asyncio.new_event_loop()
+        foreign_fut = foreign_loop.create_future()
+        try:
+
+            def foreign_cb_expired(r: Any) -> Any:
+                clock.now += 200.0
+                return foreign_fut
+
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="running event loop"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=10,
+                            on_poll=foreign_cb_expired,
+                        )
+            assert not foreign_fut.done()
+            assert not foreign_fut.cancelled()
+            assert not getattr(foreign_fut, "_callbacks", None)
+        finally:
+            foreign_loop.close()
+
+        # Assert already-suspended native coroutine is rejected at callback boundary
+        async def dummy_coro() -> None:
+            await asyncio.sleep(0)
+
+        suspended_coro = dummy_coro()
+        try:
+            try:
+                suspended_coro.send(None)
+            except StopIteration:
+                pass
+
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="unstarted coroutines"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=10,
+                            on_poll=lambda r: suspended_coro,
+                        )
+        finally:
+            suspended_coro.close()
+
+        # Started coroutine raises ValueError even after deadline expiry without closing
+        async def dummy_started() -> None:
+            await asyncio.sleep(10)
+
+        started_c = dummy_started()
+        task_started = asyncio.create_task(started_c)
+        try:
+            await asyncio.sleep(0)
+
+            def started_coro_cb(r: Any) -> Any:
+                clock.now += 100.0
+                return started_c
+
+            with Server(lambda request, index: Reply(body=responses[0])) as server:
+                async with session("async", server.url) as client:
+                    with pytest.raises(ValueError, match="unstarted coroutines"):
+                        await client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=5.0,
+                            on_poll=started_coro_cb,
+                        )
+                    assert inspect.getcoroutinestate(started_c) == inspect.CORO_SUSPENDED
+        finally:
+            task_started.cancel()
+            try:
+                await task_started
+            except asyncio.CancelledError:
+                pass
+
+        # Non-None, non-awaitable callback return raises TypeError
+        def sync_int_cb(r: Any) -> Any:
+            return 42
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(TypeError, match="Callbacks must return None or an awaitable"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=sync_int_cb,
+                    )
+
+        # Unrestricted awaitables returning values (e.g. int) accepted and result discarded
+        int_cb_completed = False
+
+        async def int_returning_callback(r: Any) -> int:
+            nonlocal int_cb_completed
+            await asyncio.sleep(0)
+            int_cb_completed = True
+            return 42
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_int = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=int_returning_callback,
+                )
+                assert res_int.status == "COMPLETED"
+                assert int_cb_completed is True
+
+        # Unhashable same-loop Future subclass completed after wait starts
+        class UnhashableFuture(asyncio.Future[None]):
+            __hash__ = None  # type: ignore[assignment]
+
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.exception_calls = 0
+
+            def exception(self) -> BaseException | None:
+                self.exception_calls += 1
+                return super().exception()
+
+        complete_task: asyncio.Task[None] | None = None
+
+        async def complete_unhashable_soon(fut: Any) -> None:
+            await asyncio.sleep(0.01)
+            fut.set_result(None)
+
+        def complete_unhashable_cb(r: Any) -> Any:
+            nonlocal complete_task
+            complete_task = asyncio.create_task(complete_unhashable_soon(unhashable_fut))
+            return unhashable_fut
+
+        unhashable_fut: Any = UnhashableFuture(loop=asyncio.get_running_loop())
+        try:
+            with Server(lambda request, index: Reply(body=responses[1])) as server:
+                async with session("async", server.url) as client:
+                    res_unhash = await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=complete_unhashable_cb,
+                    )
+                    assert res_unhash.status == "COMPLETED"
+                    assert unhashable_fut.done()
+        finally:
+            if complete_task is not None:
+                if not complete_task.done():
+                    complete_task.cancel()
+                try:
+                    await complete_task
+                except (asyncio.CancelledError, BaseException):
+                    pass
+            try:
+                if not asyncio.Future.done(unhashable_fut):
+                    unhashable_fut.cancel()
+                elif not asyncio.Future.cancelled(unhashable_fut):
+                    unhashable_fut.exception()
+            except BaseException:
+                pass
+
+        # Cancel the waiter while an UnhashableFuture is pending, then fail and release
+        # the future and assert that the loop reports no unhandled exception.
+        # Run in a subprocess with a hard timeout, settling the callback future
+        # before joining in cleanup and bounding waiter cancellation join with
+        # asyncio.wait.
+        unhashable_code = f"""
+import asyncio
+import sys
+import weakref
+from pathlib import Path
+from uuid import UUID
+
+from tests.test_http import Server, Reply, session, review
+from proofline.client import _DETACHED_FUTURES
+
+ORG = UUID("{ORG}")
+REVIEW = UUID("{REVIEW}")
+
+class UnhashableFuture(asyncio.Future):
+    __hash__ = None  # type: ignore
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.exception_calls = 0
+
+    def exception(self):
+        self.exception_calls += 1
+        return super().exception()
+
+async def main():
+    unhash_cancel_reports = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, ctx: unhash_cancel_reports.append(ctx))
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session("async", server.url) as client:
+            unhash_box = [UnhashableFuture(loop=loop)]
+            cb_started = asyncio.Event()
+
+            def unhash_failing_cb(r):
+                cb_started.set()
+                return unhash_box[0]
+
+            waiter_task = asyncio.create_task(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=unhash_failing_cb,
+                )
+            )
+            cb_wait_task = asyncio.create_task(cb_started.wait())
+            try:
+                done_set, _ = await asyncio.wait(
+                    {{cb_wait_task, waiter_task}},
+                    timeout=5.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if waiter_task in done_set and not cb_started.is_set():
+                    cb_wait_task.cancel()
+                    await asyncio.wait({{waiter_task}}, timeout=1.0)
+                assert cb_wait_task in done_set, "Callback startup timed out"
+                waiter_task.cancel()
+                done_cancel, _ = await asyncio.wait({{waiter_task}}, timeout=1.0)
+                assert waiter_task in done_cancel
+                assert waiter_task.cancelled()
+                try:
+                    await waiter_task
+                except asyncio.CancelledError:
+                    pass
+                target_fut = unhash_box[0]
+                fut_weakref = weakref.ref(target_fut)
+                assert id(target_fut) in _DETACHED_FUTURES
+                target_fut_cbs = [
+                    cb[0] if isinstance(cb, tuple) else cb
+                    for cb in (getattr(target_fut, "_callbacks", None) or [])
+                ]
+                assert not any(
+                    getattr(cb, "__name__", "") == "_on_future_done" for cb in target_fut_cbs
+                )
+                target_fut.set_exception(RuntimeError("unhashable late failure"))
+                await asyncio.sleep(0)
+                assert id(target_fut) not in _DETACHED_FUTURES
+                assert target_fut.exception_calls > 0
+                del target_fut_cbs
+                del target_fut
+                unhash_box.clear()
+                import gc
+                gc.collect()
+                assert fut_weakref() is None
+                assert unhash_cancel_reports == []
+            finally:
+                if unhash_box:
+                    f = unhash_box[0]
+                    if not f.done():
+                        f.set_result(None)
+                    elif not f.cancelled():
+                        try:
+                            f.exception()
+                        except BaseException:
+                            pass
+                for t in (cb_wait_task, waiter_task):
+                    if not t.done():
+                        t.cancel()
+                    try:
+                        await asyncio.wait({{t}}, timeout=1.0)
+                    except (asyncio.CancelledError, BaseException):
+                        pass
+                await asyncio.sleep(0)
+
+asyncio.run(main())
+"""
+        checkout_root = Path(__file__).resolve().parent.parent
+        subprocess.run(
+            [sys.executable, "-"],
+            input=unhashable_code,
+            text=True,
+            cwd=str(checkout_root),
+            check=True,
+            timeout=15,
+        )
+
+        # Case detaching an overdue callback Future without calling its cancel():
+        # the waiter returns TIMED_OUT without calling cancel() or reporting an unhandled exception
+        class SyncCancelRaisingFuture(asyncio.Future[None]):
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.cancel_called = False
+                self.exception_calls = 0
+
+            def cancel(self, msg: Any = None) -> bool:
+                self.cancel_called = True
+                raise RuntimeError("synchronous cancel error")
+
+            def exception(self) -> BaseException | None:
+                self.exception_calls += 1
+                return super().exception()
+
+        cancel_reports: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        old_h = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: cancel_reports.append(ctx))
+        fut_sync_box: list[Any] = []
+        try:
+            try:
+                fut_sync_cancel: Any = SyncCancelRaisingFuture(loop=asyncio.get_running_loop())
+                fut_sync_box.append(fut_sync_cancel)
+                clock_now = [1000.0]
+                orig_client_mono = client_module.monotonic
+                orig_trans_mono = _transport.monotonic
+                client_module.monotonic = lambda: clock_now[0]
+                _transport.monotonic = lambda: clock_now[0]
+
+                def sync_cancel_on_poll(r: Any) -> Any:
+                    clock_now[0] += 0.2
+                    return fut_sync_cancel
+
+                running_detail = CustomerReviewDetail.from_dict(review("RUNNING"))
+
+                async def fake_sync_cancel_running(org: Any, rev: Any) -> Any:
+                    return running_detail
+
+                try:
+                    async with AsyncProoflineClient(
+                        token="test_token", base_url="https://api.proofline.sh"
+                    ) as client:
+                        client.get_review = fake_sync_cancel_running  # type: ignore
+                        poll_task = asyncio.create_task(
+                            client.wait_for_review(
+                                ORG,
+                                REVIEW,
+                                timeout=0.1,
+                                on_poll=sync_cancel_on_poll,
+                            )
+                        )
+                        done_poll, _ = await asyncio.wait({poll_task}, timeout=5.0)
+                        if poll_task not in done_poll:
+                            if not fut_sync_cancel.done():
+                                fut_sync_cancel.set_result(None)
+                            poll_task.cancel()
+                            await asyncio.wait({poll_task}, timeout=1.0)
+                            pytest.fail(
+                                "wait_for_review hung on overdue future instead of detaching it"
+                            )
+                        res_sync_cancel = poll_task.result()
+                        assert res_sync_cancel.status == "TIMED_OUT"
+                        await asyncio.sleep(0)
+                        assert fut_sync_cancel.cancel_called is False
+                        assert id(fut_sync_cancel) in client_module._DETACHED_FUTURES
+                        assert cancel_reports == []
+
+                        # Late-exception and release checks in test body after detachment verified
+                        fut_sync_cancel.set_exception(RuntimeError("sync cancel late error"))
+                        await asyncio.sleep(0)
+                        assert id(fut_sync_cancel) not in client_module._DETACHED_FUTURES
+                        assert fut_sync_cancel.exception_calls > 0
+                        # import weakref (already imported at module level)
+
+                        fut_sync_ref = weakref.ref(fut_sync_cancel)
+                        fut_sync_box.clear()
+                        del fut_sync_cancel
+                        import gc
+
+                        gc.collect()
+                        assert fut_sync_ref() is None
+                finally:
+                    client_module.monotonic = orig_client_mono
+                    _transport.monotonic = orig_trans_mono
+            finally:
+                if fut_sync_box:
+                    f = fut_sync_box[0]
+                    try:
+                        if not asyncio.Future.done(f):
+                            f.set_result(None)
+                            await asyncio.sleep(0)
+                        elif not asyncio.Future.cancelled(f):
+                            f.exception()
+                    except BaseException:
+                        pass
+                    fut_sync_box.clear()
+        finally:
+            loop.set_exception_handler(old_h)
+
+        # Current task cannot be returned by on_poll
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(ValueError, match="running polling task"):
+                    await client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=10,
+                        on_poll=lambda r: asyncio.current_task(),
+                    )
+
+    # Cyclic tuple whose list points back to it
+    cyclic_list: list[Any] = []
+    cyclic_tuple = (cyclic_list, "tuple_leaf")
+    cyclic_list.append(cyclic_tuple)
+
+    detail_cyclic = CustomerReviewDetail.from_dict(responses[1])
+    detail_cyclic.additional_properties["cyclic_tuple"] = cyclic_tuple
+
+    snap_cyclic = _snapshot_review(detail_cyclic)
+    assert snap_cyclic is not None
+    snap_tup = snap_cyclic.additional_properties["cyclic_tuple"]
+    assert snap_tup is not cyclic_tuple
+    snap_lst = snap_tup[0]
+    assert snap_lst is not cyclic_list
+    assert snap_lst[0] is snap_tup
+
+    # Writable memoryview copied to independent storage
+    orig_bytearray = bytearray(b"hello")
+    orig_view = memoryview(orig_bytearray)
+    detail_view = CustomerReviewDetail.from_dict(responses[1])
+    detail_view.additional_properties["memview"] = orig_view
+
+    snap_view = _snapshot_review(detail_view)
+    assert snap_view is not None
+    copied_view = snap_view.additional_properties["memview"]
+    assert isinstance(copied_view, memoryview)
+    assert not copied_view.readonly
+    copied_view[0] = ord(b"X")
+    assert orig_bytearray == bytearray(b"hello")
+    assert bytes(copied_view) == b"Xello"
+
+    # Unsupported mutable value rejected
+    import threading
+
+    detail_unsupported = CustomerReviewDetail.from_dict(responses[1])
+    detail_unsupported.additional_properties["bad"] = threading.Lock()
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_unsupported)
+
+    # Safe finalization size for tuples skips snapshot delivery
+    huge_tuple = tuple(range(1001))
+    detail_huge = CustomerReviewDetail.from_dict(responses[1])
+    detail_huge.additional_properties["huge"] = huge_tuple
+    assert _snapshot_review(detail_huge) is None
+
+    # Oversized buffer skips snapshot delivery
+    oversized_buf = bytearray(65_537)
+    detail_buf = CustomerReviewDetail.from_dict(responses[1])
+    detail_buf.additional_properties["buf"] = oversized_buf
+    assert _snapshot_review(detail_buf) is None
+
+    # Multidimensional memoryview checks nbytes against cap
+    multi_dim_raw = b"x" * 100_000
+    multi_dim_view = memoryview(multi_dim_raw).cast("B", shape=[10, 10_000])
+    assert len(multi_dim_view) == 10
+    assert multi_dim_view.nbytes == 100_000
+    detail_multi_dim = CustomerReviewDetail.from_dict(responses[1])
+    detail_multi_dim.additional_properties["multi_dim"] = multi_dim_view
+    assert _snapshot_review(detail_multi_dim) is None
+
+    # Scalar subclass instance and attributes copied
+    class CustomStr(str):
+        pass
+
+    custom_scalar = CustomStr("scalar_val")
+    custom_scalar.attached_list = ["mut"]  # type: ignore[attr-defined]
+    detail_scalar = CustomerReviewDetail.from_dict(responses[1])
+    detail_scalar.additional_properties["scalar"] = custom_scalar
+
+    snap_scalar = _snapshot_review(detail_scalar)
+    assert snap_scalar is not None
+    copied_scalar = snap_scalar.additional_properties["scalar"]
+    assert type(copied_scalar) is CustomStr
+    assert copied_scalar is not custom_scalar
+    assert copied_scalar.attached_list is not custom_scalar.attached_list
+    assert copied_scalar.attached_list == ["mut"]
+
+    # Container subclass (defaultdict) preserves type, default_factory, and attributes
+    from collections import defaultdict
+
+    class CustomDict(defaultdict[str, list[str]]):
+        pass
+
+    dd = CustomDict(list)
+    dd["k"].append("val")
+    dd.extra_attr = ["extra"]  # type: ignore[attr-defined]
+    detail_dd = CustomerReviewDetail.from_dict(responses[1])
+    detail_dd.additional_properties["dd"] = dd
+
+    snap_dd = _snapshot_review(detail_dd)
+    assert snap_dd is not None
+    copied_dd = snap_dd.additional_properties["dd"]
+    assert isinstance(copied_dd, CustomDict)
+    assert copied_dd is not dd
+    assert copied_dd["k"] is not dd["k"]
+    assert copied_dd["k"] == ["val"]
+    assert copied_dd["missing"] == []
+    assert copied_dd.extra_attr is not dd.extra_attr
+    assert copied_dd.extra_attr == ["extra"]
+
+    # Traverse dictionary entries and slot descriptors including private slots
+    class SlotBase:
+        __slots__ = ("__private_slot", "public_slot")
+
+        def __init__(self) -> None:
+            self.__private_slot = ["private_secret"]
+            self.public_slot = ["public_secret"]
+
+    class SlotDerived(SlotBase):
+        pass
+
+    slot_obj = SlotDerived()
+    slot_obj.extra_dict_attr = ["extra"]
+
+    detail_slot = CustomerReviewDetail.from_dict(responses[1])
+    detail_slot.additional_properties["slot_obj"] = slot_obj
+
+    snap_slot = _snapshot_review(detail_slot)
+    assert snap_slot is not None
+    copied_slot_obj = snap_slot.additional_properties["slot_obj"]
+    assert copied_slot_obj is not slot_obj
+    assert (
+        copied_slot_obj._SlotBase__private_slot  # type: ignore[attr-defined]
+        is not slot_obj._SlotBase__private_slot
+    )
+    assert (
+        copied_slot_obj._SlotBase__private_slot  # type: ignore[attr-defined]
+        == ["private_secret"]
+    )
+    assert copied_slot_obj.public_slot is not slot_obj.public_slot
+    assert copied_slot_obj.public_slot == ["public_secret"]
+    assert copied_slot_obj.extra_dict_attr is not slot_obj.extra_dict_attr
+    assert copied_slot_obj.extra_dict_attr == ["extra"]
+
+    # Tuple subclass preserves type, isolates elements, copies attributes, and respects size limit
+    class CustomTuple(tuple[Any, ...]):
+        pass
+
+    ct = CustomTuple(([1, 2], {"a": "b"}))
+    ct.extra = ["tuple_attr"]  # type: ignore[attr-defined]
+    detail_ct = CustomerReviewDetail.from_dict(responses[1])
+    detail_ct.additional_properties["ct"] = ct
+
+    snap_ct = _snapshot_review(detail_ct)
+    assert snap_ct is not None
+    copied_ct = snap_ct.additional_properties["ct"]
+    assert type(copied_ct) is CustomTuple
+    assert copied_ct is not ct
+    assert copied_ct[0] is not ct[0]
+    assert copied_ct[0] == [1, 2]
+    assert copied_ct[1] is not ct[1]
+    assert copied_ct[1] == {"a": "b"}
+    assert copied_ct.extra is not ct.extra
+    assert copied_ct.extra == ["tuple_attr"]
+
+    huge_ct = CustomTuple(range(1001))
+    detail_huge_ct = CustomerReviewDetail.from_dict(responses[1])
+    detail_huge_ct.additional_properties["huge_ct"] = huge_ct
+    assert _snapshot_review(detail_huge_ct) is None
+
+    # Nonempty tuple subclass with identical elements constructs distinct subclass instance
+    class IdenticalTuple(tuple[Any, ...]):
+        pass
+
+    itup = IdenticalTuple((1, "str", False))
+    itup.attr = ["orig_attr"]  # type: ignore[attr-defined]
+    detail_itup = CustomerReviewDetail.from_dict(responses[1])
+    detail_itup.additional_properties["itup"] = itup
+
+    snap_itup = _snapshot_review(detail_itup)
+    assert snap_itup is not None
+    copied_itup = snap_itup.additional_properties["itup"]
+    assert type(copied_itup) is IdenticalTuple
+    assert copied_itup is not itup
+    assert copied_itup.attr is not itup.attr
+    assert copied_itup.attr == ["orig_attr"]
+    copied_itup.attr.append("mutated")
+    assert itup.attr == ["orig_attr"]
+
+    # Oversized terminal reviews passed to both sync and async clients:
+    # on_poll skipped and outcome returned
+    detail_oversized = CustomerReviewDetail.from_dict(responses[1])
+    detail_oversized.additional_properties["huge"] = tuple(range(1001))
+
+    for test_mode in ("sync", "async"):
+        oversized_poll_called = False
+
+        def oversized_poll_cb(r: Any) -> None:
+            nonlocal oversized_poll_called
+            oversized_poll_called = True
+
+        async with session(test_mode, "https://api.proofline.sh") as client:
+            if test_mode == "async":
+
+                async def fake_get_ov(*args: Any, **kwargs: Any) -> Any:
+                    return detail_oversized
+
+                monkeypatch.setattr(client, "get_review", fake_get_ov)
+            else:
+
+                def fake_get_ov_sync(*args: Any, **kwargs: Any) -> Any:
+                    return detail_oversized
+
+                monkeypatch.setattr(client, "get_review", fake_get_ov_sync)
+
+            res_ov = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=10,
+                on_poll=oversized_poll_cb,
+            )
+            assert res_ov.status == "COMPLETED"
+            assert not oversized_poll_called
+
+    # Lock-bearing reviews passed to both sync and async clients:
+    # TypeError propagates and on_poll is not called
+    import threading
+
+    detail_lock = CustomerReviewDetail.from_dict(responses[1])
+    detail_lock.additional_properties["lock"] = threading.Lock()
+
+    for test_mode in ("sync", "async"):
+        lock_poll_called = False
+
+        def lock_poll_cb(r: Any) -> None:
+            nonlocal lock_poll_called
+            lock_poll_called = True
+
+        async with session(test_mode, "https://api.proofline.sh") as client:
+            if test_mode == "async":
+
+                async def fake_get_lock(*args: Any, **kwargs: Any) -> Any:
+                    return detail_lock
+
+                monkeypatch.setattr(client, "get_review", fake_get_lock)
+            else:
+
+                def fake_get_lock_sync(*args: Any, **kwargs: Any) -> Any:
+                    return detail_lock
+
+                monkeypatch.setattr(client, "get_review", fake_get_lock_sync)
+
+            with pytest.raises(TypeError, match="Unsupported mutable value"):
+                await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lock_poll_cb,
+                )
+            assert not lock_poll_called
+
+    # Multidimensional memoryview shape and format preserved
+    raw_mv = bytearray(b"0123456789abcdef")
+    mv_orig = memoryview(raw_mv).cast("B", shape=[4, 4])
+    detail_mv = CustomerReviewDetail.from_dict(responses[1])
+    detail_mv.additional_properties["mv"] = mv_orig
+
+    snap_mv = _snapshot_review(detail_mv)
+    assert snap_mv is not None
+    copied_mv = snap_mv.additional_properties["mv"]
+    assert isinstance(copied_mv, memoryview)
+    assert copied_mv.shape == (4, 4)
+    assert copied_mv.format == "B"
+    assert copied_mv[1, 2] == mv_orig[1, 2]
+    copied_mv[1, 2] = ord("Z")
+    assert raw_mv != bytearray(copied_mv)
+
+    # Named tuple preserves named fields
+    from typing import NamedTuple
+
+    class Point(NamedTuple):
+        x: int
+        y: int
+
+    pt = Point(10, 20)
+    detail_pt = CustomerReviewDetail.from_dict(responses[1])
+    detail_pt.additional_properties["pt"] = pt
+
+    snap_pt = _snapshot_review(detail_pt)
+    assert snap_pt is not None
+    copied_pt = snap_pt.additional_properties["pt"]
+    assert type(copied_pt) is Point
+    assert copied_pt.x == 10
+    assert copied_pt.y == 20
+
+    # Derived slot does not hide base slot
+    class BaseSlot:
+        __slots__ = ("shared_slot",)
+
+    class DerivedSlot(BaseSlot):
+        __slots__ = ("shared_slot",)
+
+    slot_inst = DerivedSlot()
+    BaseSlot.shared_slot.__set__(slot_inst, ["base_data"])
+    DerivedSlot.shared_slot.__set__(slot_inst, ["derived_data"])
+    detail_slots = CustomerReviewDetail.from_dict(responses[1])
+    detail_slots.additional_properties["slots"] = slot_inst
+
+    snap_slots = _snapshot_review(detail_slots)
+    assert snap_slots is not None
+    copied_slots = snap_slots.additional_properties["slots"]
+    assert type(copied_slots) is DerivedSlot
+    assert BaseSlot.shared_slot.__get__(copied_slots) == ["base_data"]
+    assert BaseSlot.shared_slot.__get__(copied_slots) is not BaseSlot.shared_slot.__get__(slot_inst)
+    assert DerivedSlot.shared_slot.__get__(copied_slots) == ["derived_data"]
+    assert DerivedSlot.shared_slot.__get__(copied_slots) is not DerivedSlot.shared_slot.__get__(
+        slot_inst
+    )
+
+    # Empty tuple subclass with required __init__ argument
+    class EmptyArgTuple(tuple[Any, ...]):
+        def __init__(self, required_arg: Any) -> None:
+            self.attr = "initialized"
+
+    empty_tup_inst = tuple.__new__(EmptyArgTuple, ())
+    empty_tup_inst.attr = "custom_attr"  # type: ignore[attr-defined]
+    detail_empty_arg = CustomerReviewDetail.from_dict(responses[1])
+    detail_empty_arg.additional_properties["empty_arg"] = empty_tup_inst
+
+    snap_empty_arg = _snapshot_review(detail_empty_arg)
+    assert snap_empty_arg is not None
+    copied_empty_arg = snap_empty_arg.additional_properties["empty_arg"]
+    assert type(copied_empty_arg) is EmptyArgTuple
+    assert copied_empty_arg == ()
+    assert copied_empty_arg.attr == "custom_attr"
+
+    # Dict keys resolved through memo preserving alias with value
+    class KeyValObj:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    shared_obj = KeyValObj("shared_alias")
+    key_tup = (shared_obj, 1)
+    dict_with_alias = {key_tup: shared_obj}
+    detail_alias = CustomerReviewDetail.from_dict(responses[1])
+    detail_alias.additional_properties["alias_dict"] = dict_with_alias
+
+    snap_alias = _snapshot_review(detail_alias)
+    assert snap_alias is not None
+    copied_dict = snap_alias.additional_properties["alias_dict"]
+    assert len(copied_dict) == 1
+    for k, v in copied_dict.items():
+        assert k is not key_tup
+        assert k[0] is v
+        assert v is not shared_obj
+        assert v.name == "shared_alias"
+
+    # Set member containing oversized tuple skips snapshot delivery
+    set_with_huge_tuple = {tuple(range(1001))}
+    detail_set_huge = CustomerReviewDetail.from_dict(responses[1])
+    detail_set_huge.additional_properties["set_huge"] = set_with_huge_tuple
+    assert _snapshot_review(detail_set_huge) is None
+
+    # Mutable object whose __copy__ returns self is rejected with TypeError
+    class SelfCopyList(list[Any]):
+        def __copy__(self) -> Any:
+            return self
+
+    self_copy_inst = SelfCopyList([1, 2])
+    detail_self_copy = CustomerReviewDetail.from_dict(responses[1])
+    detail_self_copy.additional_properties["self_copy"] = self_copy_inst
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_self_copy)
+
+    # Ctypes array and memoryview snapshots are preserved
+    import ctypes
+
+    c_arr = (ctypes.c_int32 * 4)(1, 2, 3, 4)
+    mv_ctypes = memoryview(c_arr)
+    mv_ctypes_bytes = memoryview(c_arr).cast("B")
+    mv_ctypes_slice = memoryview(c_arr)[3::-2]
+    detail_ctypes_mv = CustomerReviewDetail.from_dict(responses[1])
+    detail_ctypes_mv.additional_properties["ctypes_arr"] = c_arr
+    detail_ctypes_mv.additional_properties["ctypes_mv"] = mv_ctypes
+    detail_ctypes_mv.additional_properties["ctypes_bytes"] = mv_ctypes_bytes
+    detail_ctypes_mv.additional_properties["ctypes_slice"] = mv_ctypes_slice
+    snap_ctypes = _snapshot_review(detail_ctypes_mv)
+    assert snap_ctypes is not None
+    copied_arr = snap_ctypes.additional_properties["ctypes_arr"]
+    copied_mv = snap_ctypes.additional_properties["ctypes_mv"]
+    copied_bytes = snap_ctypes.additional_properties["ctypes_bytes"]
+    copied_slice = snap_ctypes.additional_properties["ctypes_slice"]
+    assert copied_slice.shape == mv_ctypes_slice.shape == (2,)
+    assert copied_slice.strides == mv_ctypes_slice.strides == (-8,)
+    assert bytes(copied_mv) == bytes(mv_ctypes)
+    assert bytes(copied_bytes) == bytes(mv_ctypes_bytes)
+    assert bytes(copied_slice) == bytes(mv_ctypes_slice)
+    assert copied_arr is not c_arr
+    assert copied_mv.obj is not c_arr
+    assert copied_bytes.obj is not c_arr
+    # Write through cloned byte view at the second element and assert that the reversed slice
+    # reflects the write while the source stays unchanged:
+    copied_bytes[4] = 99
+    assert copied_arr[1] == 99
+    assert bytes(copied_mv)[4] == 99
+    assert bytes(copied_slice) == b"\x04\x00\x00\x00\x63\x00\x00\x00"
+    assert c_arr[1] == 2
+    assert bytes(mv_ctypes)[4] == 2
+    assert bytes(mv_ctypes_slice) == b"\x04\x00\x00\x00\x02\x00\x00\x00"
+    assert mv_ctypes_bytes[4] == 2
+
+    # UUID instances are cloned and memoized preserving is_safe and subclass instance state
+    from uuid import SafeUUID
+
+    class CustomReviewUUID(UUID):
+        pass
+
+    detail_uuid = CustomerReviewDetail.from_dict(responses[1])
+    orig_uuid = UUID(int=detail_uuid.id.int, is_safe=SafeUUID.safe)
+    detail_uuid.id = orig_uuid
+    subclass_uuid = CustomReviewUUID(int=orig_uuid.int, is_safe=SafeUUID.safe)
+    object.__setattr__(subclass_uuid, "custom_tag", "isolated_tag")
+    detail_uuid.additional_properties["subclass_uuid"] = subclass_uuid
+
+    snap_uuid = _snapshot_review(detail_uuid)
+    assert snap_uuid is not None
+    assert snap_uuid.id is not orig_uuid
+    assert snap_uuid.id == orig_uuid
+    assert snap_uuid.id.is_safe == orig_uuid.is_safe == SafeUUID.safe
+    object.__setattr__(snap_uuid.id, "int", 999999)
+    assert snap_uuid.id.int == 999999
+    assert orig_uuid.int != 999999
+
+    cloned_subclass = snap_uuid.additional_properties["subclass_uuid"]
+    assert type(cloned_subclass) is CustomReviewUUID
+    assert cloned_subclass is not subclass_uuid
+    assert cloned_subclass.is_safe == SafeUUID.safe
+    assert cloned_subclass.custom_tag == "isolated_tag"
+    object.__setattr__(cloned_subclass, "custom_tag", "mutated_tag")
+    assert subclass_uuid.custom_tag == "isolated_tag"
+
+    # 2D memoryview bounding span cast to physical rows and row sliced
+    c_arr_2d = (ctypes.c_uint8 * 8)(10, 11, 20, 21, 30, 31, 40, 41)
+    mv_2d_slice = memoryview(c_arr_2d).cast("B", shape=(4, 2))[::2]
+    detail_2d = CustomerReviewDetail.from_dict(responses[1])
+    detail_2d.additional_properties["ctypes_2d"] = mv_2d_slice
+    snap_2d = _snapshot_review(detail_2d)
+    assert snap_2d is not None
+    copied_2d = snap_2d.additional_properties["ctypes_2d"]
+    assert copied_2d.shape == mv_2d_slice.shape == (2, 2)
+    assert copied_2d.strides == mv_2d_slice.strides == (4, 1)
+    assert copied_2d.tobytes() == mv_2d_slice.tobytes()
+    copied_2d[0, 0] = 99
+    assert copied_2d[0, 0] == 99
+    assert mv_2d_slice[0, 0] == 10
+    assert c_arr_2d[0] == 10
+
+    # 3D memoryview reversed first axis reconstructed from physical span
+    c_arr_3d = (ctypes.c_uint8 * 24)(*range(24))
+    mv_3d_rev = memoryview(c_arr_3d).cast("B", shape=(2, 3, 4))[::-1]
+    detail_3d = CustomerReviewDetail.from_dict(responses[1])
+    detail_3d.additional_properties["ctypes_3d"] = mv_3d_rev
+    snap_3d = _snapshot_review(detail_3d)
+    assert snap_3d is not None
+    copied_3d = snap_3d.additional_properties["ctypes_3d"]
+    assert copied_3d.shape == mv_3d_rev.shape == (2, 3, 4)
+    assert copied_3d.strides == mv_3d_rev.strides == (-12, 4, 1)
+    assert copied_3d.tobytes() == mv_3d_rev.tobytes()
+    copied_3d[0, 0, 0] = 99
+    assert copied_3d[0, 0, 0] == 99
+    assert mv_3d_rev[0, 0, 0] == 12
+    assert c_arr_3d[12] == 12
+
+    class MutableArray(ctypes.c_int32 * 4):
+        pass
+
+    MutableArray.mutable_attr = [1, 2, 3]  # application-defined mutable attribute
+    mut_arr = MutableArray(1, 2, 3, 4)
+    detail_mut_arr = CustomerReviewDetail.from_dict(responses[1])
+    detail_mut_arr.additional_properties["mut_arr"] = memoryview(mut_arr)
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_mut_arr)
+
+    # Empty set subclass copies attributes
+    class CustomSet(set[Any]):
+        pass
+
+    empty_custom_set = CustomSet()
+    empty_custom_set.custom_attr = ["set_attr"]  # type: ignore[attr-defined]
+    detail_empty_set = CustomerReviewDetail.from_dict(responses[1])
+    detail_empty_set.additional_properties["empty_set"] = empty_custom_set
+
+    snap_empty_set = _snapshot_review(detail_empty_set)
+    assert snap_empty_set is not None
+    copied_empty_set = snap_empty_set.additional_properties["empty_set"]
+    assert type(copied_empty_set) is CustomSet
+    assert len(copied_empty_set) == 0
+    assert copied_empty_set.custom_attr is not empty_custom_set.custom_attr
+    assert copied_empty_set.custom_attr == ["set_attr"]
+
+    # Set subclass requiring extra constructor argument propagates TypeError
+    class RequiredArgSet(set[Any]):
+        def __init__(self, required_arg: Any) -> None:
+            super().__init__()
+
+    req_set = set.__new__(RequiredArgSet)
+    detail_req_set = CustomerReviewDetail.from_dict(responses[1])
+    detail_req_set.additional_properties["req_set"] = req_set
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_req_set)
+
+    # Bytearray subclass preserves subclass type and copies instance attributes
+    class CustomByteArray(bytearray):
+        pass
+
+    custom_ba = CustomByteArray(b"custom_bytes")
+    custom_ba.extra_attr = ["extra"]  # type: ignore[attr-defined]
+    detail_custom_ba = CustomerReviewDetail.from_dict(responses[1])
+    detail_custom_ba.additional_properties["custom_ba"] = custom_ba
+    snap_ba = _snapshot_review(detail_custom_ba)
+    assert snap_ba is not None
+    copied_ba = snap_ba.additional_properties["custom_ba"]
+    assert type(copied_ba) is CustomByteArray
+    assert copied_ba == b"custom_bytes"
+    assert copied_ba is not custom_ba
+    assert copied_ba.extra_attr is not custom_ba.extra_attr
+    assert copied_ba.extra_attr == ["extra"]
+
+    # Class with exhausted __slots__ iterator has installed descriptors enumerated
+    class ExhaustedSlotsObj:
+        __slots__ = iter(["slot_attr"])
+
+        def __init__(self, val: Any) -> None:
+            self.slot_attr = val
+
+        def __copy__(self) -> Any:
+            res = ExhaustedSlotsObj.__new__(ExhaustedSlotsObj)
+            res.slot_attr = self.slot_attr
+            return res
+
+    orig_slots_inst = ExhaustedSlotsObj(["slot_val"])
+    detail_slots = CustomerReviewDetail.from_dict(responses[1])
+    detail_slots.additional_properties["exhausted_slots"] = orig_slots_inst
+    snap_slots = _snapshot_review(detail_slots)
+    assert snap_slots is not None
+    copied_slots_inst = snap_slots.additional_properties["exhausted_slots"]
+    assert copied_slots_inst is not orig_slots_inst
+    assert copied_slots_inst.slot_attr is not orig_slots_inst.slot_attr
+    assert copied_slots_inst.slot_attr == ["slot_val"]
+
+    # Datetime with custom mutable tzinfo copies tzinfo and avoids leaking mutation
+    import datetime as dt_mod
+
+    class CustomMutableTz(dt_mod.tzinfo):
+        def __init__(self, offset_minutes: int = 0) -> None:
+            self.offset_minutes = offset_minutes
+            self.tz_attr = ["tz_state"]
+
+        def utcoffset(self, dt_val: Any) -> timedelta:
+            return timedelta(minutes=self.offset_minutes)
+
+        def tzname(self, dt_val: Any) -> str:
+            return "CUSTOM"
+
+        def dst(self, dt_val: Any) -> timedelta:
+            return timedelta(0)
+
+    custom_tz_inst = CustomMutableTz(60)
+    dt_with_custom_tz = datetime(2026, 11, 22, 10, 0, 0, tzinfo=custom_tz_inst)
+    detail_dt = CustomerReviewDetail.from_dict(responses[1])
+    detail_dt.additional_properties["custom_tz_dt"] = dt_with_custom_tz
+    snap_dt = _snapshot_review(detail_dt)
+    assert snap_dt is not None
+    copied_dt = snap_dt.additional_properties["custom_tz_dt"]
+    assert copied_dt == dt_with_custom_tz
+    assert copied_dt.tzinfo is not custom_tz_inst
+    assert copied_dt.tzinfo.tz_attr is not custom_tz_inst.tz_attr
+    assert copied_dt.tzinfo.tz_attr == ["tz_state"]
+
+    # Deceptive tuple subclass reporting len 1 with > 1000 items is skipped
+    class DeceptiveTuple(tuple[Any, ...]):
+        def __len__(self) -> int:
+            return 1
+
+    huge_tup_items = tuple(range(1001))
+    deceptive_tup = tuple.__new__(DeceptiveTuple, huge_tup_items)
+    detail_deceptive = CustomerReviewDetail.from_dict(responses[1])
+    detail_deceptive.additional_properties["deceptive"] = deceptive_tup
+    assert _snapshot_review(detail_deceptive) is None
+
+    # Bytearray subclass rejecting single-buffer constructor is allocated via base methods
+    class SubByteArray(bytearray):
+        def __init__(self, required_arg: int) -> None:
+            if not isinstance(required_arg, int) or isinstance(required_arg, bool):
+                raise TypeError("required_arg must be an int")
+            super().__init__()
+            self.required_arg = required_arg
+
+    sub_ba = bytearray.__new__(SubByteArray)
+    bytearray.__init__(sub_ba, b"sub_bytes")
+    sub_ba.required_arg = 100
+    sub_ba.custom_attr = ["sub_attr"]
+
+    detail_sub_ba = CustomerReviewDetail.from_dict(responses[1])
+    detail_sub_ba.additional_properties["sub_ba"] = sub_ba
+    snap_sub_ba = _snapshot_review(detail_sub_ba)
+    assert snap_sub_ba is not None
+    copied_sub_ba = snap_sub_ba.additional_properties["sub_ba"]
+    assert type(copied_sub_ba) is SubByteArray
+    assert copied_sub_ba == b"sub_bytes"
+    assert copied_sub_ba.custom_attr is not sub_ba.custom_attr
+    assert copied_sub_ba.custom_attr == ["sub_attr"]
+
+    # Datetime subclass cloned and instance attributes snapshotted
+    class SubDatetime(datetime):
+        pass
+
+    sub_dt = SubDatetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
+    sub_dt.sub_attr = ["dt_attr"]
+    detail_sub_dt = CustomerReviewDetail.from_dict(responses[1])
+    detail_sub_dt.additional_properties["sub_dt"] = sub_dt
+    snap_sub_dt = _snapshot_review(detail_sub_dt)
+    assert snap_sub_dt is not None
+    copied_sub_dt = snap_sub_dt.additional_properties["sub_dt"]
+    assert type(copied_sub_dt) is SubDatetime
+    assert copied_sub_dt == sub_dt
+    assert copied_sub_dt is not sub_dt
+    assert copied_sub_dt.sub_attr is not sub_dt.sub_attr
+    assert copied_sub_dt.sub_attr == ["dt_attr"]
+
+    # Mutable tzinfo returning self from __copy__ is rejected with TypeError
+    class SelfCopyTz(dt_mod.tzinfo):
+        def __copy__(self) -> Any:
+            return self
+
+    self_copy_tz = SelfCopyTz()
+    dt_self_copy_tz = datetime(2026, 11, 22, 10, 0, 0, tzinfo=self_copy_tz)
+    detail_self_copy_tz = CustomerReviewDetail.from_dict(responses[1])
+    detail_self_copy_tz.additional_properties["self_copy_tz"] = dt_self_copy_tz
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_self_copy_tz)
+
+    # SubDatetime with custom mutable tzinfo rebuilds subclass with copied tzinfo
+    sub_dt_custom_tz = SubDatetime(2026, 11, 22, 12, 0, 0, tzinfo=custom_tz_inst)
+    sub_dt_custom_tz.sub_attr = ["dt_tz_attr"]
+    detail_sub_tz = CustomerReviewDetail.from_dict(responses[1])
+    detail_sub_tz.additional_properties["sub_dt_tz"] = sub_dt_custom_tz
+    snap_sub_tz = _snapshot_review(detail_sub_tz)
+    assert snap_sub_tz is not None
+    copied_sub_tz = snap_sub_tz.additional_properties["sub_dt_tz"]
+    assert type(copied_sub_tz) is SubDatetime
+    assert copied_sub_tz == sub_dt_custom_tz
+    assert copied_sub_tz.tzinfo is not custom_tz_inst
+    assert copied_sub_tz.tzinfo.tz_attr is not custom_tz_inst.tz_attr
+    assert copied_sub_tz.sub_attr is not sub_dt_custom_tz.sub_attr
+
+    # Deceptive set subclass returning len 0 with members copies all members
+    class DeceptiveSet(set[Any]):
+        def __len__(self) -> int:
+            return 0
+
+    deceptive_s = DeceptiveSet(["member1", "member2"])
+    detail_deceptive_s = CustomerReviewDetail.from_dict(responses[1])
+    detail_deceptive_s.additional_properties["deceptive_s"] = deceptive_s
+    snap_deceptive_s = _snapshot_review(detail_deceptive_s)
+    assert snap_deceptive_s is not None
+    copied_deceptive_s = snap_deceptive_s.additional_properties["deceptive_s"]
+    assert type(copied_deceptive_s) is DeceptiveSet
+    assert "member1" in copied_deceptive_s and "member2" in copied_deceptive_s
+
+    # Set subclass whose constructor inserts extra member does not reintroduce it
+    class InjectedSet(set[Any]):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.add("injected_shared_member")
+
+    injected_s = InjectedSet(["orig_member"])
+    injected_s.remove("injected_shared_member")
+    detail_injected_s = CustomerReviewDetail.from_dict(responses[1])
+    detail_injected_s.additional_properties["injected_s"] = injected_s
+    snap_injected_s = _snapshot_review(detail_injected_s)
+    assert snap_injected_s is not None
+    copied_injected_s = snap_injected_s.additional_properties["injected_s"]
+    assert type(copied_injected_s) is InjectedSet
+    assert "injected_shared_member" not in copied_injected_s
+    assert "orig_member" in copied_injected_s
+
+    # Standard built-in set and frozenset properly snapshotted with hashable mutable payload
+    class HashablePayload:
+        def __init__(self, key: str, payload: list[str]) -> None:
+            self.key = key
+            self.payload = payload
+
+        def __hash__(self) -> int:
+            return hash(self.key)
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, HashablePayload) and self.key == other.key
+
+    leaf_payload = HashablePayload("leaf_key", ["leaf_original"])
+    inner_fs = frozenset([leaf_payload])
+    outer_fs = frozenset([inner_fs])
+
+    class NonemptySubFrozenset1(frozenset[Any]):
+        pass
+
+    member_payload = HashablePayload("test_key", ["original_val"])
+    normal_s = {member_payload}
+    normal_fs = NonemptySubFrozenset1([member_payload])
+    normal_fs.custom_attr = "subclass_attr_1"
+    normal_fs.shared_list = ["shared_val_1"]
+    alias_dict_1 = normal_fs.__dict__
+    detail_sets = CustomerReviewDetail.from_dict(responses[1])
+    detail_sets.additional_properties["normal_s"] = normal_s
+    detail_sets.additional_properties["normal_fs"] = normal_fs
+    detail_sets.additional_properties["sub_fs_alias"] = alias_dict_1
+    detail_sets.additional_properties["nested_fs"] = outer_fs
+    detail_sets.additional_properties["fs_list"] = [normal_fs, normal_fs]
+    snap_sets = _snapshot_review(detail_sets)
+    assert snap_sets is not None
+    assert snap_sets.additional_properties["normal_s"] == normal_s
+    assert snap_sets.additional_properties["normal_s"] is not normal_s
+    copied_fs = snap_sets.additional_properties["normal_fs"]
+    assert isinstance(copied_fs, NonemptySubFrozenset1)
+    assert copied_fs.custom_attr == "subclass_attr_1"
+    assert copied_fs.shared_list == ["shared_val_1"]
+    assert copied_fs.shared_list is not normal_fs.shared_list
+    copied_alias_dict = snap_sets.additional_properties["sub_fs_alias"]
+    assert copied_fs.__dict__ is copied_alias_dict
+    assert copied_fs.__dict__ is not alias_dict_1
+    assert len(copied_fs) == 1
+    copied_list = snap_sets.additional_properties["fs_list"]
+    assert copied_list[0] is copied_list[1]
+    assert copied_list[0] is copied_fs
+    cloned_member = next(iter(copied_fs))
+    assert cloned_member == member_payload
+    assert cloned_member is not member_payload
+    assert next(iter(snap_sets.additional_properties["normal_s"])) is cloned_member
+    assert cloned_member.payload is not member_payload.payload
+    assert cloned_member in copied_fs
+    cloned_member.payload.append("mutated_val")
+    assert member_payload.payload == ["original_val"]
+
+    copied_outer = snap_sets.additional_properties["nested_fs"]
+    assert isinstance(copied_outer, frozenset)
+    assert len(copied_outer) == 1
+    copied_inner = next(iter(copied_outer))
+    assert isinstance(copied_inner, frozenset)
+    assert len(copied_inner) == 1
+    copied_leaf = next(iter(copied_inner))
+    assert copied_leaf == leaf_payload
+    assert copied_leaf is not leaf_payload
+    assert copied_leaf.payload is not leaf_payload.payload
+    assert copied_inner in copied_outer
+    assert copied_leaf in copied_inner
+    copied_leaf.payload.append("leaf_mutated")
+    assert leaf_payload.payload == ["leaf_original"]
+
+    # Deque traversed and snapshotted, and weakref inside deque rejected
+    from collections import deque
+
+    dq: deque[Any] = deque(["elem1", ["nested_list"]])
+    detail_dq = CustomerReviewDetail.from_dict(responses[1])
+    detail_dq.additional_properties["dq"] = dq
+    snap_dq = _snapshot_review(detail_dq)
+    assert snap_dq is not None
+    copied_dq = snap_dq.additional_properties["dq"]
+    assert isinstance(copied_dq, deque)
+    assert copied_dq == dq
+    assert copied_dq is not dq
+    assert copied_dq[1] is not dq[1]
+
+    # Deque subclass preserves subclass type, maxlen, and restores attributes
+    class CustomDeque(deque[Any]):
+        pass
+
+    c_dq: CustomDeque = CustomDeque(["d1", "d2"], maxlen=5)
+    c_dq.custom_dq_attr = ["dq_attr"]  # type: ignore[attr-defined]
+    detail_c_dq = CustomerReviewDetail.from_dict(responses[1])
+    detail_c_dq.additional_properties["c_dq"] = c_dq
+    snap_c_dq = _snapshot_review(detail_c_dq)
+    assert snap_c_dq is not None
+    copied_c_dq = snap_c_dq.additional_properties["c_dq"]
+    assert type(copied_c_dq) is CustomDeque
+    assert copied_c_dq.maxlen == 5
+    assert copied_c_dq == c_dq
+    assert copied_c_dq is not c_dq
+    assert copied_c_dq.custom_dq_attr is not c_dq.custom_dq_attr
+    assert copied_c_dq.custom_dq_attr == ["dq_attr"]
+
+    # Deceptive bytearray subclass underreporting len with > 65536 bytes is skipped
+    class DeceptiveByteArray(bytearray):
+        def __len__(self) -> int:
+            return 1
+
+    huge_ba = bytearray.__new__(DeceptiveByteArray)
+    bytearray.__init__(huge_ba, b"x" * 65537)
+    detail_huge_ba = CustomerReviewDetail.from_dict(responses[1])
+    detail_huge_ba.additional_properties["huge_ba"] = huge_ba
+    assert _snapshot_review(detail_huge_ba) is None
+
+    # Weak references in snapshot extension data are rejected with TypeError
+    # import weakref (already imported at module level)
+
+    class TargetObj:
+        pass
+
+    dummy_target = TargetObj()
+    weak_ref_obj = weakref.ref(dummy_target)
+    detail_weakref = CustomerReviewDetail.from_dict(responses[1])
+    detail_weakref.additional_properties["weakref"] = weak_ref_obj
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_weakref)
+
+    # Deque containing weak reference rejected with TypeError
+    dq_weakref: deque[Any] = deque([weak_ref_obj])
+    detail_dq_weakref = CustomerReviewDetail.from_dict(responses[1])
+    detail_dq_weakref.additional_properties["dq_weakref"] = dq_weakref
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_dq_weakref)
+
+    # Synchronous wait_for_review passed an async callback raises TypeError
+    async def async_cb_on_sync_client(r: Any) -> None:
+        pass
+
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as sync_cli:
+            with pytest.raises(TypeError, match="AsyncProoflineClient"):
+                await call(
+                    sync_cli,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=async_cb_on_sync_client,
+                )
+
+    # Synchronous wait_for_review rejecting non-None return with TypeError
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as sync_cli:
+            with pytest.raises(TypeError, match="Callbacks must return None"):
+                await call(
+                    sync_cli,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lambda r: False,
+                )
+
+    # Synchronous wait_for_review closes generator awaitable in GEN_CREATED
+    import types
+
+    @types.coroutine
+    def gen_coro_cb(r: Any) -> Any:
+        yield
+
+    gen_cb_inst = gen_coro_cb(None)
+
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as sync_cli:
+            with pytest.raises(TypeError, match="AsyncProoflineClient"):
+                await call(
+                    sync_cli,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=10,
+                    on_poll=lambda r: gen_cb_inst,
+                )
+    assert inspect.getgeneratorstate(gen_cb_inst) == inspect.GEN_CLOSED
+
+    # wait_for_review cleans up already-failed foreign-loop future returned when budget is exhausted
+    class TrackedForeignFuture(asyncio.Future[None]):
+        def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+            super().__init__(loop=loop)
+            self.exception_retrieved = False
+
+        def exception(self) -> BaseException | None:
+            self.exception_retrieved = True
+            return super().exception()
+
+            # import weakref (already imported at module level)
+
+    foreign_loop_failed = asyncio.new_event_loop()
+    foreign_reports: list[dict[str, Any]] = []
+    foreign_loop_failed.set_exception_handler(lambda _loop, ctx: foreign_reports.append(ctx))
+    try:
+        foreign_failed_box: list[Any] = [TrackedForeignFuture(loop=foreign_loop_failed)]
+        foreign_failed_box[0].set_exception(RuntimeError("foreign future failed"))
+        foreign_failed_fut_ref = weakref.ref(foreign_failed_box[0])
+
+        def foreign_fail_cb(r: Any) -> Any:
+            clock.now += 150.0
+            return foreign_failed_box[0]
+
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_foreign = await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=foreign_fail_cb,
+                )
+                assert res_foreign.status == "COMPLETED"
+                tracked_ref = foreign_failed_fut_ref()
+                assert tracked_ref is not None
+                assert tracked_ref.exception_retrieved is True
+                del tracked_ref
+                foreign_failed_box.clear()
+                import gc
+
+                gc.collect()
+                assert foreign_failed_fut_ref() is None
+                assert foreign_reports == []
+    finally:
+        if foreign_failed_box:
+            try:
+                ff = foreign_failed_box[0]
+                if not ff.cancelled():
+                    ff.exception()
+            except BaseException:
+                pass
+            foreign_failed_box.clear()
+        foreign_loop_failed.close()
+
+    # Datetime subclass whose replace fails and fallback lacks copied_tz raises TypeError
+    class BrokenSubDatetime(datetime):
+        def __new__(cls, y: int, m: int, d: int, tzinfo: Any = None) -> Any:
+            return super().__new__(cls, y, m, d, tzinfo=tzinfo)
+
+        def replace(self, **kwargs: Any) -> Any:
+            raise RuntimeError("cannot replace")
+
+        def __copy__(self) -> Any:
+            return super().__new__(
+                BrokenSubDatetime, self.year, self.month, self.day, tzinfo=self.tzinfo
+            )
+
+    broken_dt = BrokenSubDatetime(2026, 11, 22, tzinfo=custom_tz_inst)
+    detail_broken_dt = CustomerReviewDetail.from_dict(responses[1])
+    detail_broken_dt.additional_properties["broken_dt"] = broken_dt
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_broken_dt)
+
+    # Slotted extension object with class-level mutable list such as __shared__ is rejected
+    class SlottedSharedAttrObj:
+        __slots__ = ("instance_attr",)
+        __shared__ = [1, 2, 3]
+
+        def __init__(self, val: Any) -> None:
+            self.instance_attr = val
+
+    slotted_shared = SlottedSharedAttrObj("val")
+    detail_slotted = CustomerReviewDetail.from_dict(responses[1])
+    detail_slotted.additional_properties["shared"] = slotted_shared
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_slotted)
+
+    # Set member is a tuple containing an object with a custom hash that reads an inner dict
+    class CustomHashWithDict:
+        def __init__(self, d: dict[str, Any]) -> None:
+            self.d = d
+
+        def __hash__(self) -> int:
+            return hash(tuple(sorted(self.d.items())))
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, CustomHashWithDict) and self.d == other.d
+
+    inner_dict = {"key": "val"}
+    custom_obj = CustomHashWithDict(inner_dict)
+    tuple_with_custom = (custom_obj,)
+    set_with_tuple = {tuple_with_custom}
+    detail_tuple_custom = CustomerReviewDetail.from_dict(responses[1])
+    detail_tuple_custom.additional_properties["set_tuple"] = set_with_tuple
+    snap_tc = _snapshot_review(detail_tuple_custom)
+    assert snap_tc is not None
+    copied_set = snap_tc.additional_properties["set_tuple"]
+    copied_tuple = next(iter(copied_set))
+    assert copied_tuple[0].d == {"key": "val"}
+    assert copied_tuple[0].d is not inner_dict
+    assert copied_tuple in copied_set
+
+    # Snapshot overlapping views of one subclass exporter, visiting a view first:
+    # assert shared writes, original isolation, copied attributes, and scalar shape ()
+    class SubclassByteArray(bytearray):
+        pass
+
+    sub_ba = SubclassByteArray(b"0123456789abcdef")
+    sub_ba.extra_attr = ["isolated_extra"]  # type: ignore[attr-defined]
+
+    sub_mv1 = memoryview(sub_ba)[0:10]
+    sub_scalar = memoryview(sub_ba)[6:7].cast("B", shape=())
+    sub_mv2 = memoryview(sub_ba)[5:15]
+
+    detail_view_first = CustomerReviewDetail.from_dict(responses[1])
+    detail_view_first.additional_properties = {
+        "view1": sub_mv1,
+        "scalar": sub_scalar,
+        "view2": sub_mv2,
+        "exporter": sub_ba,
+    }
+
+    snap_vf = _snapshot_review(detail_view_first)
+    assert snap_vf is not None
+    copied_v1 = snap_vf.additional_properties["view1"]
+    copied_scalar = snap_vf.additional_properties["scalar"]
+    copied_v2 = snap_vf.additional_properties["view2"]
+    copied_exp = snap_vf.additional_properties["exporter"]
+
+    assert copied_scalar.shape == ()
+    assert copied_scalar.ndim == 0
+    assert copied_scalar[()] == ord("6")
+    assert type(copied_exp) is SubclassByteArray
+    assert copied_exp.extra_attr == ["isolated_extra"]
+    assert copied_exp.extra_attr is not sub_ba.extra_attr
+
+    copied_v1[6] = ord("X")
+    assert copied_v2[1] == ord("X")
+    assert copied_scalar[()] == ord("X")
+    assert copied_exp[6] == ord("X")
+    assert sub_ba[6] == ord("6")
+    assert sub_mv1[6] == ord("6")
+    assert sub_mv2[1] == ord("6")
+    assert sub_scalar[()] == ord("6")
+    copied_exp.extra_attr.append("new_val")
+    assert "new_val" not in sub_ba.extra_attr
+
+    # Also test with array.array subclass exporter and integer views:
+    class SubclassIntArray(array.array):
+        pass
+
+    sub_arr = SubclassIntArray("i", [10, 20, 30, 40, 50, 60, 70, 80])
+    sub_arr.custom_dict = {"prop": "val"}  # type: ignore[attr-defined]
+    arr_v1 = memoryview(sub_arr)[1:6]
+    arr_scalar = memoryview(sub_arr).cast("B")[12:16].cast("i", shape=())
+    arr_v2 = memoryview(sub_arr)[2:7]
+
+    detail_arr_vf = CustomerReviewDetail.from_dict(responses[1])
+    detail_arr_vf.additional_properties = {
+        "arr_v1": arr_v1,
+        "arr_scalar": arr_scalar,
+        "arr_v2": arr_v2,
+        "arr_exp": sub_arr,
+    }
+
+    snap_arr = _snapshot_review(detail_arr_vf)
+    assert snap_arr is not None
+    c_arr_v1 = snap_arr.additional_properties["arr_v1"]
+    c_arr_scalar = snap_arr.additional_properties["arr_scalar"]
+    c_arr_v2 = snap_arr.additional_properties["arr_v2"]
+    c_arr_exp = snap_arr.additional_properties["arr_exp"]
+
+    assert c_arr_scalar.shape == ()
+    assert c_arr_scalar.ndim == 0
+    assert c_arr_scalar[()] == 40
+    assert type(c_arr_exp) is SubclassIntArray
+    assert c_arr_exp.custom_dict == {"prop": "val"}
+    assert c_arr_exp.custom_dict is not sub_arr.custom_dict
+
+    c_arr_v1[2] = 999
+    assert c_arr_v2[1] == 999
+    assert c_arr_scalar[()] == 999
+    assert c_arr_exp[3] == 999
+    assert sub_arr[3] == 40
+    assert arr_v1[2] == 40
+
+    # Class-state rejection for set subclass and views over bytearray and array.array subclasses
+    class SetWithClassList(set[Any]):
+        __shared_list__ = [1, 2]
+
+    detail_set_class_list = CustomerReviewDetail.from_dict(responses[1])
+    detail_set_class_list.additional_properties["set_sub"] = SetWithClassList([1, 2])
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_set_class_list)
+
+    class ByteArrayWithClassList(bytearray):
+        __shared_list__ = [1, 2]
+
+    ba_sub_shared = ByteArrayWithClassList(b"hello")
+    detail_ba_view = CustomerReviewDetail.from_dict(responses[1])
+    detail_ba_view.additional_properties["ba_view"] = memoryview(ba_sub_shared)
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_ba_view)
+
+    class ArrayWithClassList(array.array):
+        __shared_list__ = [1, 2]
+
+    arr_sub_shared = ArrayWithClassList("i", [1, 2, 3])
+    detail_arr_view = CustomerReviewDetail.from_dict(responses[1])
+    detail_arr_view.additional_properties["arr_view"] = memoryview(arr_sub_shared)
+    with pytest.raises(TypeError, match="Unsupported mutable value"):
+        _snapshot_review(detail_arr_view)
+
+    # Key whose custom hash reads a deferred dictionary through a frozenset member
+    class DictHolder:
+        def __init__(self, d: dict[str, Any]) -> None:
+            self.d = d
+
+    class CustomHashWithFrozenset:
+        def __init__(self, f_set: frozenset[Any]) -> None:
+            self.f_set = f_set
+
+        def __hash__(self) -> int:
+            for item in self.f_set:
+                if hasattr(item, "d"):
+                    return hash(tuple(sorted((k, str(type(v))) for k, v in item.d.items())))
+            return 0
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, CustomHashWithFrozenset) and self.f_set == other.f_set
+
+    class NonemptySubFrozenset2(frozenset[Any]):
+        pass
+
+    deferred_dict: dict[str, Any] = {"ready_key": "ready_val"}
+    f_set = NonemptySubFrozenset2([DictHolder(deferred_dict)])
+    f_set.custom_attr = "subclass_attr_2"
+    f_set.shared_list = ["shared_val_2"]
+    alias_dict_2 = f_set.__dict__
+    deferred_dict["pending_val"] = f_set
+    custom_fs_obj = CustomHashWithFrozenset(f_set)
+    set_with_fs_custom = {custom_fs_obj}
+    detail_fs_custom = CustomerReviewDetail.from_dict(responses[1])
+    detail_fs_custom.additional_properties["fs_custom"] = set_with_fs_custom
+    detail_fs_custom.additional_properties["sub_fs_2_alias"] = alias_dict_2
+    snap_fsc = _snapshot_review(detail_fs_custom)
+    assert snap_fsc is not None
+    copied_fsc_set = snap_fsc.additional_properties["fs_custom"]
+    assert len(copied_fsc_set) == 1
+    copied_obj = next(iter(copied_fsc_set))
+    assert copied_obj in copied_fsc_set
+    copied_f_set = copied_obj.f_set
+    assert isinstance(copied_f_set, NonemptySubFrozenset2)
+    assert copied_f_set.custom_attr == "subclass_attr_2"
+    assert copied_f_set.shared_list == ["shared_val_2"]
+    assert copied_f_set.shared_list is not f_set.shared_list
+    copied_alias_2 = snap_fsc.additional_properties["sub_fs_2_alias"]
+    assert copied_f_set.__dict__ is copied_alias_2
+    assert copied_f_set.__dict__ is not alias_dict_2
+    copied_holder = next(iter(copied_obj.f_set))
+    assert copied_holder.d["ready_key"] == "ready_val"
+    assert copied_holder.d["pending_val"] is copied_obj.f_set
+    assert copied_holder.d is not deferred_dict
+
+    # Dictionary key whose hash depends on cloned nested state: snapshot succeeds and lookup works
+    class NestedStateKey:
+        def __init__(self, inner: dict[str, Any]) -> None:
+            self.inner = inner
+
+        def __hash__(self) -> int:
+            return hash(tuple(sorted((k, str(v)) for k, v in self.inner.items())))
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, NestedStateKey) and self.inner == other.inner
+
+    inner_mapping = {"nested_field": "nested_val"}
+    nested_key = NestedStateKey(inner_mapping)
+    dict_with_nested_key = {nested_key: "found_val"}
+    detail_nested = CustomerReviewDetail.from_dict(responses[1])
+    detail_nested.additional_properties["nested_key_dict"] = dict_with_nested_key
+
+    snap_nested = _snapshot_review(detail_nested)
+    assert snap_nested is not None
+    copied_nested_dict = snap_nested.additional_properties["nested_key_dict"]
+    copied_k = next(iter(copied_nested_dict.keys()))
+    assert copied_k is not nested_key
+    assert copied_k.inner is not inner_mapping
+    assert copied_k.inner == {"nested_field": "nested_val"}
+    assert copied_nested_dict[copied_k] == "found_val"
+    assert copied_k in copied_nested_dict
+
+    # Dictionary fixture whose key hash changes during clone finalization: snapshot is rejected
+    class MutatingHashKey:
+        def __init__(self) -> None:
+            self.val = 1
+
+        def __hash__(self) -> int:
+            h = self.val
+            self.val += 1
+            return h
+
+        def __eq__(self, other: Any) -> bool:
+            return isinstance(other, MutatingHashKey)
+
+    mutating_k = MutatingHashKey()
+    dict_with_mutating = {mutating_k: "val"}
+    detail_dict_mutating = CustomerReviewDetail.from_dict(responses[1])
+    detail_dict_mutating.additional_properties["mutating_dict"] = dict_with_mutating
+    assert _snapshot_review(detail_dict_mutating) is None
+
+    # Strided memoryview over immutable bytes preserves strides and c_contiguous
+    b_data = b"0123456789abcdef"
+    mv_strided = memoryview(b_data)[::2]
+    detail_strided = CustomerReviewDetail.from_dict(responses[1])
+    detail_strided.additional_properties["strided"] = mv_strided
+    snap_strided = _snapshot_review(detail_strided)
+    assert snap_strided is not None
+    c_strided = snap_strided.additional_properties["strided"]
+    assert c_strided.strides == mv_strided.strides
+    assert c_strided.c_contiguous == mv_strided.c_contiguous
+    assert bytes(c_strided) == bytes(mv_strided)
+
+    # Empty strided memoryview over immutable bytes preserves strides
+    mv_empty_strided = memoryview(b_data)[0:0:2]
+    detail_empty_strided = CustomerReviewDetail.from_dict(responses[1])
+    detail_empty_strided.additional_properties["empty_strided"] = mv_empty_strided
+    snap_empty_strided = _snapshot_review(detail_empty_strided)
+    assert snap_empty_strided is not None
+    c_empty_strided = snap_empty_strided.additional_properties["empty_strided"]
+    assert c_empty_strided.strides == mv_empty_strided.strides
+
+    # 1-byte view over backing buffer > 65,536 bytes skips delivery (returns None)
+    big_backing = b"A" * 65537
+    mv_1byte = memoryview(big_backing)[0:1]
+    detail_1byte = CustomerReviewDetail.from_dict(responses[1])
+    detail_1byte.additional_properties["mv_1b"] = mv_1byte
+    assert _snapshot_review(detail_1byte) is None
+
+    # Array subclass overriding buffer_info to underreport size skips delivery
+    class UnderreportingArray(array.array):
+        def buffer_info(self) -> tuple[int, int]:
+            return (0, 0)
+
+    big_arr = UnderreportingArray("B", [0] * 65537)
+    detail_arr_underreport = CustomerReviewDetail.from_dict(responses[1])
+    detail_arr_underreport.additional_properties["arr_under"] = big_arr
+    assert _snapshot_review(detail_arr_underreport) is None
+
+    # Read-only view visited first over writable bytearray exporter followed by writable view
+    shared_exp = bytearray(b"0123456789")
+    ro_view = memoryview(shared_exp).toreadonly()
+    rw_view = memoryview(shared_exp)
+    detail_sibling_views = CustomerReviewDetail.from_dict(responses[1])
+    detail_sibling_views.additional_properties["ro_first"] = ro_view
+    detail_sibling_views.additional_properties["rw_second"] = rw_view
+    snap_siblings = _snapshot_review(detail_sibling_views)
+    assert snap_siblings is not None
+    copied_ro = snap_siblings.additional_properties["ro_first"]
+    copied_rw = snap_siblings.additional_properties["rw_second"]
+    assert copied_ro.readonly is True
+    assert copied_rw.readonly is False
+    copied_rw[0] = ord(b"Z")
+    assert copied_ro[0] == ord(b"Z")
+    assert shared_exp[0] == ord(b"0")
+
+    # Exact bytes over 65,536 bytes skips delivery (returns None)
+    detail_big_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_big_bytes.additional_properties["big_bytes"] = b"A" * 65537
+    assert _snapshot_review(detail_big_bytes) is None
+
+    # Bytes subclass whose __bytes__ tries to expand payload beyond native buffer
+    class CustomBytesWithExpansion(bytes):
+        def __bytes__(self) -> bytes:
+            return b"Z" * 70000
+
+    small_sub_bytes = CustomBytesWithExpansion(b"small_sub")
+    small_sub_bytes.custom_tag = "tag"  # type: ignore[attr-defined]
+    detail_sub_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_sub_bytes.additional_properties["sub_bytes"] = small_sub_bytes
+    snap_sub_bytes = _snapshot_review(detail_sub_bytes)
+    assert snap_sub_bytes is not None
+    copied_sub_bytes = snap_sub_bytes.additional_properties["sub_bytes"]
+    assert type(copied_sub_bytes) is CustomBytesWithExpansion
+    assert len(copied_sub_bytes) == len(b"small_sub")
+    assert memoryview(copied_sub_bytes).tobytes() == b"small_sub"
+    assert copied_sub_bytes.custom_tag == "tag"
+
+    # Deep __self__ chain (exceeding standard recursion limit) walks iteratively
+    class DeepSelfChain:
+        pass
+
+    curr_obj = DeepSelfChain()
+    for _ in range(1500):
+        prev = curr_obj
+        curr_obj = DeepSelfChain()
+        curr_obj.__self__ = prev  # type: ignore[attr-defined]
+
+    assert client_module._is_immutable(curr_obj) is False
+
+    # Explicit reference to instance __dict__ points to the exact same cloned dictionary
+    class SharedDictOwner:
+        def __init__(self) -> None:
+            self.x = 42
+
+    owner = SharedDictOwner()
+    detail_dict_ref = CustomerReviewDetail.from_dict(responses[1])
+    detail_dict_ref.additional_properties["owner"] = owner
+    detail_dict_ref.additional_properties["owner_dict"] = owner.__dict__
+    snap_dict_ref = _snapshot_review(detail_dict_ref)
+    assert snap_dict_ref is not None
+    copied_owner = snap_dict_ref.additional_properties["owner"]
+    copied_dict = snap_dict_ref.additional_properties["owner_dict"]
+    assert copied_dict is copied_owner.__dict__
+    copied_dict["x"] = 99
+    assert copied_owner.x == 99
+
+    # Non-callable object with immutable __self__ is not classified as immutable
+    class NonCallableWithSelf:
+        __self__ = 42
+
+    nc_inst = NonCallableWithSelf()
+    assert client_module._is_immutable(nc_inst) is False
+    detail_nc = CustomerReviewDetail.from_dict(responses[1])
+    detail_nc.additional_properties["nc"] = nc_inst
+    snap_nc = _snapshot_review(detail_nc)
+    assert snap_nc is not None
+    copied_nc = snap_nc.additional_properties["nc"]
+    assert copied_nc is not nc_inst
+
+    # Memoryview over bytes subclass exporter whose __bytes__ tries expansion
+    mv_sub_bytes = memoryview(small_sub_bytes)[1:5]
+    detail_mv_sub_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_mv_sub_bytes.additional_properties["mv_sub_bytes"] = mv_sub_bytes
+    snap_mv_sub = _snapshot_review(detail_mv_sub_bytes)
+    assert snap_mv_sub is not None
+    copied_mv_sub = snap_mv_sub.additional_properties["mv_sub_bytes"]
+    assert copied_mv_sub.tobytes() == b"mall"
+    assert type(copied_mv_sub.obj) is CustomBytesWithExpansion
+    assert memoryview(copied_mv_sub.obj).tobytes() == b"small_sub"
+
+    # Tuple containing oversized bytes (> 65536) returns None
+    detail_tuple_big_bytes = CustomerReviewDetail.from_dict(responses[1])
+    detail_tuple_big_bytes.additional_properties["tuple_big"] = (b"A" * 65537,)
+    assert _snapshot_review(detail_tuple_big_bytes) is None
+
+    # Invalid callback return raising property on close
+    class RaisingCloseReturn:
+        @property
+        def close(self) -> Any:
+            raise RuntimeError("close property lookup failed")
+
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("sync", server.url) as client_sync:
+            with pytest.raises(TypeError, match="Callbacks must return None"):
+                await call(
+                    client_sync,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    on_poll=lambda r: RaisingCloseReturn(),
+                )
+
+
+async def test_wait_for_review_pending_futures_and_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    responses = [review("RUNNING"), review()]
+
+    # Assert remaining budget with controlled clock
+    wait_timeouts: list[float | None] = []
+    orig_async_wait = client_module.async_wait
+
+    async def tracking_wait(fs: Any, *, timeout: float | None = None) -> Any:
+        wait_timeouts.append(timeout)
+        return await orig_async_wait(fs, timeout=timeout)
+
+    monkeypatch.setattr(client_module, "async_wait", tracking_wait)
+
+    async def dummy_async_cb(r: Any) -> None:
+        pass
+
+    def cb_consuming_clock(r: Any) -> Any:
+        clock.now += 35.0
+        return dummy_async_cb(r)
+
+    with Server(lambda request, index: Reply(body=responses[1])) as server:
+        async with session("async", server.url) as client:
+            await asyncio.wait_for(
+                client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=cb_consuming_clock,
+                ),
+                timeout=5.0,
+            )
+    assert wait_timeouts == [65.0]
+    monkeypatch.setattr(client_module, "async_wait", orig_async_wait)
+
+    # Timely pending future failure propagates even if done() lies
+    class LyingDoneFuture(asyncio.Future[None]):
+        def done(self) -> bool:
+            return False
+
+    timely_fut: Any = LyingDoneFuture(loop=asyncio.get_running_loop())
+    timely_producer: asyncio.Task[None] | None = None
+
+    async def fail_timely_soon() -> None:
+        await asyncio.sleep(0.01)
+        timely_fut.set_exception(ValueError("timely failure"))
+
+    def timely_fail_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal timely_producer
+        timely_producer = asyncio.create_task(fail_timely_soon())
+        return timely_fut
+
+    try:
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(ValueError, match="timely failure"):
+                    await asyncio.wait_for(
+                        client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=100.0,
+                            on_poll=timely_fail_cb,
+                        ),
+                        timeout=5.0,
+                    )
+    finally:
+        if timely_producer is not None:
+            if not timely_producer.done():
+                timely_producer.cancel()
+            try:
+                await timely_producer
+            except BaseException:
+                pass
+        try:
+            if not asyncio.Future.done(timely_fut):
+                timely_fut.cancel()
+            elif not asyncio.Future.cancelled(timely_fut):
+                timely_fut.exception()
+        except BaseException:
+            pass
+
+    # Timely pending future failure propagates when clock advances after SDK done-callback
+    # but before waiter resumes
+    class ClockAdvancingFuture(asyncio.Future[None]):
+        def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+            super().add_done_callback(fn, context=context)
+            super().add_done_callback(lambda _: setattr(clock, "now", clock.now + 200.0))
+
+    timely_late_fut: Any = ClockAdvancingFuture(loop=asyncio.get_running_loop())
+    timely_late_producer: asyncio.Task[None] | None = None
+
+    async def fail_timely_late_soon() -> None:
+        await asyncio.sleep(0.01)
+        timely_late_fut.set_exception(ValueError("timely failure with late resumption"))
+
+    def timely_late_fail_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal timely_late_producer
+        timely_late_producer = asyncio.create_task(fail_timely_late_soon())
+        return timely_late_fut
+
+    try:
+        with Server(lambda request, index: Reply(body=responses[0])) as server:
+            async with session("async", server.url) as client:
+                with pytest.raises(ValueError, match="timely failure with late resumption"):
+                    await asyncio.wait_for(
+                        client.wait_for_review(
+                            ORG,
+                            REVIEW,
+                            timeout=100.0,
+                            on_poll=timely_late_fail_cb,
+                        ),
+                        timeout=5.0,
+                    )
+        assert clock.now >= 200.0
+    finally:
+        if timely_late_producer is not None:
+            if not timely_late_producer.done():
+                timely_late_producer.cancel()
+            try:
+                await timely_late_producer
+            except BaseException:
+                pass
+        try:
+            if not asyncio.Future.done(timely_late_fut):
+                timely_late_fut.cancel()
+            elif not asyncio.Future.cancelled(timely_late_fut):
+                timely_late_fut.exception()
+        except BaseException:
+            pass
+
+    # Timely coroutine failure propagates when clock advances after coroutine raises
+    # but before wrapper done-callback runs or waiter resumes
+    orig_create_task_timely = client_module.async_create_task
+
+    def advancing_create_task(coro_arg: Any, **kwargs: Any) -> asyncio.Task[Any]:
+        t = orig_create_task_timely(coro_arg, **kwargs)
+        orig_add_done = t.add_done_callback
+
+        def wrapped_add_done(fn: Any, *, context: Any = None) -> None:
+            def advancing_fn(task_arg: Any) -> None:
+                clock.now += 200.0
+                fn(task_arg)
+
+            orig_add_done(advancing_fn, context=context)
+
+        t.add_done_callback = wrapped_add_done
+        return t
+
+    monkeypatch.setattr(client_module, "async_create_task", advancing_create_task)
+
+    async def timely_fail_coro(r: Any) -> None:
+        raise ValueError("timely coroutine failure")
+
+    with Server(lambda request, index: Reply(body=responses[0])) as server:
+        async with session("async", server.url) as client:
+            with pytest.raises(ValueError, match="timely coroutine failure"):
+                await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=timely_fail_coro,
+                    ),
+                    timeout=5.0,
+                )
+    assert clock.now >= 200.0
+    monkeypatch.setattr(client_module, "async_create_task", orig_create_task_timely)
+
+    # Late-observed pending future failure preserves the classified outcome
+    class TrackedFuture(asyncio.Future[None]):
+        def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+            super().__init__(loop=loop)
+            self.exception_retrieved = False
+
+        def exception(self) -> BaseException | None:
+            self.exception_retrieved = True
+            return super().exception()
+
+            # import weakref (already imported at module level)
+
+    late_fut: TrackedFuture | None = TrackedFuture(loop=asyncio.get_running_loop())
+    late_fut_ref = weakref.ref(late_fut)
+    late_fut.add_done_callback(lambda _: setattr(clock, "now", clock.now + 200.0))
+    producer_task: asyncio.Task[None] | None = None
+
+    async def fail_late_soon() -> None:
+        await asyncio.sleep(0)
+        if late_fut is not None:
+            late_fut.set_exception(ValueError("late failure"))
+
+    def late_fail_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal producer_task
+        producer_task = asyncio.create_task(fail_late_soon())
+        assert late_fut is not None
+        return late_fut
+
+    unhandled_reports: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    old_h = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: unhandled_reports.append(ctx))
+    try:
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_late = await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=late_fail_cb,
+                    ),
+                    timeout=5.0,
+                )
+                assert res_late.status == "COMPLETED"
+                assert late_fut is not None
+                assert late_fut.done()
+                assert clock.now >= 200.0
+                if producer_task is not None:
+                    await producer_task
+                await asyncio.sleep(0)
+                assert late_fut.exception_retrieved is True
+                assert id(late_fut) not in client_module._DETACHED_FUTURES
+                late_fut = None
+                import gc
+
+                gc.collect()
+                assert late_fut_ref() is None
+                assert unhandled_reports == []
+    finally:
+        if producer_task is not None:
+            if not producer_task.done():
+                producer_task.cancel()
+            try:
+                await producer_task
+            except (asyncio.CancelledError, BaseException):
+                pass
+        if late_fut is not None:
+            if not late_fut.done():
+                late_fut.cancel()
+            elif not late_fut.cancelled():
+                try:
+                    late_fut.exception()
+                except BaseException:
+                    pass
+        loop.set_exception_handler(old_h)
+
+    # Overdue pending future failure where failure occurs after deadline
+    late_failing_fut: TrackedFuture | None = TrackedFuture(loop=asyncio.get_running_loop())
+    late_failing_fut_ref = weakref.ref(late_failing_fut)
+    late_failing_producer: asyncio.Task[None] | None = None
+
+    async def fail_after_deadline() -> None:
+        await asyncio.sleep(0)
+        clock.now += 200.0
+        if late_failing_fut is not None:
+            late_failing_fut.set_exception(ValueError("failure after deadline"))
+
+    def late_failing_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal late_failing_producer
+        late_failing_producer = asyncio.create_task(fail_after_deadline())
+        assert late_failing_fut is not None
+        return late_failing_fut
+
+    unhandled_after_reports: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, ctx: unhandled_after_reports.append(ctx))
+    try:
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_after = await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=late_failing_cb,
+                    ),
+                    timeout=5.0,
+                )
+                assert res_after.status == "COMPLETED"
+                assert late_failing_fut is not None
+                assert late_failing_fut.done()
+                assert clock.now >= 200.0
+                if late_failing_producer is not None:
+                    await late_failing_producer
+                await asyncio.sleep(0)
+                assert late_failing_fut.exception_retrieved is True
+                assert id(late_failing_fut) not in client_module._DETACHED_FUTURES
+                late_failing_fut = None
+                gc.collect()
+                assert late_failing_fut_ref() is None
+                assert unhandled_after_reports == []
+    finally:
+        if late_failing_producer is not None:
+            if not late_failing_producer.done():
+                late_failing_producer.cancel()
+            try:
+                await late_failing_producer
+            except (asyncio.CancelledError, BaseException):
+                pass
+        if late_failing_fut is not None:
+            if not late_failing_fut.done():
+                late_failing_fut.cancel()
+            elif not late_failing_fut.cancelled():
+                try:
+                    late_failing_fut.exception()
+                except BaseException:
+                    pass
+        loop.set_exception_handler(old_h)
+
+    # Pending future failing at exact deadline for completed review preserves COMPLETED
+    exact_call_start = 0.0
+    async_wait_calls_exact = 0
+    orig_async_wait_exact = client_module.async_wait
+
+    async def counting_async_wait_exact(*args: Any, **kwargs: Any) -> Any:
+        nonlocal async_wait_calls_exact
+        async_wait_calls_exact += 1
+        return await orig_async_wait_exact(*args, **kwargs)
+
+    monkeypatch.setattr(client_module, "async_wait", counting_async_wait_exact)
+
+    class ExactDeadlineCompletedFuture(TrackedFuture):
+        def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+            super().add_done_callback(fn, context=context)
+            clock.now = exact_call_start + 100.0
+
+    exact_dl_fut: ExactDeadlineCompletedFuture | None = ExactDeadlineCompletedFuture(
+        loop=asyncio.get_running_loop()
+    )
+    exact_dl_ref = weakref.ref(exact_dl_fut)
+
+    def exact_dl_cb(r: Any) -> asyncio.Future[None]:
+        nonlocal exact_call_start
+        exact_call_start = clock.now
+        assert exact_dl_fut is not None
+        return exact_dl_fut
+
+    unhandled_exact_dl_reports: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, ctx: unhandled_exact_dl_reports.append(ctx))
+    try:
+        with Server(lambda request, index: Reply(body=responses[1])) as server:
+            async with session("async", server.url) as client:
+                res_exact_dl = await asyncio.wait_for(
+                    client.wait_for_review(
+                        ORG,
+                        REVIEW,
+                        timeout=100.0,
+                        on_poll=exact_dl_cb,
+                    ),
+                    timeout=5.0,
+                )
+                assert res_exact_dl.status == "COMPLETED"
+                assert exact_dl_fut is not None
+                assert not exact_dl_fut.done()
+                assert async_wait_calls_exact == 0
+                assert id(exact_dl_fut) in client_module._DETACHED_FUTURES
+                assert exact_dl_fut.exception_retrieved is False
+                exact_dl_fut.cancel()
+                await asyncio.sleep(0)
+                exact_dl_fut = None
+                gc.collect()
+                assert exact_dl_ref() is None
+                assert unhandled_exact_dl_reports == []
+    finally:
+        monkeypatch.setattr(client_module, "async_wait", orig_async_wait_exact)
+        if exact_dl_fut is not None:
+            if not exact_dl_fut.done():
+                exact_dl_fut.cancel()
+            elif not exact_dl_fut.cancelled():
+                try:
+                    exact_dl_fut.exception()
+                except BaseException:
+                    pass
+        loop.set_exception_handler(old_h)
+
+    # Late SystemExit inside callback wrapper is suppressed after deadline
+    exit_task_done = asyncio.Event()
+
+    async def late_system_exit_coro(r: Any) -> None:
+        try:
+            clock.now += 200.0
+            raise SystemExit(42)
+        finally:
+            exit_task_done.set()
+
+    with Server(lambda request, index: Reply(body=responses[0])) as server:
+        async with session("async", server.url) as client:
+            res_exit = await client.wait_for_review(
+                ORG,
+                REVIEW,
+                timeout=10.0,
+                on_poll=late_system_exit_coro,
+            )
+            assert res_exit.status == "TIMED_OUT"
+            await asyncio.wait_for(exit_task_done.wait(), timeout=1.0)
+
+    # In-budget SystemExit inside callback wrapper propagates
+    async def in_budget_system_exit_coro(r: Any) -> None:
+        raise SystemExit(42)
+
+    with Server(lambda request, index: Reply(body=responses[0])) as server:
+        async with session("async", server.url) as client:
+            with pytest.raises(SystemExit) as exc_info:
+                await client.wait_for_review(
+                    ORG,
+                    REVIEW,
+                    timeout=100.0,
+                    on_poll=in_budget_system_exit_coro,
+                )
+            assert exc_info.value.code == 42
+
+    # Closing loop releases strong retention from _DETACHED_FUTURES and _DETACHED_TASKS
+    def test_loop_close_in_thread() -> None:
+        t_loop = asyncio.new_event_loop()
+
+        class TrackingFuture(asyncio.Future[Any]):
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(loop=loop)
+                self.exception_retrieved = False
+
+            def exception(self) -> Any:
+                self.exception_retrieved = True
+                return super().exception()
+
+        class TrackingTask(asyncio.Task[Any]):
+            def __init__(self, coro: Any, *, loop: asyncio.AbstractEventLoop) -> None:
+                super().__init__(coro, loop=loop)
+                self.exception_retrieved = False
+
+            def exception(self) -> Any:
+                self.exception_retrieved = True
+                return super().exception()
+
+        try:
+            asyncio.set_event_loop(t_loop)
+            t_fut = TrackingFuture(loop=t_loop)
+            t_task: TrackingTask | None = None
+            task_start = asyncio.Event()
+
+            async def fail_task() -> None:
+                await task_start.wait()
+                t_loop.stop()
+                raise RuntimeError("task failed")
+
+            async def run_in_t() -> None:
+                nonlocal t_task
+                t_task = TrackingTask(fail_task(), loop=t_loop)
+                client_module._detach_overdue_future(t_fut)
+                client_module._detach_overdue_task(t_task)
+
+            t_loop.run_until_complete(run_in_t())
+            assert id(t_fut) in client_module._DETACHED_FUTURES
+            assert getattr(t_loop, "_proofline_detached_futures", {}).get(id(t_fut)) is t_fut
+            assert t_task is not None
+            assert id(t_task) in client_module._DETACHED_TASKS
+            assert getattr(t_loop, "_proofline_detached_tasks", {}).get(id(t_task)) is t_task
+
+            # Fail both targets before their done callbacks run:
+            task_start.set()
+            t_loop.run_forever()
+            t_fut.set_exception(RuntimeError("fut failed before close"))
+
+            assert t_fut.done()
+            assert t_task.done()
+            assert not t_fut.exception_retrieved
+            assert not t_task.exception_retrieved
+            assert id(t_fut) in client_module._DETACHED_FUTURES
+            assert id(t_task) in client_module._DETACHED_TASKS
+        finally:
+            t_loop.close()
+            asyncio.set_event_loop(None)
+        assert t_fut.exception_retrieved
+        assert t_task is not None
+        assert t_task.exception_retrieved
+        assert id(t_fut) not in client_module._DETACHED_FUTURES
+        assert not getattr(t_loop, "_proofline_detached_futures", {})
+        assert id(t_task) not in client_module._DETACHED_TASKS
+        assert not getattr(t_loop, "_proofline_detached_tasks", {})
+
+        # Loop that rejects assignment to close: assert future never enters _DETACHED_FUTURES
+        u_loop = asyncio.new_event_loop()
+
+        class UnhookableLoopType(type(u_loop)):  # type: ignore[misc]
+            @property
+            def close(self) -> Any:
+                return super().close
+
+        u_loop.__class__ = UnhookableLoopType
+        try:
+            asyncio.set_event_loop(u_loop)
+            u_fut = u_loop.create_future()
+
+            async def run_in_u() -> None:
+                client_module._detach_overdue_future(u_fut)
+
+            u_loop.run_until_complete(run_in_u())
+            assert id(u_fut) not in client_module._DETACHED_FUTURES
+            loop_futs = getattr(u_loop, "_proofline_detached_futures", {})
+            assert loop_futs.get(id(u_fut)) is u_fut
+        finally:
+            UnhookableLoopType.close.fget(u_loop)()  # type: ignore[attr-defined]
+            asyncio.set_event_loop(None)
+        assert id(u_fut) not in client_module._DETACHED_FUTURES
+
+    await asyncio.to_thread(test_loop_close_in_thread)
