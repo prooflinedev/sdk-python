@@ -67,6 +67,7 @@ from ._generated.models.review_routing_view_type_2 import ReviewRoutingViewType2
 from ._generated.models.review_summary import ReviewSummary
 from ._generated.models.run_now_request import RunNowRequest
 from ._generated.models.run_now_response import RunNowResponse
+from ._generated.models.scan_response import ScanResponse
 from ._generated.models.start_session import StartSession
 from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
@@ -76,6 +77,7 @@ from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
+from .scans import ATTEMPTS, backoff, scan_body, should_retry
 
 T = TypeVar("T")
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
@@ -583,6 +585,53 @@ class ProoflineClient(Operations):
         finally:
             _transport.DEADLINE.reset(deadline)
 
+    def scan_revision(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        *,
+        budget_credits: int,
+        ref: str | None = None,
+        commit_sha: str | None = None,
+        request_id: UUID | None = None,
+        wait: bool = False,
+        timeout: float = 300,
+    ) -> ScanResponse | ReviewOutcome:
+        """Scan a ref or an exact commit, retrying safely when the API is unavailable.
+
+        One request id is sent on every attempt, and the API resolves a repeated
+        id to its first result, so a retry never starts a second scan.
+        Pass your own request_id to resume later. If every attempt fails, the
+        last problem is raised with the request id attached as a note. A timed
+        out request is retried too. Retry-After is not honoured: the delay is
+        1, 2 then 4 seconds with jitter.
+
+        With commit_sha and wait=True the wait is held to that commit, which
+        must then be a full SHA. timeout bounds the wait only, not the retries.
+
+        wait=True waits for the created review, as wait_for_review does.
+        REPOSITORY_UNAVAILABLE returns without waiting.
+        """
+
+        body = scan_body(budget_credits, ref, commit_sha, request_id, timeout, wait)
+        head = (commit_sha or "").strip() or None
+        if wait:
+            _head_commit(head)
+        for attempt in range(ATTEMPTS):
+            try:
+                response = self.request_scan(organization_id, repository_id, body=body)
+                break
+            except ProoflineError as error:
+                if attempt == ATTEMPTS - 1 or not should_retry(error):
+                    error.add_note(f"scan request_id: {body.request_id}")
+                    raise
+                sleep(backoff(attempt))
+        if wait and isinstance(response.review_id, UUID):
+            return self.wait_for_review(
+                organization_id, response.review_id, timeout=timeout, head_commit_sha=head
+            )
+        return response
+
 
 class AsyncProoflineClient(AsyncOperations):
     def __init__(
@@ -968,3 +1017,50 @@ class AsyncProoflineClient(AsyncOperations):
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)
+
+    async def scan_revision(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        *,
+        budget_credits: int,
+        ref: str | None = None,
+        commit_sha: str | None = None,
+        request_id: UUID | None = None,
+        wait: bool = False,
+        timeout: float = 300,
+    ) -> ScanResponse | ReviewOutcome:
+        """Scan a ref or an exact commit, retrying safely when the API is unavailable.
+
+        One request id is sent on every attempt, and the API resolves a repeated
+        id to its first result, so a retry never starts a second scan.
+        Pass your own request_id to resume later. If every attempt fails, the
+        last problem is raised with the request id attached as a note. A timed
+        out request is retried too. Retry-After is not honoured: the delay is
+        1, 2 then 4 seconds with jitter.
+
+        With commit_sha and wait=True the wait is held to that commit, which
+        must then be a full SHA. timeout bounds the wait only, not the retries.
+
+        wait=True waits for the created review, as wait_for_review does.
+        REPOSITORY_UNAVAILABLE returns without waiting.
+        """
+
+        body = scan_body(budget_credits, ref, commit_sha, request_id, timeout, wait)
+        head = (commit_sha or "").strip() or None
+        if wait:
+            _head_commit(head)
+        for attempt in range(ATTEMPTS):
+            try:
+                response = await self.request_scan(organization_id, repository_id, body=body)
+                break
+            except ProoflineError as error:
+                if attempt == ATTEMPTS - 1 or not should_retry(error):
+                    error.add_note(f"scan request_id: {body.request_id}")
+                    raise
+                await async_sleep(backoff(attempt))
+        if wait and isinstance(response.review_id, UUID):
+            return await self.wait_for_review(
+                organization_id, response.review_id, timeout=timeout, head_commit_sha=head
+            )
+        return response

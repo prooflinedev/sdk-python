@@ -76,6 +76,40 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Scanning a revision
+
+`scan_revision` starts a scan of a ref or an exact commit. Every scan request carries a `request_id`, and the API resolves a repeated `request_id` to its first resolution, so repeating the request cannot scan or spend credits twice. The helper relies on this to retry safely.
+
+```python
+scan = client.scan_revision(
+    organization_id,
+    repository_id,
+    budget_credits=50,
+    commit_sha=commit_sha,
+)
+if scan.outcome == "REPOSITORY_UNAVAILABLE":
+    print("The repository is not available to scan.")
+```
+
+Name exactly one of `ref` or `commit_sha`; `budget_credits` must be a nonnegative integer. Both are checked before any request, and so is `timeout` when `wait=True`. The helper sends one `request_id` on every attempt and retries HTTP 429, 502, 503 and 504, a request timeout and a connection failure, up to four attempts with exponential backoff and jitter. It does not read `Retry-After`. Other problems are raised at once. Other POST operations still never retry.
+
+If every attempt fails, the last error is raised with the `request_id` attached as a note. To make a scan safe to resume after a crash or a CI rerun, derive the id from values that do not change and pass it yourself:
+
+```python
+request_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{repository_id}:{commit_sha}:{job_id}")
+client.scan_revision(
+    organization_id,
+    repository_id,
+    budget_credits=50,
+    commit_sha=commit_sha,
+    request_id=request_id,
+)
+```
+
+A repeated id returns the first resolution (the outcome is `EXISTING`), so include an attempt number in the key if a rerun should scan again. Reusing an id for a different scan request, for example another `budget_credits`, is refused with HTTP 400 and is not retried.
+
+With `wait=True` the helper then calls `wait_for_review` on the created review, with the same `timeout`, and returns its outcome. `timeout` bounds that wait only, not the retries. When you pass `commit_sha`, the wait is held to that commit as described above, so `commit_sha` must be a full SHA. `REPOSITORY_UNAVAILABLE` returns without waiting.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
