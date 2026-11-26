@@ -22,6 +22,17 @@ _HEAD_REASONS = {
     "HEAD_COMMIT_MISMATCH": "The review is pinned to another head commit.",
     "HEAD_COMMIT_UNAVAILABLE": "The review names no head commit.",
 }
+_ENVIRONMENT_REASONS = {
+    "REQUIRED_ENVIRONMENT_UNAVAILABLE": (
+        "The review has no recorded check for the required environment."
+    ),
+    "REQUIRED_ENVIRONMENT_AMBIGUOUS": (
+        "The review records the required environment more than once."
+    ),
+    "REQUIRED_ENVIRONMENT_NOT_CHECKED": (
+        "The required environment was not checked by this review."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -151,6 +162,33 @@ def _head_gap(review: CustomerReviewDetail, head_commit_sha: str | None) -> str 
     return None if head.lower() == head_commit_sha.lower() else "HEAD_COMMIT_MISMATCH"
 
 
+def _environment_gap(
+    review: CustomerReviewDetail, required_environment_key: str | None
+) -> str | None:
+    if required_environment_key is None:
+        return None
+    environments = review.environments
+    if isinstance(environments, Unset):
+        return "REQUIRED_ENVIRONMENT_UNAVAILABLE"
+    if not isinstance(environments, list):
+        raise _invalid()
+    match_count = 0
+    match_state: str | None = None
+    for environment in environments:
+        key = environment.environment_external_key
+        # Every key must identify a row before uniqueness can be established.
+        if not isinstance(key, str) or not key:
+            raise _invalid()
+        if key == required_environment_key:
+            match_count += 1
+            match_state = environment.state
+    if match_count == 0:
+        return "REQUIRED_ENVIRONMENT_UNAVAILABLE"
+    if match_count != 1:
+        return "REQUIRED_ENVIRONMENT_AMBIGUOUS"
+    return None if match_state == "CHECKED" else "REQUIRED_ENVIRONMENT_NOT_CHECKED"
+
+
 def outcome(
     review: CustomerReviewDetail | None,
     review_url: str,
@@ -158,6 +196,7 @@ def outcome(
     *,
     review_id: UUID | None = None,
     head_commit_sha: str | None = None,
+    required_environment_key: str | None = None,
 ) -> ReviewOutcome | None:
     gaps: list[AssessmentGap] = []
     if review is None:
@@ -221,6 +260,11 @@ def outcome(
     if review.assessment_count != len(review.assessments):
         gaps.append(AssessmentGap(None, "UNKNOWN", ("ASSESSMENT_HISTORY_UNAVAILABLE",)))
     head_gap = _head_gap(review, head_commit_sha)
+    environment_gap = (
+        None
+        if head_gap == "HEAD_COMMIT_MISMATCH"
+        else _environment_gap(review, required_environment_key)
+    )
     if forced is not None:
         status = forced
     elif head_gap == "HEAD_COMMIT_MISMATCH":
@@ -234,12 +278,15 @@ def outcome(
     elif review.status in ("STOPPED", "SUPERSEDED"):
         status = "STOPPED"
     elif review.status == "COMPLETED":
-        status = "INCOMPLETE" if gaps or head_gap else "COMPLETED"
+        status = "INCOMPLETE" if gaps or head_gap or environment_gap else "COMPLETED"
     else:
         status = "INCOMPLETE"
         if not gaps:
             gaps.append(AssessmentGap(None, review.status, ("REVIEW_STATE_UNAVAILABLE",)))
+    if environment_gap is not None:
+        gaps.append(AssessmentGap(None, "UNKNOWN", (environment_gap,)))
     if head_gap is None:
-        return ReviewOutcome(status, review_url, review, tuple(gaps))
+        reason = _ENVIRONMENT_REASONS[environment_gap] if environment_gap is not None else None
+        return ReviewOutcome(status, review_url, review, tuple(gaps), reason)
     gaps.append(AssessmentGap(None, "UNKNOWN", (head_gap,)))
     return ReviewOutcome(status, review_url, review, tuple(gaps), _HEAD_REASONS[head_gap])

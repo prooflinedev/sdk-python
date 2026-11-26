@@ -1256,6 +1256,308 @@ def gap_facts(result: Any) -> list[tuple[Any, str, tuple[str, ...]]]:
     return [(gap.assessment_id, gap.status, gap.reason_codes) for gap in result.gaps]
 
 
+PRODUCTION_ENVIRONMENT = "production"
+ENVIRONMENT_UNAVAILABLE = (None, "UNKNOWN", ("REQUIRED_ENVIRONMENT_UNAVAILABLE",))
+ENVIRONMENT_AMBIGUOUS = (None, "UNKNOWN", ("REQUIRED_ENVIRONMENT_AMBIGUOUS",))
+ENVIRONMENT_NOT_CHECKED = (None, "UNKNOWN", ("REQUIRED_ENVIRONMENT_NOT_CHECKED",))
+ENVIRONMENT_UNAVAILABLE_REASON = "The review has no recorded check for the required environment."
+ENVIRONMENT_AMBIGUOUS_REASON = "The review records the required environment more than once."
+ENVIRONMENT_NOT_CHECKED_REASON = "The required environment was not checked by this review."
+
+
+def environment_check(
+    key: Any = PRODUCTION_ENVIRONMENT,
+    state: Any = "CHECKED",
+    display_name: str = "Production",
+) -> dict[str, Any]:
+    return {
+        "environment_display_name": display_name,
+        "environment_external_key": key,
+        "state": state,
+    }
+
+
+def review_in_environments(
+    *environments: dict[str, Any], status: str = "COMPLETED"
+) -> dict[str, Any]:
+    body = review(status)
+    body["environments"] = list(environments)
+    return body
+
+
+@MODES
+async def test_wait_can_require_one_exact_checked_environment(mode: str) -> None:
+    unresolved = review_in_environments(environment_check())
+    unresolved["assessments"][0]["checks"]["status"] = "UNKNOWN"
+    cases = [
+        (
+            unresolved,
+            "INCOMPLETE",
+            [(ASSESSMENT, "COMPLETED", ("CHECKS_UNRESOLVED",))],
+            None,
+        ),
+        (
+            review_in_environments(environment_check("staging"), environment_check()),
+            "COMPLETED",
+            [],
+            None,
+        ),
+        (review(), "INCOMPLETE", [ENVIRONMENT_UNAVAILABLE], ENVIRONMENT_UNAVAILABLE_REASON),
+        (
+            review_in_environments(environment_check("staging", display_name="production")),
+            "INCOMPLETE",
+            [ENVIRONMENT_UNAVAILABLE],
+            ENVIRONMENT_UNAVAILABLE_REASON,
+        ),
+        (
+            review_in_environments(environment_check("Production")),
+            "INCOMPLETE",
+            [ENVIRONMENT_UNAVAILABLE],
+            ENVIRONMENT_UNAVAILABLE_REASON,
+        ),
+        (
+            review_in_environments(environment_check(), environment_check()),
+            "INCOMPLETE",
+            [ENVIRONMENT_AMBIGUOUS],
+            ENVIRONMENT_AMBIGUOUS_REASON,
+        ),
+    ]
+    for states in (("CHECKED", "NOT_CHECKED"), ("NOT_CHECKED", "CHECKED")):
+        cases.append(
+            (
+                review_in_environments(*(environment_check(state=state) for state in states)),
+                "INCOMPLETE",
+                [ENVIRONMENT_AMBIGUOUS],
+                ENVIRONMENT_AMBIGUOUS_REASON,
+            )
+        )
+    for state in ("CHECKING", "NOT_CHECKED", "NOT_APPLICABLE"):
+        cases.append(
+            (
+                review_in_environments(environment_check(state=state)),
+                "INCOMPLETE",
+                [ENVIRONMENT_NOT_CHECKED],
+                ENVIRONMENT_NOT_CHECKED_REASON,
+            )
+        )
+
+    with Server(lambda request, index: Reply(body=cases[index][0])) as server:
+        async with session(mode, server.url) as client:
+            for _, expected_status, expected_gaps, expected_reason in cases:
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    required_environment_key=PRODUCTION_ENVIRONMENT,
+                )
+                assert result.status == expected_status
+                assert gap_facts(result) == expected_gaps
+                assert result.reason == expected_reason
+        assert len(server.requests) == len(cases)
+
+
+@MODES
+async def test_same_commit_can_cover_staging_and_skip_production(mode: str) -> None:
+    body = review_at(HEAD)
+    body["environment_display_names"] = ["Staging"]
+    body["assessments"][0]["environment_display_name"] = "Staging"
+    body["environments"] = [
+        environment_check("staging", display_name="Staging"),
+        {**environment_check(state="NOT_APPLICABLE"), "reason": "PULL_REQUEST_REVIEWS_OFF"},
+    ]
+    cases = [
+        ({}, "COMPLETED", []),
+        ({"required_environment_key": None}, "COMPLETED", []),
+        ({"required_environment_key": "staging"}, "COMPLETED", []),
+        (
+            {"required_environment_key": PRODUCTION_ENVIRONMENT},
+            "INCOMPLETE",
+            [ENVIRONMENT_NOT_CHECKED],
+        ),
+    ]
+    with Server(lambda request, index: Reply(body=body)) as server:
+        async with session(mode, server.url) as client:
+            for reads, (options, status, gaps) in enumerate(cases, start=1):
+                result = await call(
+                    client, "wait_for_review", ORG, REVIEW, head_commit_sha=HEAD, **options
+                )
+                assert (result.status, gap_facts(result)) == (status, gaps)
+                assert len(server.requests) == reads
+                request = server.requests[-1]
+                assert (request.method, request.path, request.body) == (
+                    "GET",
+                    f"/api/v1/organizations/{ORG}/reviews/{REVIEW}",
+                    b"",
+                )
+            assert result.review.environments[1].reason == "PULL_REQUEST_REVIEWS_OFF"
+
+
+@MODES
+async def test_required_environment_uses_each_poll_and_retains_timeout_evidence(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    responses = [
+        review_in_environments(environment_check(state="CHECKING"), status="RUNNING"),
+        review_in_environments(environment_check()),
+    ]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=100,
+                required_environment_key=PRODUCTION_ENVIRONMENT,
+            )
+        assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
+        assert len(server.requests) == 2
+        assert clock.delays == [5]
+    clock.delays.clear()
+
+    responses = [
+        review_in_environments(environment_check(), status="RUNNING"),
+        review(),
+    ]
+    with Server(lambda request, index: Reply(body=responses[index])) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=100,
+                required_environment_key=PRODUCTION_ENVIRONMENT,
+            )
+        assert result.status == "INCOMPLETE"
+        assert gap_facts(result) == [ENVIRONMENT_UNAVAILABLE]
+        assert result.reason == ENVIRONMENT_UNAVAILABLE_REASON
+        assert len(server.requests) == 2
+        assert clock.delays == [5]
+    clock.delays.clear()
+
+    body = review_in_environments(environment_check(state="NOT_CHECKED"), status="RUNNING")
+    with Server(lambda request, index: Reply(body=body)) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=12,
+                required_environment_key=PRODUCTION_ENVIRONMENT,
+            )
+        assert result.status == "TIMED_OUT"
+        assert gap_facts(result) == [ENVIRONMENT_NOT_CHECKED]
+        assert result.reason == "The required environment was not checked by this review."
+        assert len(server.requests) == 2
+        assert clock.delays == [5, 7]
+
+
+@MODES
+async def test_required_environment_composes_with_terminal_and_head_outcomes(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    terminal = [("FAILED", "FAILED"), ("STOPPED", "STOPPED"), ("SUPERSEDED", "STOPPED")]
+    with Server(
+        lambda request, index: Reply(
+            body=review_in_environments(
+                environment_check(state="NOT_CHECKED"), status=terminal[index][0]
+            )
+        )
+    ) as server:
+        async with session(mode, server.url) as client:
+            for _, expected_status in terminal:
+                result = await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    required_environment_key=PRODUCTION_ENVIRONMENT,
+                )
+                assert result.status == expected_status
+                assert gap_facts(result) == [ENVIRONMENT_NOT_CHECKED]
+        assert len(server.requests) == len(terminal)
+
+    wrong_head = review_at(HEAD)
+    wrong_head["environments"] = [environment_check(key=7)]
+    with Server(lambda request, index: Reply(body=wrong_head)) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                head_commit_sha=OTHER_HEAD,
+                required_environment_key=PRODUCTION_ENVIRONMENT,
+            )
+        assert (result.status, gap_facts(result)) == ("INCOMPLETE", [PINNED_ELSEWHERE])
+        assert result.reason == "The review is pinned to another head commit."
+
+    with Server(lambda request, index: Reply(body=review())) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                head_commit_sha=HEAD,
+                required_environment_key=PRODUCTION_ENVIRONMENT,
+            )
+        assert gap_facts(result) == [ENVIRONMENT_UNAVAILABLE, NO_HEAD]
+        assert result.reason == "The review names no head commit."
+
+
+@MODES
+async def test_required_environment_input_and_diagnostics_are_defensive(mode: str) -> None:
+    with Server(lambda request, index: Reply(body=review())) as server:
+        async with session(mode, server.url) as client:
+            for value in ("", 7, False, b"production", []):
+                with pytest.raises(ValueError, match="nonempty string"):
+                    await call(
+                        client,
+                        "wait_for_review",
+                        ORG,
+                        REVIEW,
+                        required_environment_key=value,
+                    )
+            assert server.requests == []
+
+    # An unreadable key can hide a duplicate. The generated wire decoder also
+    # rejects unknown states anywhere in the response, before outcome selection.
+    for other in (environment_check(key=7), environment_check("staging", "FUTURE_STATE")):
+        malformed = review_in_environments(environment_check(), other)
+        with Server(lambda request, index: Reply(body=malformed)) as server:
+            async with session(mode, server.url) as client:
+                with pytest.raises(ProoflineError) as raised:
+                    await call(
+                        client,
+                        "wait_for_review",
+                        ORG,
+                        REVIEW,
+                        required_environment_key=PRODUCTION_ENVIRONMENT,
+                    )
+                assert raised.value.type == "urn:proofline:sdk:invalid-response"
+
+    private_key = PRIVATE + "-environment"
+    body = review_in_environments(environment_check(private_key, "NOT_CHECKED"))
+    with Server(lambda request, index: Reply(body=body)) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                required_environment_key=private_key,
+            )
+        assert gap_facts(result) == [ENVIRONMENT_NOT_CHECKED]
+        assert private_key not in (result.reason or "")
+        assert private_key not in repr(result)
+
+
 @MODES
 async def test_wait_held_to_a_head_commit_never_completes_for_another(
     mode: str, monkeypatch: pytest.MonkeyPatch
@@ -1412,6 +1714,47 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
             assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
         assert clock.delays == [5, 10, 20, 40, 60, 60, 60, 5]
         assert len(server.requests) == 8
+
+
+@MODES
+async def test_timeout_rejects_a_late_response_for_another_review(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    body = review_in_environments(environment_check(state="NOT_CHECKED"), status="RUNNING")
+    body["id"] = str(REPOSITORY)
+    with Server(lambda request, index: Reply(body=body)) as server:
+        async with session(mode, server.url) as client:
+            get_review: Any = client.get_review
+            if mode == "sync":
+
+                def late_sync_get_review(*args: Any, **kwargs: Any) -> Any:
+                    result = get_review(*args, **kwargs)
+                    clock.now += 10
+                    return result
+
+                late_get_review = late_sync_get_review
+            else:
+
+                async def late_async_get_review(*args: Any, **kwargs: Any) -> Any:
+                    result = await get_review(*args, **kwargs)
+                    clock.now += 10
+                    return result
+
+                late_get_review = late_async_get_review
+            monkeypatch.setattr(client, "get_review", late_get_review)
+            with pytest.raises(ProoflineError) as raised:
+                await call(
+                    client,
+                    "wait_for_review",
+                    ORG,
+                    REVIEW,
+                    timeout=1,
+                    required_environment_key=PRODUCTION_ENVIRONMENT,
+                )
+        assert raised.value.type == "urn:proofline:sdk:invalid-response"
+        assert len(server.requests) == 1
+        assert clock.delays == []
 
 
 @MODES
