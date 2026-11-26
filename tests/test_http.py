@@ -1922,6 +1922,48 @@ async def test_export_iterator_preserves_filters_and_streams_empty_pages(
 
 
 @MODES
+async def test_export_row_iterator_flattens_pages_lazily(mode: str) -> None:
+    def respond(request: Request, index: int) -> Reply:
+        query = parse_qs(urlsplit(request.path).query)
+        assert query.get("cursor") == (["second"] if index else None)
+        headers = {
+            "Content-Type": "application/x-ndjson",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": "2026-10-25T00:00:00Z",
+        }
+        if index == 0:
+            headers["X-Proofline-Export-Next-Cursor"] = "second"
+        return Reply(
+            body=(
+                b'{"dataset_version":1,"claim":"first"}\n'
+                if index == 0
+                else b'{"dataset_version":1,"claim":"second"}\n'
+            ),
+            headers=headers,
+        )
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            rows = client.iter_export_rows(
+                ORG,
+                "reviews",
+                from_time="2026-10-01T00:00:00Z",
+                to_time="2026-10-25T00:00:00Z",
+            )
+            assert not server.requests
+            assert (await next_export(rows))["claim"] == "first"
+            assert len(server.requests) == 1
+            assert (await next_export(rows))["claim"] == "second"
+            if mode == "sync":
+                with pytest.raises(StopIteration):
+                    next(rows)
+            else:
+                with pytest.raises(StopAsyncIteration):
+                    await anext(rows)
+            assert len(server.requests) == 2
+
+
+@MODES
 @pytest.mark.parametrize("failure", ["empty", "repeat", "resume", "cycle", "bound", "refused"])
 async def test_export_iterator_refuses_invalid_continuations_and_bounds(
     mode: str, failure: str

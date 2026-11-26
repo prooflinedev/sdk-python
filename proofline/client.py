@@ -336,6 +336,31 @@ class ProoflineClient(Operations):
                 return
         raise _pagination_limit("Export")
 
+    def iter_export_rows(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+        max_pages: int = 100,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream decoded rows across pages without exposing page boundaries."""
+        for page in self.iter_export_pages(
+            organization_id,
+            dataset,
+            from_time=from_time,
+            to_time=to_time,
+            format=format,
+            cursor=cursor,
+            group_by=group_by,
+            max_pages=max_pages,
+        ):
+            yield from page.rows
+
     def list_reviews(self, organization_id: UUID, **filters: Unpack[ReviewFilters]) -> ReviewPage:
         return self._call(list_reviews.sync_detailed, ReviewPage, organization_id, **filters)
 
@@ -705,6 +730,32 @@ class AsyncProoflineClient(AsyncOperations):
             if cursor is None:
                 return
         raise _pagination_limit("Export")
+
+    async def iter_export_rows(
+        self,
+        organization_id: UUID,
+        dataset: ExportDataset,
+        *,
+        from_time: str,
+        to_time: str,
+        format: ExportFormat = "ndjson",
+        cursor: str | None = None,
+        group_by: str | None = None,
+        max_pages: int = 100,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream decoded rows across pages without exposing page boundaries."""
+        async for page in self.iter_export_pages(
+            organization_id,
+            dataset,
+            from_time=from_time,
+            to_time=to_time,
+            format=format,
+            cursor=cursor,
+            group_by=group_by,
+            max_pages=max_pages,
+        ):
+            for row in page.rows:
+                yield row
 
     async def list_reviews(
         self, organization_id: UUID, **filters: Unpack[ReviewFilters]
