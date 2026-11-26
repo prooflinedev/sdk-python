@@ -64,17 +64,20 @@ except ProoflineError as error:
 `request_review` names a pull request, and its response names no commit: the review belongs to the head the pull request has when the request arrives. To accept a result only for the commit you hold, pass that commit to `wait_for_review`.
 
 ```python
+from proofline import format_review_outcome
+
 requested = client.request_review(organization_id, repository_id, 12)
 outcome = client.wait_for_review(
     organization_id,
     requested.review_id,
     head_commit_sha=head_commit_sha,
 )
-if outcome.status != "COMPLETED":
-    print(outcome.status, outcome.reason)
+print(format_review_outcome(outcome))
 ```
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
+
+`format_review_outcome` emits one safe CI line with the outcome status, the actual reviewed Git SHA only when the recorded review has both a documented Git review kind and its commit URL, and identifier-shaped reason codes. A patch review never claims a commit: its derived ID is emitted as `pinned_revision` instead. Missing, malformed, or multiline recorded identities render as `unknown`; the requested SHA, the provider's moving current head, and server prose are never logged. For a review that recorded a different head, it prints `proofline_review status=INCOMPLETE reviewed_commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb pinned_revision=unknown reason_codes=HEAD_COMMIT_MISMATCH`.
 
 ## Review exports
 

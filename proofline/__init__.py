@@ -36,7 +36,7 @@ from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
-from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .outcomes import AssessmentGap, CheckGap, ReviewOutcome, format_review_outcome
 
 __all__ = [
     "AgentSession",
@@ -56,6 +56,7 @@ __all__ = [
     "ExportPage",
     "FileReviewRequest",
     "FileReviewResponse",
+    "format_review_outcome",
     "KnowledgeResult",
     "PatchReviewRequest",
     "PatchReviewResponse",
