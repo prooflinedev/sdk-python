@@ -2586,3 +2586,32 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+async def test_wait_for_review_tolerates_early_socket_timeout_jitter(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def raise_timeout(*args: Any, **kwargs: Any) -> Any:
+        raise _transport.timeout_error()
+
+    async def raise_timeout_async(*args: Any, **kwargs: Any) -> Any:
+        raise _transport.timeout_error()
+
+    target = raise_timeout_async if mode == "async" else raise_timeout
+
+    with Server(lambda request, index: Reply(status=200, body=review("PENDING"))) as server:
+        async with session(mode, server.url) as client:
+            with monkeypatch.context() as patch:
+                patch.setattr(client, "get_review", target)
+                patch.setattr(_transport, "remaining", lambda: 0.0005)
+                result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0.1)
+                assert result.status == "TIMED_OUT"
+
+            with monkeypatch.context() as patch:
+                patch.setattr(client, "get_review", target)
+                patch.setattr(_transport, "remaining", lambda: 0.05)
+                with pytest.raises(ProoflineError) as raised:
+                    await call(client, "wait_for_review", ORG, REVIEW, timeout=0.1)
+                assert raised.value.status == 0
+                assert raised.value.type == "urn:proofline:sdk:timeout"
