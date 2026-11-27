@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from asyncio import sleep as async_sleep
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -44,6 +44,7 @@ from ._generated.client import AuthenticatedClient
 from ._generated.models.agent_session import AgentSession
 from ._generated.models.agent_session_prompt_type_0 import AgentSessionPromptType0
 from ._generated.models.agent_session_prompt_type_1 import AgentSessionPromptType1
+from ._generated.models.commit_deploy import CommitDeploy
 from ._generated.models.commit_review_request import CommitReviewRequest
 from ._generated.models.commit_review_response import CommitReviewResponse
 from ._generated.models.coverage_upload_request import CoverageUploadRequest
@@ -51,6 +52,7 @@ from ._generated.models.coverage_upload_response import CoverageUploadResponse
 from ._generated.models.customer_assessment_detail import CustomerAssessmentDetail
 from ._generated.models.customer_finding import CustomerFinding
 from ._generated.models.customer_review_detail import CustomerReviewDetail
+from ._generated.models.deploy_coverage_checkpoint import DeployCoverageCheckpoint
 from ._generated.models.file_review_request import FileReviewRequest
 from ._generated.models.file_review_response import FileReviewResponse
 from ._generated.models.finding_fix_prompt_type_0 import FindingFixPromptType0
@@ -76,6 +78,17 @@ from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
+from .trail import (
+    CommitEvidence,
+    FailedDeployTrail,
+    TrailGap,
+    commit_evidence,
+    commit_reviews,
+    failed_deploy,
+    failing_check,
+    healthy_deploy,
+    trail_commits,
+)
 
 T = TypeVar("T")
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
@@ -583,6 +596,96 @@ class ProoflineClient(Operations):
         finally:
             _transport.DEADLINE.reset(deadline)
 
+    def failed_deploy_trail(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        commit_sha: str,
+        *,
+        earlier_commits: Sequence[str] = (),
+        environment_id: UUID | None = None,
+    ) -> FailedDeployTrail:
+        """Collect the evidence around a commit whose deploy failed.
+
+        earlier_commits names the commits before commit_sha, newest first, such as
+        the output of `git rev-list --first-parent -n 50 <commit_sha>~1`. The API
+        lists no commit history, so the last healthy deploy is looked up only among
+        them. A read that fails becomes a gap in the trail instead of an exception.
+        """
+        commits = trail_commits(commit_sha, earlier_commits)
+        gaps: list[TrailGap] = []
+        walked: list[tuple[str, tuple[CommitDeploy, ...]]] = []
+        failed: CommitDeploy | None = None
+        check: DeployCoverageCheckpoint | None = None
+        healthy: CommitDeploy | None = None
+        healthy_sha: str | None = None
+        try:
+            verifications = self.get_commit_deploy_verifications(
+                organization_id, repository_id, commit_sha
+            )
+        except ProoflineError as error:
+            gaps.append(TrailGap(commit_sha, "DEPLOYS_UNAVAILABLE", error))
+            walked.append((commit_sha, ()))
+        else:
+            walked.append((commit_sha, tuple(verifications.deploys)))
+            if not verifications.recorded:
+                gaps.append(TrailGap(commit_sha, "COMMIT_NOT_RECORDED"))
+            else:
+                failed = failed_deploy(verifications, environment_id)
+                if failed is None:
+                    gaps.append(TrailGap(commit_sha, "NO_FAILED_DEPLOY"))
+        if failed is not None:
+            check = failing_check(failed)
+            if check is None:
+                gaps.append(TrailGap(commit_sha, "NO_FAILING_CHECK"))
+            for sha in commits[1:]:
+                try:
+                    earlier = self.get_commit_deploy_verifications(
+                        organization_id, repository_id, sha
+                    )
+                except ProoflineError as error:
+                    # One unreadable commit ends the walk instead of repeating a refused read.
+                    gaps.append(TrailGap(sha, "DEPLOYS_UNAVAILABLE", error))
+                    walked.append((sha, ()))
+                    break
+                healthy = healthy_deploy(earlier, failed)
+                if healthy is not None:
+                    healthy_sha = sha
+                    break
+                walked.append((sha, tuple(earlier.deploys)))
+            if healthy is None:
+                gaps.append(TrailGap(commit_sha, "NO_HEALTHY_DEPLOY"))
+        evidence: list[CommitEvidence] = []
+        for sha, deploys in walked:
+            reviews: list[CustomerReviewDetail] = []
+            try:
+                page = self.list_reviews(organization_id, repository=repository_id, search=sha)
+            except ProoflineError as error:
+                gaps.append(TrailGap(sha, "REVIEWS_UNAVAILABLE", error))
+            else:
+                if page.truncated is True:
+                    gaps.append(TrailGap(sha, "REVIEWS_TRUNCATED"))
+                for summary in commit_reviews(page, sha):
+                    try:
+                        if summary.kind == "DEPLOYMENT":
+                            detail = self.get_deployment_review(organization_id, summary.public_key)
+                        else:
+                            detail = self.get_review(organization_id, summary.id)
+                    except ProoflineError as error:
+                        gaps.append(TrailGap(sha, "REVIEW_UNAVAILABLE", error))
+                        continue
+                    reviews.append(detail)
+            evidence.append(commit_evidence(sha, deploys, reviews))
+        return FailedDeployTrail(
+            commit_sha=commit_sha,
+            failed_deploy=failed,
+            failing_check=check,
+            healthy_commit_sha=healthy_sha,
+            healthy_deploy=healthy,
+            commit_range=tuple(evidence),
+            gaps=tuple(gaps),
+        )
+
 
 class AsyncProoflineClient(AsyncOperations):
     def __init__(
@@ -968,3 +1071,97 @@ class AsyncProoflineClient(AsyncOperations):
             return timed_out or ReviewOutcome("TIMED_OUT", url)
         finally:
             _transport.DEADLINE.reset(deadline)
+
+    async def failed_deploy_trail(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        commit_sha: str,
+        *,
+        earlier_commits: Sequence[str] = (),
+        environment_id: UUID | None = None,
+    ) -> FailedDeployTrail:
+        """Collect the evidence around a commit whose deploy failed.
+
+        earlier_commits names the commits before commit_sha, newest first, such as
+        the output of `git rev-list --first-parent -n 50 <commit_sha>~1`. The API
+        lists no commit history, so the last healthy deploy is looked up only among
+        them. A read that fails becomes a gap in the trail instead of an exception.
+        """
+        commits = trail_commits(commit_sha, earlier_commits)
+        gaps: list[TrailGap] = []
+        walked: list[tuple[str, tuple[CommitDeploy, ...]]] = []
+        failed: CommitDeploy | None = None
+        check: DeployCoverageCheckpoint | None = None
+        healthy: CommitDeploy | None = None
+        healthy_sha: str | None = None
+        try:
+            verifications = await self.get_commit_deploy_verifications(
+                organization_id, repository_id, commit_sha
+            )
+        except ProoflineError as error:
+            gaps.append(TrailGap(commit_sha, "DEPLOYS_UNAVAILABLE", error))
+            walked.append((commit_sha, ()))
+        else:
+            walked.append((commit_sha, tuple(verifications.deploys)))
+            if not verifications.recorded:
+                gaps.append(TrailGap(commit_sha, "COMMIT_NOT_RECORDED"))
+            else:
+                failed = failed_deploy(verifications, environment_id)
+                if failed is None:
+                    gaps.append(TrailGap(commit_sha, "NO_FAILED_DEPLOY"))
+        if failed is not None:
+            check = failing_check(failed)
+            if check is None:
+                gaps.append(TrailGap(commit_sha, "NO_FAILING_CHECK"))
+            for sha in commits[1:]:
+                try:
+                    earlier = await self.get_commit_deploy_verifications(
+                        organization_id, repository_id, sha
+                    )
+                except ProoflineError as error:
+                    # One unreadable commit ends the walk instead of repeating a refused read.
+                    gaps.append(TrailGap(sha, "DEPLOYS_UNAVAILABLE", error))
+                    walked.append((sha, ()))
+                    break
+                healthy = healthy_deploy(earlier, failed)
+                if healthy is not None:
+                    healthy_sha = sha
+                    break
+                walked.append((sha, tuple(earlier.deploys)))
+            if healthy is None:
+                gaps.append(TrailGap(commit_sha, "NO_HEALTHY_DEPLOY"))
+        evidence: list[CommitEvidence] = []
+        for sha, deploys in walked:
+            reviews: list[CustomerReviewDetail] = []
+            try:
+                page = await self.list_reviews(
+                    organization_id, repository=repository_id, search=sha
+                )
+            except ProoflineError as error:
+                gaps.append(TrailGap(sha, "REVIEWS_UNAVAILABLE", error))
+            else:
+                if page.truncated is True:
+                    gaps.append(TrailGap(sha, "REVIEWS_TRUNCATED"))
+                for summary in commit_reviews(page, sha):
+                    try:
+                        if summary.kind == "DEPLOYMENT":
+                            detail = await self.get_deployment_review(
+                                organization_id, summary.public_key
+                            )
+                        else:
+                            detail = await self.get_review(organization_id, summary.id)
+                    except ProoflineError as error:
+                        gaps.append(TrailGap(sha, "REVIEW_UNAVAILABLE", error))
+                        continue
+                    reviews.append(detail)
+            evidence.append(commit_evidence(sha, deploys, reviews))
+        return FailedDeployTrail(
+            commit_sha=commit_sha,
+            failed_deploy=failed,
+            failing_check=check,
+            healthy_commit_sha=healthy_sha,
+            healthy_deploy=healthy,
+            commit_range=tuple(evidence),
+            gaps=tuple(gaps),
+        )
