@@ -211,6 +211,33 @@ if result.get("isError"):
 
 Calls under `client.fixes` never retry. Results retain untrusted-text wrappers, availability, assessment gaps, and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix, and a tool request never records a human disposition.
 
+## Testing code that uses the SDK
+
+`proofline.testing.FakeProofline` runs a fake review API on a loopback port for your own tests. Point a real client at `fake.url`: requests, retries, problems and model decoding go through the same code as in production, and no token or network is needed.
+
+```python
+from proofline import ProoflineClient
+from proofline.testing import FakeProofline, fake_finding
+
+with FakeProofline() as fake:
+    review_id = fake.add_review(pull_request=7, findings=[fake_finding(severity="SERIOUS")])
+    with ProoflineClient(fake.token, base_url=fake.url) as client:
+        outcome = client.wait_for_review(fake.organization_id, review_id)
+
+assert outcome.status == "COMPLETED"
+assert fake.requests[-1].path.endswith(f"/reviews/{review_id}")
+```
+
+The fake serves `request_review`, `get_review`, `list_reviews`, `iter_reviews`, `list_pull_request_reviews`, `get_pull_request_review`, `stop_review` and `rerun_review` for `fake.organization_id` and `fake.repository_id`.
+
+* `add_review(states=[...])` returns each state on the next read of the review, and repeats the last one. `wait_for_review` polls every 5 seconds and doubles the interval, so each extra state adds a real wait unless the test controls the clock.
+* `request_review` hands out reviews added for that pull request in run order, then starts new completed runs.
+* `fail_next(status, method=..., path=..., retry_after=...)` answers the next matching request with an RFC 9457 problem. `path` matches the end of the request path. A `GET` that receives 429 or 503 goes through the client's retry.
+* `route(method, path, handler)` serves any other endpoint from a function that takes a `FakeRequest` and returns a `FakeResponse`.
+* `fake.requests` lists every request the fake received, with its method, path, query, headers and body.
+
+Review and finding payloads go through the generated models before they are served, so a scenario the SDK cannot decode fails in `add_review` or `fake_finding` instead of later in the test.
+
 ## Development
 
 The repository bundles its public API contract in `openapi.public.json`. New public operations generate typed methods on both `ProoflineClient` and `AsyncProoflineClient` along with the code in `proofline/_generated/`.
