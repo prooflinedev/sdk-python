@@ -41,6 +41,77 @@ asyncio.run(main())
 
 The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Auto-Pagination
+
+Both `ProoflineClient` and `AsyncProoflineClient` provide lazy cursor-paginated iterators and eager list helpers so you do not need to manage `next_cursor` loops manually.
+
+Pages are fetched strictly on demand; breaking out of a `for` or `async for` loop stops subsequent HTTP requests immediately:
+
+```python
+from uuid import UUID
+from proofline import ProoflineClient
+
+with ProoflineClient() as client:
+    for review in client.iter_pull_request_reviews(
+        UUID(organization_id),
+        "owner/repo",
+        42,
+        page_size=50,
+        max_items=200,
+    ):
+        if review.status == "FAILED":
+            print(review.id)
+            break  # Immediately stops fetching subsequent pages
+
+    # Or collect bounded results into a list
+    recent_reviews = client.list_all_reviews(
+        UUID(organization_id),
+        max_items=500,
+        filters={"status": "COMPLETED"},
+    )
+```
+
+With `AsyncProoflineClient`, iterate with `async for` or await the list helpers:
+
+```python
+from uuid import UUID
+from proofline import AsyncProoflineClient
+
+async with AsyncProoflineClient() as client:
+    async for review in client.iter_pull_request_reviews(
+        UUID(organization_id),
+        "owner/repo",
+        42,
+        max_pages=5,
+    ):
+        if review.status == "FAILED":
+            break
+
+    all_pr_reviews = await client.list_all_pull_request_reviews(
+        UUID(organization_id),
+        "owner/repo",
+        42,
+        max_items=100,
+    )
+```
+
+For custom cursor-paginated callbacks, import `PageResponse`, `paginate`, `async_paginate`, `collect_all`, and `async_collect_all` directly from `proofline`:
+
+```python
+from proofline import PageResponse, collect_all, paginate
+
+
+def fetch_page(cursor: str | None) -> PageResponse[str]:
+    if cursor is None:
+        return PageResponse(items=["a", "b"], next_cursor="c2")
+    return PageResponse(items=["c"], next_cursor=None)
+
+
+items = collect_all(paginate(fetch_page, max_items=10, max_pages=5))
+```
+
+Invalid bounds (`max_items <= 0`, `max_pages <= 0`, booleans, or non-integers) raise `ValueError` eagerly before any request is issued. Empty or repeated continuation cursors raise `ProoflineError` with type `urn:proofline:sdk:invalid-pagination`.
+
 ## Errors and refusals
 
 A refused request raises `ProoflineError` with the server problem's `status`, `type`, `title` and `detail`. When a review request creates nothing, the error also carries `refusal`, whose `reason` names the setting to change, such as `NO_LINKED_ENVIRONMENT` or `ENVIRONMENT_NOT_READY`, and `repository_name`. `RunNowRefusal` names the type of `refusal`. A refusal that does not match the public contract keeps its status, `title` and `detail` with the type `urn:proofline:sdk:invalid-response` and no `refusal`. Any other status, such as the 402 a review request answers when credits cannot pay, is a plain problem with no `refusal`. The token is redacted from every text field, and `repr` and `str` show only the status.
