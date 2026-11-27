@@ -538,7 +538,44 @@ class ProoflineClient(Operations):
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
-
+         def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int = 100,
+        max_items: int = 10_000,
+        filters: ReviewFilters | None = None,
+    ) -> Iterator[ReviewSummary]:
+        _page_limits(page_size, max_pages, max_items)
+        params: ReviewFilters = {}
+        if filters:
+            params.update(filters)
+        params["limit"] = page_size
+        seen: set[str] = set()
+        cursor = params.get("cursor")
+        if cursor:
+            seen.add(cursor)
+        count = 0
+        for _ in range(max_pages):
+            page = self.list_pull_request_reviews(
+                organization_id,
+                repository,
+                pull_request_number,
+                filters=params,
+            )
+            for item in page.items:
+                if count == max_items:
+                    raise _pagination_limit()
+                yield item
+                count += 1
+            cursor = _next_cursor(page, seen)
+            if cursor is None:
+                return
+            params["cursor"] = cursor
+        raise _pagination_limit()
     def wait_for_review(
         self,
         organization_id: UUID,
@@ -731,7 +768,44 @@ class AsyncProoflineClient(AsyncOperations):
             pull_request_number,
             **params,
         )
-
+    async def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int = 100,
+        max_items: int = 10_000,
+        filters: ReviewFilters | None = None,
+    ) -> AsyncIterator[ReviewSummary]:
+        _page_limits(page_size, max_pages, max_items)
+        params: ReviewFilters = {}
+        if filters:
+            params.update(filters)
+        params["limit"] = page_size
+        seen: set[str] = set()
+        cursor = params.get("cursor")
+        if cursor:
+            seen.add(cursor)
+        count = 0
+        for _ in range(max_pages):
+            page = await self.list_pull_request_reviews(
+                organization_id,
+                repository,
+                pull_request_number,
+                filters=params,
+            )
+            for item in page.items:
+                if count == max_items:
+                    raise _pagination_limit()
+                yield item
+                count += 1
+            cursor = _next_cursor(page, seen)
+            if cursor is None:
+                return
+            params["cursor"] = cursor
+        raise _pagination_limit()
     async def get_pull_request_review(
         self, organization_id: UUID, repository: str, pull_request_number: int, run_number: int
     ) -> CustomerReviewDetail:
