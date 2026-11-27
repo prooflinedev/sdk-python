@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from asyncio import sleep as async_sleep
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -74,6 +74,7 @@ from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
+from .github_actions import AsyncGitHubActionsCredentials, GitHubActionsCredentials
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
 
@@ -128,15 +129,55 @@ def _decoded(
 
 
 def _configuration(
-    token: str | SecretStr | None, base_url: str, timeout: float
-) -> AuthenticatedClient:
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("The HTTP timeout must be a finite positive number of seconds.")
-    return AuthenticatedClient(
-        base_url=_transport.base_url(base_url),
-        token=_transport.token_value(token),
+    token: str | SecretStr | _transport.TokenProvider | _transport.AsyncTokenProvider | None,
+    base_url: str | None,
+    timeout: float,
+    *,
+    is_async: bool,
+) -> tuple[AuthenticatedClient, _transport.TokenSource, str]:
+    _transport.validate_timeout(timeout)
+    if (
+        is_async
+        and isinstance(token, _transport.TokenProvider)
+        and not isinstance(token, _transport.AsyncTokenProvider)
+    ):
+        raise TypeError("AsyncProoflineClient requires an async token provider.")
+    if (
+        not is_async
+        and isinstance(token, _transport.AsyncTokenProvider)
+        and not isinstance(token, _transport.TokenProvider)
+    ):
+        raise TypeError("ProoflineClient requires a sync token provider.")
+
+    provider_base = (
+        token.base_url
+        if isinstance(token, (GitHubActionsCredentials, AsyncGitHubActionsCredentials))
+        else None
+    )
+    if base_url is None:
+        resolved_base = _transport.base_url(
+            provider_base if provider_base is not None else "https://proofline.sh"
+        )
+    else:
+        resolved_base = _transport.base_url(base_url)
+        if provider_base is not None and resolved_base != provider_base:
+            raise ValueError(
+                "The client base_url must match the GitHub Actions credential base_url."
+            )
+
+    if isinstance(token, (_transport.TokenProvider, _transport.AsyncTokenProvider)):
+        token_source: _transport.TokenSource = token
+        api_token = SecretStr("")
+    else:
+        api_token = _transport.token_value(token)
+        token_source = api_token
+
+    api = AuthenticatedClient(
+        base_url=resolved_base,
+        token=api_token,
         timeout=httpx2.Timeout(timeout),
     )
+    return api, token_source, resolved_base
 
 
 def _review_url(base_url: str, organization_id: UUID, review_id: UUID) -> str:
@@ -217,16 +258,19 @@ class ProoflineClient(Operations):
 
     def __init__(
         self,
-        token: str | SecretStr | None = None,
+        token: str | SecretStr | _transport.TokenProvider | None = None,
         *,
-        base_url: str = "https://proofline.sh",
+        base_url: str | None = None,
         timeout: float = 30,
     ) -> None:
-        self._api = _configuration(token, base_url, timeout)
-        self._base_url = _transport.base_url(base_url)
+        api, token_source, resolved_base = _configuration(token, base_url, timeout, is_async=False)
+        self._api = api
+        self._token_source = token_source
+        self._owns_credentials = False
+        self._base_url = resolved_base
         self._http = httpx2.Client(
             base_url=self._base_url,
-            auth=_transport.BearerAuth(self._api.token),
+            auth=_transport.BearerAuth(token_source),
             headers={
                 "User-Agent": f"proofline-python/{_transport.VERSION}",
                 "Accept-Encoding": "identity",
@@ -234,15 +278,55 @@ class ProoflineClient(Operations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(token_source, timeout),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
         self.knowledge = KnowledgeClient(self._http)
         self.fixes = FixesClient(self._http)
 
+    @classmethod
+    def from_github_actions(
+        cls,
+        *,
+        base_url: str | None = None,
+        audience: str = "proofline",
+        timeout: float = 30,
+        environ: Mapping[str, str] | None = None,
+    ) -> Self:
+        credentials = GitHubActionsCredentials.from_env(
+            base_url=base_url,
+            audience=audience,
+            timeout=timeout,
+            environ=environ,
+        )
+        try:
+            credentials.exchange()
+            client = cls(credentials, base_url=credentials.base_url, timeout=timeout)
+        except BaseException:
+            credentials.close()
+            raise
+        client._owns_credentials = True
+        return client
+
+    @property
+    def organization_id(self) -> UUID | None:
+        if isinstance(self._token_source, GitHubActionsCredentials):
+            return self._token_source.organization_id
+        return None
+
+    @property
+    def repository_id(self) -> UUID | None:
+        if isinstance(self._token_source, GitHubActionsCredentials):
+            return self._token_source.repository_id
+        return None
+
     def close(self) -> None:
-        self._http.close()
+        try:
+            self._http.close()
+        finally:
+            if self._owns_credentials and isinstance(self._token_source, GitHubActionsCredentials):
+                self._token_source.close()
 
     def __enter__(self) -> Self:
         return self
@@ -587,16 +671,19 @@ class ProoflineClient(Operations):
 class AsyncProoflineClient(AsyncOperations):
     def __init__(
         self,
-        token: str | SecretStr | None = None,
+        token: str | SecretStr | _transport.AsyncTokenProvider | None = None,
         *,
-        base_url: str = "https://proofline.sh",
+        base_url: str | None = None,
         timeout: float = 30,
     ) -> None:
-        self._api = _configuration(token, base_url, timeout)
-        self._base_url = _transport.base_url(base_url)
+        api, token_source, resolved_base = _configuration(token, base_url, timeout, is_async=True)
+        self._api = api
+        self._token_source = token_source
+        self._owns_credentials = False
+        self._base_url = resolved_base
         self._http = httpx2.AsyncClient(
             base_url=self._base_url,
-            auth=_transport.BearerAuth(self._api.token),
+            auth=_transport.BearerAuth(token_source),
             headers={
                 "User-Agent": f"proofline-python/{_transport.VERSION}",
                 "Accept-Encoding": "identity",
@@ -604,15 +691,57 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(token_source, timeout),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)
         self.knowledge = AsyncKnowledgeClient(self._http)
         self.fixes = AsyncFixesClient(self._http)
 
+    @classmethod
+    async def from_github_actions(
+        cls,
+        *,
+        base_url: str | None = None,
+        audience: str = "proofline",
+        timeout: float = 30,
+        environ: Mapping[str, str] | None = None,
+    ) -> Self:
+        credentials = AsyncGitHubActionsCredentials.from_env(
+            base_url=base_url,
+            audience=audience,
+            timeout=timeout,
+            environ=environ,
+        )
+        try:
+            await credentials.aexchange()
+            client = cls(credentials, base_url=credentials.base_url, timeout=timeout)
+        except BaseException:
+            await credentials.aclose()
+            raise
+        client._owns_credentials = True
+        return client
+
+    @property
+    def organization_id(self) -> UUID | None:
+        if isinstance(self._token_source, AsyncGitHubActionsCredentials):
+            return self._token_source.organization_id
+        return None
+
+    @property
+    def repository_id(self) -> UUID | None:
+        if isinstance(self._token_source, AsyncGitHubActionsCredentials):
+            return self._token_source.repository_id
+        return None
+
     async def aclose(self) -> None:
-        await self._http.aclose()
+        try:
+            await self._http.aclose()
+        finally:
+            if self._owns_credentials and isinstance(
+                self._token_source, AsyncGitHubActionsCredentials
+            ):
+                await self._token_source.aclose()
 
     async def __aenter__(self) -> Self:
         return self
