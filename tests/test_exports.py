@@ -103,3 +103,59 @@ def test_concurrent_decoding_preserves_global_csv_limit() -> None:
     with ThreadPoolExecutor(max_workers=4) as pool:
         assert set(pool.map(decode, range(12))) == {str(before)}
     assert csv.field_size_limit() == before
+
+
+def ndjson_response(text: str) -> httpx2.Response:
+    return httpx2.Response(
+        200,
+        content=text.encode("utf-8"),
+        headers={
+            "Content-Type": "application/x-ndjson",
+            "X-Proofline-Export-Version": "1",
+            "X-Proofline-Export-Settled-Until": "2026-11-16T00:00:00Z",
+        },
+    )
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        '{"dataset_version": 1, "value": %s}\n',
+        '{"dataset_version": 1, "value": [%s]}\n',
+        '{"dataset_version": 1, "value": {"nested": %s}}\n',
+    ],
+)
+def test_ndjson_rejects_non_finite_values(constant: str, template: str) -> None:
+    result = ndjson_response(template % constant)
+
+    with pytest.raises(ProoflineError) as caught:
+        decode_export(result, "ndjson", "reviews")
+
+    assert caught.value.type == "urn:proofline:sdk:invalid-response"
+    assert caught.value.status == 200
+
+
+def test_ndjson_preserves_valid_values() -> None:
+    text = (
+        '{"dataset_version": 1, "value": 42.5}\n'
+        '{"dataset_version": 1, "value": -12.5}\n'
+        '{"dataset_version": 1, "value": null}\n'
+        '{"dataset_version": 1, "value": "NaN"}\n'
+        '{"dataset_version": 1, "value": "Infinity"}\n'
+        '{"dataset_version": 1, "value": "-Infinity"}\n'
+    )
+
+    page = decode_export(ndjson_response(text), "ndjson", "reviews")
+
+    assert page.text == text
+    assert page.format == "ndjson"
+    assert page.version == 1
+    assert page.rows == [
+        {"dataset_version": 1, "value": 42.5},
+        {"dataset_version": 1, "value": -12.5},
+        {"dataset_version": 1, "value": None},
+        {"dataset_version": 1, "value": "NaN"},
+        {"dataset_version": 1, "value": "Infinity"},
+        {"dataset_version": 1, "value": "-Infinity"},
+    ]
