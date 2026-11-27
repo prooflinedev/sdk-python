@@ -2840,10 +2840,13 @@ async def test_failed_deploy_trail_without_a_failed_deploy_reads_no_earlier_comm
 async def test_failed_deploy_trail_refuses_invalid_commits_before_any_request(mode: str) -> None:
     with Server(lambda request, index: Reply(body=verifications())) as server:
         async with session(mode, server.url) as client:
-            for commit, earlier in [
-                (FAILED_COMMIT[:12], []),
-                (FAILED_COMMIT.upper(), []),
-                (FAILED_COMMIT, [FAILED_COMMIT]),
+            for commit, earlier, extra in [
+                (FAILED_COMMIT[:12], [], {}),
+                (FAILED_COMMIT.upper(), [], {}),
+                (FAILED_COMMIT, [FAILED_COMMIT], {}),
+                (FAILED_COMMIT, [], {"timeout": -1}),
+                (FAILED_COMMIT, [], {"timeout": float("nan")}),
+                (FAILED_COMMIT, [], {"timeout": float("inf")}),
             ]:
                 with pytest.raises(ValueError):
                     await call(
@@ -2853,6 +2856,7 @@ async def test_failed_deploy_trail_refuses_invalid_commits_before_any_request(mo
                         REPOSITORY,
                         commit,
                         earlier_commits=earlier,
+                        **extra,
                     )
     assert server.requests == []
 
@@ -2896,3 +2900,53 @@ async def test_failed_deploy_trail_turns_a_malformed_body_into_a_gap(mode: str) 
     assert PRIVATE not in error.detail
     assert PRIVATE not in repr(trail)
     assert later not in "".join(trail_requests(server))
+
+
+@MODES
+async def test_failed_deploy_trail_stops_reading_at_its_timeout(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    middle, later = MIDDLE_COMMITS
+
+    def respond(request: Request, index: int) -> Reply:
+        clock.now += 10
+        if urlsplit(request.path).path == deploys_path(FAILED_COMMIT):
+            return Reply(
+                body=verifications(
+                    deploy(
+                        "FAILED",
+                        regressed=True,
+                        results=("REGRESSED", "HEALTHY", "HEALTHY", "HEALTHY"),
+                    )
+                )
+            )
+        return Reply(body=verifications(deploy("VERIFIED")))
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[middle, later],
+                timeout=15,
+            )
+    assert trail.failing_check is not None
+    assert trail.failing_check.checkpoint is models.DeployCheckpoint.LANDING
+    assert [(gap.commit_sha, gap.reason) for gap in trail.gaps] == [
+        (middle, "DEPLOYS_UNAVAILABLE"),
+        (FAILED_COMMIT, "NO_HEALTHY_DEPLOY"),
+        (FAILED_COMMIT, "REVIEWS_UNAVAILABLE"),
+        (middle, "REVIEWS_UNAVAILABLE"),
+    ]
+    assert [gap.error.type if gap.error is not None else None for gap in trail.gaps] == [
+        "urn:proofline:sdk:timeout",
+        None,
+        "urn:proofline:sdk:timeout",
+        "urn:proofline:sdk:timeout",
+    ]
+    assert len(server.requests) == 2
+    assert later not in "".join(request.path for request in server.requests)
