@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from datetime import UTC, datetime
 from string import hexdigits
 from time import monotonic, sleep
 from types import TracebackType
@@ -44,6 +45,7 @@ from ._generated.client import AuthenticatedClient
 from ._generated.models.agent_session import AgentSession
 from ._generated.models.agent_session_prompt_type_0 import AgentSessionPromptType0
 from ._generated.models.agent_session_prompt_type_1 import AgentSessionPromptType1
+from ._generated.models.commit_deploy_verifications import CommitDeployVerifications
 from ._generated.models.commit_review_request import CommitReviewRequest
 from ._generated.models.commit_review_response import CommitReviewResponse
 from ._generated.models.coverage_upload_request import CoverageUploadRequest
@@ -72,6 +74,14 @@ from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
+from .deploys import (
+    DeployCheckpointName,
+    DeployVerificationOutcome,
+    checkpoint_index,
+    deploy_commit,
+    next_due,
+)
+from .deploys import outcome as deploy_outcome
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
@@ -137,6 +147,33 @@ def _configuration(
         token=_transport.token_value(token),
         timeout=httpx2.Timeout(timeout),
     )
+
+
+# A check due later than this is still read at least this often, so a deploy that
+# fails or is recorded between checks ends the wait without waiting for the check.
+_DEPLOY_READ_CEILING = 300.0
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _deploy_delay(
+    verifications: CommitDeployVerifications | None,
+    through: int,
+    environment_id: UUID | None,
+    interval: float,
+) -> float:
+    # Checks are recorded on a schedule the ledger already names, so sleeping until
+    # the next one is due replaces reads that could only return the same snapshot.
+    due = (
+        None
+        if verifications is None
+        else next_due(verifications, through, environment_id=environment_id)
+    )
+    if due is None:
+        return interval
+    return max(interval, min((due - utc_now()).total_seconds(), _DEPLOY_READ_CEILING))
 
 
 def _review_url(base_url: str, organization_id: UUID, review_id: UUID) -> str:
@@ -583,6 +620,58 @@ class ProoflineClient(Operations):
         finally:
             _transport.DEADLINE.reset(deadline)
 
+    def wait_for_deploy_verification(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        commit_sha: str,
+        *,
+        through: DeployCheckpointName = "LANDING",
+        environment_id: UUID | None = None,
+        timeout: float = 1800,
+    ) -> DeployVerificationOutcome:
+        """Wait until every recorded deploy of a commit settles, or return TIMED_OUT.
+
+        A deploy settles once each check through ``through`` recorded a result,
+        or its verification ended. A recorded regression ends the wait at once,
+        whichever check recorded it. A commit with no recorded deploy keeps the
+        wait open, since a deploy may still be recorded; it is never HEALTHY.
+
+        environment_id holds the wait to the deploys of one environment.
+        """
+
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("The deploy timeout must be a finite nonnegative number of seconds.")
+        deploy_commit(commit_sha)
+        index = checkpoint_index(through)
+        last: CommitDeployVerifications | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = self.get_commit_deploy_verifications(
+                        organization_id, repository_id, commit_sha
+                    )
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                result = deploy_outcome(last, commit_sha, index, environment_id=environment_id)
+                if result is not None:
+                    return result
+                delay = _deploy_delay(last, index, environment_id, interval)
+                sleep(min(delay, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            timed_out = deploy_outcome(
+                last, commit_sha, index, environment_id=environment_id, forced="TIMED_OUT"
+            )
+            return timed_out or DeployVerificationOutcome("TIMED_OUT", commit_sha)
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
 
 class AsyncProoflineClient(AsyncOperations):
     def __init__(
@@ -966,5 +1055,47 @@ class AsyncProoflineClient(AsyncOperations):
                 interval = min(60, interval * 2)
             timed_out = outcome(last, url, "TIMED_OUT", head_commit_sha=head_commit_sha)
             return timed_out or ReviewOutcome("TIMED_OUT", url)
+        finally:
+            _transport.DEADLINE.reset(deadline)
+
+    async def wait_for_deploy_verification(
+        self,
+        organization_id: UUID,
+        repository_id: UUID,
+        commit_sha: str,
+        *,
+        through: DeployCheckpointName = "LANDING",
+        environment_id: UUID | None = None,
+        timeout: float = 1800,
+    ) -> DeployVerificationOutcome:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("The deploy timeout must be a finite nonnegative number of seconds.")
+        deploy_commit(commit_sha)
+        index = checkpoint_index(through)
+        last: CommitDeployVerifications | None = None
+        deadline = _transport.DEADLINE.set(monotonic() + timeout)
+        interval = 5.0
+        try:
+            while (_transport.remaining() or 0) > 0:
+                try:
+                    last = await self.get_commit_deploy_verifications(
+                        organization_id, repository_id, commit_sha
+                    )
+                except ProoflineError as error:
+                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                        break
+                    raise
+                if (_transport.remaining() or 0) <= 0:
+                    break
+                result = deploy_outcome(last, commit_sha, index, environment_id=environment_id)
+                if result is not None:
+                    return result
+                delay = _deploy_delay(last, index, environment_id, interval)
+                await async_sleep(min(delay, _transport.remaining() or 0))
+                interval = min(60, interval * 2)
+            timed_out = deploy_outcome(
+                last, commit_sha, index, environment_id=environment_id, forced="TIMED_OUT"
+            )
+            return timed_out or DeployVerificationOutcome("TIMED_OUT", commit_sha)
         finally:
             _transport.DEADLINE.reset(deadline)
