@@ -7,9 +7,10 @@ from typing import Any
 import pytest
 
 import proofline
-from proofline import models, trail
+from proofline import ProoflineError, models, trail
 from proofline.trail import (
     MAX_EARLIER_COMMITS,
+    TrailGap,
     commit_evidence,
     commit_reviews,
     failed_deploy,
@@ -161,6 +162,20 @@ def test_trail_commits_keep_the_given_order_up_to_the_bound() -> None:
     )
     bound = [f"{index:040x}" for index in range(MAX_EARLIER_COMMITS)]
     assert trail_commits(FAILED_COMMIT, bound) == (FAILED_COMMIT, *bound)
+
+
+def test_trail_gap_detaches_the_failed_read() -> None:
+    try:
+        try:
+            raise ValueError(PRIVATE)
+        except ValueError:
+            raise ProoflineError(0, "urn:proofline:sdk:invalid-response", "static") from None
+    except ProoflineError as error:
+        gap = TrailGap(FAILED_COMMIT, "DEPLOYS_UNAVAILABLE", error)
+    assert gap.error is not None
+    assert gap.error.__traceback__ is None
+    assert gap.error.__context__ is None
+    assert PRIVATE not in repr(gap)
 
 
 def test_trail_types_are_public() -> None:

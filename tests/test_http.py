@@ -2771,6 +2771,10 @@ async def test_failed_deploy_trail_keeps_partial_evidence_when_reads_fail(mode: 
         404,
     ]
     assert trail.gaps[1].error.detail == f"{PRIVATE} [redacted]"
+    for gap in trail.gaps:
+        if gap.error is not None:
+            assert gap.error.__traceback__ is None
+            assert gap.error.__context__ is None
     assert PRIVATE not in repr(trail)
     assert TOKEN not in repr(trail)
     assert trail_requests(server) == [
@@ -2851,3 +2855,44 @@ async def test_failed_deploy_trail_refuses_invalid_commits_before_any_request(mo
                         earlier_commits=earlier,
                     )
     assert server.requests == []
+
+
+@MODES
+async def test_failed_deploy_trail_turns_a_malformed_body_into_a_gap(mode: str) -> None:
+    middle, later = MIDDLE_COMMITS
+    routes = {
+        deploys_path(FAILED_COMMIT): Reply(
+            body=verifications(
+                deploy(
+                    "FAILED",
+                    regressed=True,
+                    results=("REGRESSED", "HEALTHY", "HEALTHY", "HEALTHY"),
+                )
+            )
+        ),
+        deploys_path(middle): Reply(body=f"not json {PRIVATE}".encode()),
+        f"reviews?search={FAILED_COMMIT}": Reply(body=commit_page()),
+        f"reviews?search={middle}": Reply(body=commit_page()),
+    }
+    with Server(trail_peer(routes)) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[middle, later],
+            )
+    assert [(gap.commit_sha, gap.reason) for gap in trail.gaps] == [
+        (middle, "DEPLOYS_UNAVAILABLE"),
+        (FAILED_COMMIT, "NO_HEALTHY_DEPLOY"),
+    ]
+    error = trail.gaps[0].error
+    assert error is not None
+    assert error.type == "urn:proofline:sdk:invalid-response"
+    assert error.__traceback__ is None
+    assert error.__context__ is None
+    assert PRIVATE not in error.detail
+    assert PRIVATE not in repr(trail)
+    assert later not in "".join(trail_requests(server))

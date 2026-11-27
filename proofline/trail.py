@@ -43,6 +43,12 @@ class TrailGap:
     reason: TrailGapReason
     error: ProoflineError | None = field(default=None, repr=False)
 
+    def __post_init__(self) -> None:
+        # A gap outlives its failed read; the error must not keep that read's frames or body.
+        if self.error is not None:
+            self.error.__traceback__ = None
+            self.error.__context__ = None
+
 
 @dataclass(frozen=True)
 class CommitEvidence:
