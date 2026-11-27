@@ -2530,6 +2530,14 @@ def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> No
         'fixes.get_fix_context("finding-id")',
         'fixes.request_reverification("review-id", ["finding-id"], "a" * 40, note="fixed")',
         'fixes.get_reverification("request-id")',
+        'config.get_configuration(repository="owner/name")',
+        'config.list_operations(area="REPOSITORY_REVIEW_SETTINGS", subject="repository")',
+        'config.describe_operation("repository.wiki_settings.update", {"repo_id": "id"})',
+        'config.propose_change("op", input={"enabled": True}, expected_revision="a" * 64, '
+        'cited_files=[{"repository_id": "id", "commit_sha": "a" * 40, "path": "main.tf"}])',
+        'config.apply_change("change-id")',
+        "setup.get_setup_status()",
+        'setup.list_setup_candidates(query="api")',
     ]
     for prefix, kind, wait in [
         ("", "ProoflineClient", ""),
@@ -2539,7 +2547,9 @@ def test_mcp_public_types_accept_legacy_and_targeted_calls(tmp_path: Path) -> No
         lines.append(f"    result: KnowledgeResult = {wait}client.mcp.list_organizations()")
         for expression in calls:
             lines.append(f"    result = {wait}client.{expression}")
-            targeted = expression[:-1] + ', organization_id="00000000-0000-7000-8000-000000000001")'
+            separator = "" if expression.endswith("()") else ", "
+            target = 'organization_id="00000000-0000-7000-8000-000000000001")'
+            targeted = expression[:-1] + separator + target
             lines.append(f"    result = {wait}client.{targeted}")
     fixture = tmp_path / "mcp_types.py"
     fixture.write_text("\n".join(lines))

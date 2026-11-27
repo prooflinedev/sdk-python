@@ -72,6 +72,12 @@ from ._generated.models.stop_response import StopResponse
 from ._generated.types import UNSET, Response, Unset
 from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
+from .configuration import (
+    AsyncConfigurationClient,
+    AsyncSetupClient,
+    ConfigurationClient,
+    SetupClient,
+)
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
@@ -240,6 +246,8 @@ class ProoflineClient(Operations):
         self.mcp = McpClient(self._http)
         self.knowledge = KnowledgeClient(self._http)
         self.fixes = FixesClient(self._http)
+        self.config = ConfigurationClient(self._http)
+        self.setup = SetupClient(self._http)
 
     def close(self) -> None:
         self._http.close()
@@ -610,6 +618,8 @@ class AsyncProoflineClient(AsyncOperations):
         self.mcp = AsyncMcpClient(self._http)
         self.knowledge = AsyncKnowledgeClient(self._http)
         self.fixes = AsyncFixesClient(self._http)
+        self.config = AsyncConfigurationClient(self._http)
+        self.setup = AsyncSetupClient(self._http)
 
     async def aclose(self) -> None:
         await self._http.aclose()

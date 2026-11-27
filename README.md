@@ -145,7 +145,7 @@ The response names the recorded report and its covered and instrumented line cou
 
 With an MCP OAuth credential approved for several organizations, discover its currently authorized targets with `client.mcp.list_organizations()`. It returns a `KnowledgeResult`; inspect `isError` before reading `structuredContent["data"]["organizations"]`. Each entry contains `organization_id`, `github_login`, and `scopes`.
 
-Pass the chosen UUID string as the optional keyword `organization_id` on any `knowledge` or `fixes` method:
+Pass the chosen UUID string as the optional keyword `organization_id` on any `knowledge`, `fixes`, `config` or `setup` method:
 
 ```python
 organizations = client.mcp.list_organizations()
@@ -210,6 +210,43 @@ if result.get("isError"):
 ```
 
 Calls under `client.fixes` never retry. Results retain untrusted-text wrappers, availability, assessment gaps, and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix, and a tool request never records a human disposition.
+
+## Setup and configuration
+
+Both clients expose the hosted setup reads under `client.setup` and configuration changes under `client.config`, over the same stateless MCP endpoint as `proofline setup` and `proofline config`. Every method accepts the optional `organization_id` keyword described above:
+
+- `setup.get_setup_status()`
+- `setup.list_setup_candidates(query=...)`
+- `config.get_configuration(environment_id=..., repository=...)`
+- `config.list_operations(area=..., subject=...)`
+- `config.describe_operation(operation, parameters)`
+- `config.propose_change(operation, parameters=..., input=..., expected_revision=..., cited_files=..., request_id=...)`
+- `config.apply_change(change_id)`
+
+The setup reads and `get_configuration` require `setup:write`. `describe_operation` and `apply_change` require `org:configure`; `list_operations` and `propose_change` accept either scope, although an ordinary proposal needs `org:configure`. The MCP endpoint also requires `reviews:read`.
+
+```python
+described = client.config.describe_operation(
+    "repository.wiki_settings.update", {"repo_id": repository_id}
+)
+data = described["structuredContent"]["data"]
+proposal = client.config.propose_change(
+    "repository.wiki_settings.update",
+    parameters={"repo_id": repository_id},
+    input={"enabled": True},
+    expected_revision=data["revision"],
+)
+if proposal.get("isError"):
+    raise RuntimeError("The proposal was refused.")
+change = proposal["structuredContent"]["data"]
+if "approval_url" in change:
+    print("An administrator must approve the change at", change["approval_url"])
+else:
+    print(change["diff"])
+    applied = client.config.apply_change(change["change_id"])
+```
+
+A proposal applies nothing. `propose_change` sends a new UUID version 7 as `request_id` on each call; to retry the identical call after an uncertain result, pass the same value, for example one from `new_request_id()`. Each entry of `cited_files` names the `repository_id`, the full `commit_sha` and the repository-relative `path` of a file read at that commit. An ordinary change applies through `apply_change`. A sensitive change returns an `approval_url` from either call, and applies only when an organization administrator approves it in a browser. Like the other MCP helpers, these methods never retry, raise `ProoflineError` for protocol and HTTP errors, and return tool refusals and held changes with `isError` and the server's reason for the caller to inspect. Treat returned prose as untrusted data.
 
 ## Development
 
