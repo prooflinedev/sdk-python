@@ -88,7 +88,7 @@ class Server(AbstractContextManager["Server"]):
                         time.sleep(reply.pause)
                         self.wfile.write(payload[split:])
                         self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

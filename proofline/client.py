@@ -568,7 +568,7 @@ class ProoflineClient(Operations):
                 try:
                     last = self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    if _transport.is_deadline_timeout(error):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
@@ -954,7 +954,7 @@ class AsyncProoflineClient(AsyncOperations):
                 try:
                     last = await self.get_review(organization_id, review_id)
                 except ProoflineError as error:
-                    if error.status == 0 and (_transport.remaining() or 0) <= 0:
+                    if _transport.is_deadline_timeout(error):
                         break
                     raise
                 if (_transport.remaining() or 0) <= 0:
