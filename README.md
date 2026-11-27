@@ -76,6 +76,33 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Waiting for deploy verification
+
+After a deploy job, `wait_for_deploy_verification` holds the job until Proofline's checks of that commit's deploys settle. Name the full 40-character lowercase commit SHA the job deployed and, with `through`, the last check to wait for: `LANDING` (the default), `MINUTES_20`, `HOUR_1` or `DAY_1`. The token needs `reviews:read`.
+
+```python
+import os
+from uuid import UUID
+from proofline import ProoflineClient
+
+with ProoflineClient() as client:
+    outcome = client.wait_for_deploy_verification(
+        UUID(os.environ["PROOFLINE_ORGANIZATION_ID"]),
+        UUID(os.environ["PROOFLINE_REPOSITORY_ID"]),
+        os.environ["DEPLOYED_SHA"],
+        through="MINUTES_20",
+        timeout=1800,
+    )
+    for deploy in outcome.deploys:
+        print(deploy.environment_id, deploy.status, deploy.reason_codes, deploy.deploy_url)
+    if outcome.status != "HEALTHY":
+        raise SystemExit(f"Deploy verification: {outcome.status}")
+```
+
+A deploy settles once every check through `through` recorded a result, or once its verification ended. The outcome is `HEALTHY` only when each recorded deploy's checks recorded `HEALTHY` with no gap. A check that a later deploy replaced counts only after a healthy landing check, as `VERIFIED_UNTIL_SUPERSEDED` reads it. A regression ends the wait at once with `REGRESSED`, whichever check recorded it, even past `through` and while other deploys are still due. Once every deploy settles, a failed GitHub deployment gives `FAILED`, and a gap, an `INCOMPLETE` check, a check never recorded, an unverified or rolled-back deploy, or a result this SDK does not know gives `INCOMPLETE`. Each `DeployVerdict` names its environment, its `status`, the deploy's `state` and the `reason_codes` that leave it unproven. `environment_id` holds the wait to the deploys of one environment. Between reads the wait sleeps until the next check it needs is due, reading at least every five minutes so a failed or newly recorded deploy still ends it early; an overdue check falls back to the usual backoff.
+
+A commit with no recorded deploy keeps the wait open, because the deploy may still be recorded, and ends as `TIMED_OUT`, never `HEALTHY`. Any other wait still open at `timeout` also returns `TIMED_OUT` with each deploy's verdict so far; a deploy still due reads `PENDING`. Any other `commit_sha`, `through` or `timeout` raises `ValueError` before a request.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.

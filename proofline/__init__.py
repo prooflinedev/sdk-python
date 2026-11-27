@@ -34,6 +34,7 @@ from ._generated.models import (
 from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
+from .deploys import DeployVerdict, DeployVerificationOutcome
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
@@ -51,6 +52,8 @@ __all__ = [
     "CustomerAssessmentDetail",
     "CustomerFinding",
     "CustomerReviewDetail",
+    "DeployVerdict",
+    "DeployVerificationOutcome",
     "ExportDataset",
     "ExportFormat",
     "ExportPage",
