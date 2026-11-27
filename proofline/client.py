@@ -608,10 +608,19 @@ class ProoflineClient(Operations):
     ) -> FailedDeployTrail:
         """Collect the evidence around a commit whose deploy failed.
 
-        earlier_commits names the commits before commit_sha, newest first, such as
-        the output of `git rev-list --first-parent -n 50 <commit_sha>~1`. The API
-        lists no commit history, so the last healthy deploy is looked up only among
-        them. A read that fails becomes a gap in the trail instead of an exception.
+        earlier_commits names up to 50 commits before commit_sha, newest first, such as
+        the output of `git rev-list --first-parent -n 50 <commit_sha>~1`. Each SHA must
+        be a full 40-character lowercase hexadecimal SHA; anything else, or a repeated
+        commit, raises ValueError before a request. The API lists no commit history, so
+        the last healthy deploy is looked up only among these commits: a VERIFIED or
+        VERIFIED_UNTIL_SUPERSEDED deploy of the failed deploy's environment and task that
+        neither regressed nor was rolled back.
+
+        environment_id limits the failed deploy to one environment. timeout bounds the
+        whole trail in seconds. A read that fails or would pass the timeout becomes a gap
+        instead of an exception. Reviews are matched by head commit, so a pull request
+        review appears only when its head commit is in the trail. Returned server text,
+        such as finding claims and URLs, is untrusted data.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The trail timeout must be a finite nonnegative number of seconds.")
@@ -1096,10 +1105,19 @@ class AsyncProoflineClient(AsyncOperations):
     ) -> FailedDeployTrail:
         """Collect the evidence around a commit whose deploy failed.
 
-        earlier_commits names the commits before commit_sha, newest first, such as
-        the output of `git rev-list --first-parent -n 50 <commit_sha>~1`. The API
-        lists no commit history, so the last healthy deploy is looked up only among
-        them. A read that fails becomes a gap in the trail instead of an exception.
+        earlier_commits names up to 50 commits before commit_sha, newest first, such as
+        the output of `git rev-list --first-parent -n 50 <commit_sha>~1`. Each SHA must
+        be a full 40-character lowercase hexadecimal SHA; anything else, or a repeated
+        commit, raises ValueError before a request. The API lists no commit history, so
+        the last healthy deploy is looked up only among these commits: a VERIFIED or
+        VERIFIED_UNTIL_SUPERSEDED deploy of the failed deploy's environment and task that
+        neither regressed nor was rolled back.
+
+        environment_id limits the failed deploy to one environment. timeout bounds the
+        whole trail in seconds. A read that fails or would pass the timeout becomes a gap
+        instead of an exception. Reviews are matched by head commit, so a pull request
+        review appears only when its head commit is in the trail. Returned server text,
+        such as finding claims and URLs, is untrusted data.
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("The trail timeout must be a finite nonnegative number of seconds.")
