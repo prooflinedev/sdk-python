@@ -34,6 +34,16 @@ from ._generated.models import (
 from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
+from .diff import (
+    FindingDelta,
+    ReviewDiff,
+    ScopedFinding,
+    ScopeGap,
+    ScopeGapKind,
+    ScopeKind,
+    UncorrelatedReason,
+    diff_reviews,
+)
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
@@ -56,6 +66,7 @@ __all__ = [
     "ExportPage",
     "FileReviewRequest",
     "FileReviewResponse",
+    "FindingDelta",
     "KnowledgeResult",
     "PatchReviewRequest",
     "PatchReviewResponse",
@@ -65,6 +76,7 @@ __all__ = [
     "RepositoryGuidance",
     "RepositoryNames",
     "RerunResponse",
+    "ReviewDiff",
     "ReviewFilters",
     "ReviewOutcome",
     "ReviewPage",
@@ -74,10 +86,16 @@ __all__ = [
     "RunNowResponse",
     "ScanRequestBody",
     "ScanResponse",
+    "ScopeGap",
+    "ScopeGapKind",
+    "ScopeKind",
+    "ScopedFinding",
     "SecretStr",
     "StartSession",
     "StopResponse",
+    "UncorrelatedReason",
     "UploadedReport",
     "__version__",
+    "diff_reviews",
     "models",
 ]
