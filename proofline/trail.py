@@ -133,14 +133,17 @@ def _task(deploy: CommitDeploy) -> str | None:
     return deploy.deployment_task if isinstance(deploy.deployment_task, str) else None
 
 
-def commit_reviews(page: ReviewPage, commit_sha: str) -> list[ReviewSummary]:
-    # A review is evidence only for the head commit it is pinned to.
-    return [
-        summary
-        for summary in page.items
-        if isinstance(summary.head_commit_sha, str)
-        and summary.head_commit_sha.lower() == commit_sha
-    ]
+def commit_reviews(pages: Sequence[ReviewPage], commit_sha: str) -> list[ReviewSummary]:
+    # A review is evidence only for the head commit it is pinned to, and is read once.
+    found: dict[UUID, ReviewSummary] = {}
+    for page in pages:
+        for summary in page.items:
+            if (
+                isinstance(summary.head_commit_sha, str)
+                and summary.head_commit_sha.lower() == commit_sha
+            ):
+                found.setdefault(summary.id, summary)
+    return list(found.values())
 
 
 def commit_evidence(

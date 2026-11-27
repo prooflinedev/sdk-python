@@ -21,11 +21,13 @@ from proofline.trail import (
 
 from .fixtures import (
     DEPLOY_ENVIRONMENT,
+    DEPLOYMENT_REVIEW,
     FAILED_COMMIT,
     HEALTHY_COMMIT,
     MIDDLE_COMMITS,
     OTHER_DEPLOY_ENVIRONMENT,
     PRIVATE,
+    REVIEW,
     assessment,
     code_assessment,
     commit_page,
@@ -105,14 +107,38 @@ def test_commit_reviews_keep_only_reviews_pinned_to_the_commit() -> None:
     page = models.ReviewPage.from_dict(
         commit_page(
             {**summary(), "head_commit_sha": FAILED_COMMIT},
-            {**summary(), "head_commit_sha": FAILED_COMMIT.upper()},
+            {**summary(), "id": str(DEPLOYMENT_REVIEW), "head_commit_sha": FAILED_COMMIT.upper()},
             {**summary(), "head_commit_sha": HEALTHY_COMMIT},
             {**summary(), "head_commit_sha": None},
             summary(),
         )
     )
-    kept = commit_reviews(page, FAILED_COMMIT)
+    kept = commit_reviews([page], FAILED_COMMIT)
     assert [item.head_commit_sha for item in kept] == [FAILED_COMMIT, FAILED_COMMIT.upper()]
+
+
+def test_commit_reviews_read_each_review_once_across_pages() -> None:
+    deployment = {
+        **summary(),
+        "id": str(REVIEW),
+        "kind": "DEPLOYMENT",
+        "head_commit_sha": FAILED_COMMIT,
+    }
+    pull_request = {
+        **summary(),
+        "id": str(DEPLOYMENT_REVIEW),
+        "kind": "PR",
+        "head_commit_sha": FAILED_COMMIT,
+    }
+    pages = [
+        models.ReviewPage.from_dict(commit_page(deployment)),
+        models.ReviewPage.from_dict(commit_page(pull_request, deployment)),
+    ]
+    kept = commit_reviews(pages, FAILED_COMMIT)
+    assert [(item.id, item.kind) for item in kept] == [
+        (REVIEW, "DEPLOYMENT"),
+        (DEPLOYMENT_REVIEW, "PR"),
+    ]
 
 
 def test_commit_evidence_collects_environment_and_code_findings() -> None:

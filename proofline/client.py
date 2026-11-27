@@ -663,25 +663,28 @@ class ProoflineClient(Operations):
             evidence: list[CommitEvidence] = []
             for sha, deploys in walked:
                 reviews: list[CustomerReviewDetail] = []
-                try:
-                    page = self.list_reviews(organization_id, repository=repository_id, search=sha)
-                except ProoflineError as error:
-                    gaps.append(TrailGap(sha, "REVIEWS_UNAVAILABLE", error))
-                else:
+                pages: list[ReviewPage] = []
+                for kind in ("DEPLOYMENT", None):
+                    try:
+                        page = self.list_reviews(
+                            organization_id, repository=repository_id, search=sha, kind=kind
+                        )
+                    except ProoflineError as error:
+                        gaps.append(TrailGap(sha, "REVIEWS_UNAVAILABLE", error))
+                        continue
                     if page.truncated is True:
                         gaps.append(TrailGap(sha, "REVIEWS_TRUNCATED"))
-                    for summary in commit_reviews(page, sha):
-                        try:
-                            if summary.kind == "DEPLOYMENT":
-                                detail = self.get_deployment_review(
-                                    organization_id, summary.public_key
-                                )
-                            else:
-                                detail = self.get_review(organization_id, summary.id)
-                        except ProoflineError as error:
-                            gaps.append(TrailGap(sha, "REVIEW_UNAVAILABLE", error))
-                            continue
-                        reviews.append(detail)
+                    pages.append(page)
+                for summary in commit_reviews(pages, sha):
+                    try:
+                        if summary.kind == "DEPLOYMENT":
+                            detail = self.get_deployment_review(organization_id, summary.public_key)
+                        else:
+                            detail = self.get_review(organization_id, summary.id)
+                    except ProoflineError as error:
+                        gaps.append(TrailGap(sha, "REVIEW_UNAVAILABLE", error))
+                        continue
+                    reviews.append(detail)
                 evidence.append(commit_evidence(sha, deploys, reviews))
             return FailedDeployTrail(
                 commit_sha=commit_sha,
@@ -1148,27 +1151,30 @@ class AsyncProoflineClient(AsyncOperations):
             evidence: list[CommitEvidence] = []
             for sha, deploys in walked:
                 reviews: list[CustomerReviewDetail] = []
-                try:
-                    page = await self.list_reviews(
-                        organization_id, repository=repository_id, search=sha
-                    )
-                except ProoflineError as error:
-                    gaps.append(TrailGap(sha, "REVIEWS_UNAVAILABLE", error))
-                else:
+                pages: list[ReviewPage] = []
+                for kind in ("DEPLOYMENT", None):
+                    try:
+                        page = await self.list_reviews(
+                            organization_id, repository=repository_id, search=sha, kind=kind
+                        )
+                    except ProoflineError as error:
+                        gaps.append(TrailGap(sha, "REVIEWS_UNAVAILABLE", error))
+                        continue
                     if page.truncated is True:
                         gaps.append(TrailGap(sha, "REVIEWS_TRUNCATED"))
-                    for summary in commit_reviews(page, sha):
-                        try:
-                            if summary.kind == "DEPLOYMENT":
-                                detail = await self.get_deployment_review(
-                                    organization_id, summary.public_key
-                                )
-                            else:
-                                detail = await self.get_review(organization_id, summary.id)
-                        except ProoflineError as error:
-                            gaps.append(TrailGap(sha, "REVIEW_UNAVAILABLE", error))
-                            continue
-                        reviews.append(detail)
+                    pages.append(page)
+                for summary in commit_reviews(pages, sha):
+                    try:
+                        if summary.kind == "DEPLOYMENT":
+                            detail = await self.get_deployment_review(
+                                organization_id, summary.public_key
+                            )
+                        else:
+                            detail = await self.get_review(organization_id, summary.id)
+                    except ProoflineError as error:
+                        gaps.append(TrailGap(sha, "REVIEW_UNAVAILABLE", error))
+                        continue
+                    reviews.append(detail)
                 evidence.append(commit_evidence(sha, deploys, reviews))
             return FailedDeployTrail(
                 commit_sha=commit_sha,
