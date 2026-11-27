@@ -42,7 +42,16 @@ def main() -> None:
         raise SystemExit("ReviewFilters differs from the list_reviews query parameters.")
 
     for client in (ProoflineClient, AsyncProoflineClient):
-        helpers = {"close", "aclose", "iter_export_pages", "iter_reviews", "wait_for_review"}
+        helpers = {
+            "close",
+            "aclose",
+            "iter_export_pages",
+            "iter_pull_request_reviews",
+            "iter_reviews",
+            "list_all_pull_request_reviews",
+            "list_all_reviews",
+            "wait_for_review",
+        }
         exposed = {
             name
             for name in dir(client)

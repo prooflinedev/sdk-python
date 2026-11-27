@@ -76,6 +76,7 @@ from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
+from .pagination import PageResponse, async_collect_all, async_paginate, collect_all, paginate
 
 T = TypeVar("T")
 AgentSessionPrompt = AgentSessionPromptType0 | AgentSessionPromptType1
@@ -151,6 +152,26 @@ def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
         raise ValueError(
             "Pagination requires page_size 1..100, max_pages 1..1000, max_items 1..100000."
         )
+
+
+def _page_size_limit(page_size: int) -> None:
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
+        raise ValueError("Pagination requires page_size 1..100.")
+
+
+def _review_page_response(
+    page: ReviewPage, initial_cursor: str | None
+) -> PageResponse[ReviewSummary]:
+    if not isinstance(page.truncated, bool):
+        raise _transport.invalid_response()
+    if not page.truncated:
+        if isinstance(page.next_cursor, str) and page.next_cursor:
+            raise _transport.invalid_response()
+        return PageResponse(items=page.items, next_cursor=None)
+    cursor = page.next_cursor
+    if not isinstance(cursor, str) or not cursor or (initial_cursor and cursor == initial_cursor):
+        return PageResponse(items=page.items, next_cursor="")
+    return PageResponse(items=page.items, next_cursor=cursor)
 
 
 def _head_commit(value: str | None) -> None:
@@ -538,6 +559,131 @@ class ProoflineClient(Operations):
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
+
+    def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int | None = None,
+        max_items: int | None = None,
+        filters: ReviewFilters | None = None,
+    ) -> Iterator[ReviewSummary]:
+        """Lazily iterate over reviews for a pull request across cursor pages.
+
+        Pages are fetched strictly on demand; breaking out of the loop stops further
+        HTTP requests immediately. Setting ``max_pages`` or ``max_items`` stops
+        iteration gracefully once that bound is reached.
+
+        Example:
+            ```python
+            for review in client.iter_pull_request_reviews(
+                organization_id,
+                "owner/repo",
+                42,
+                page_size=50,
+                max_items=200,
+            ):
+                if review.status == "FAILED":
+                    break
+            ```
+        """
+        _page_size_limit(page_size)
+        base_params: ReviewFilters = {}
+        if filters:
+            base_params.update(filters)
+        base_params["limit"] = page_size
+        initial_cursor = base_params.get("cursor")
+
+        def fetch_page(cursor: str | None) -> PageResponse[ReviewSummary]:
+            params = base_params.copy()
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=params
+            )
+            return _review_page_response(page, initial_cursor)
+
+        return paginate(fetch_page, max_items=max_items, max_pages=max_pages)
+
+    def list_all_reviews(
+        self,
+        organization_id: UUID,
+        *,
+        page_size: int = 100,
+        max_pages: int | None = None,
+        max_items: int | None = None,
+        filters: ReviewFilters | None = None,
+    ) -> list[ReviewSummary]:
+        """Collect reviews for an organization across cursor pages into a list.
+
+        Setting ``max_pages`` or ``max_items`` stops collection gracefully once that
+        bound is reached.
+
+        Example:
+            ```python
+            reviews = client.list_all_reviews(
+                organization_id,
+                max_items=500,
+                filters={"status": "COMPLETED"},
+            )
+            ```
+        """
+        _page_size_limit(page_size)
+        base_params: ReviewFilters = {}
+        if filters:
+            base_params.update(filters)
+        base_params["limit"] = page_size
+        initial_cursor = base_params.get("cursor")
+
+        def fetch_page(cursor: str | None) -> PageResponse[ReviewSummary]:
+            params = base_params.copy()
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = self.list_reviews(organization_id, **params)
+            return _review_page_response(page, initial_cursor)
+
+        return collect_all(paginate(fetch_page, max_items=max_items, max_pages=max_pages))
+
+    def list_all_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int | None = None,
+        max_items: int | None = None,
+        filters: ReviewFilters | None = None,
+    ) -> list[ReviewSummary]:
+        """Collect reviews for a pull request across cursor pages into a list.
+
+        Setting ``max_pages`` or ``max_items`` stops collection gracefully once that
+        bound is reached.
+
+        Example:
+            ```python
+            reviews = client.list_all_pull_request_reviews(
+                organization_id,
+                "owner/repo",
+                42,
+                max_items=100,
+            )
+            ```
+        """
+        return collect_all(
+            self.iter_pull_request_reviews(
+                organization_id,
+                repository,
+                pull_request_number,
+                page_size=page_size,
+                max_pages=max_pages,
+                max_items=max_items,
+                filters=filters,
+            )
+        )
 
     def wait_for_review(
         self,
@@ -933,6 +1079,133 @@ class AsyncProoflineClient(AsyncOperations):
                 return
             params["cursor"] = cursor
         raise _pagination_limit()
+
+    def iter_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int | None = None,
+        max_items: int | None = None,
+        filters: ReviewFilters | None = None,
+    ) -> AsyncIterator[ReviewSummary]:
+        """Lazily iterate over reviews for a pull request across cursor pages.
+
+        Pages are awaited strictly on demand; breaking out of ``async for`` stops
+        further HTTP requests immediately. Setting ``max_pages`` or ``max_items``
+        stops iteration gracefully once that bound is reached.
+
+        Example:
+            ```python
+            async for review in client.iter_pull_request_reviews(
+                organization_id,
+                "owner/repo",
+                42,
+                page_size=50,
+                max_items=200,
+            ):
+                if review.status == "FAILED":
+                    break
+            ```
+        """
+        _page_size_limit(page_size)
+        base_params: ReviewFilters = {}
+        if filters:
+            base_params.update(filters)
+        base_params["limit"] = page_size
+        initial_cursor = base_params.get("cursor")
+
+        async def fetch_page(cursor: str | None) -> PageResponse[ReviewSummary]:
+            params = base_params.copy()
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = await self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=params
+            )
+            return _review_page_response(page, initial_cursor)
+
+        return async_paginate(fetch_page, max_items=max_items, max_pages=max_pages)
+
+    async def list_all_reviews(
+        self,
+        organization_id: UUID,
+        *,
+        page_size: int = 100,
+        max_pages: int | None = None,
+        max_items: int | None = None,
+        filters: ReviewFilters | None = None,
+    ) -> list[ReviewSummary]:
+        """Collect reviews for an organization across cursor pages into a list.
+
+        Setting ``max_pages`` or ``max_items`` stops collection gracefully once that
+        bound is reached.
+
+        Example:
+            ```python
+            reviews = await client.list_all_reviews(
+                organization_id,
+                max_items=500,
+                filters={"status": "COMPLETED"},
+            )
+            ```
+        """
+        _page_size_limit(page_size)
+        base_params: ReviewFilters = {}
+        if filters:
+            base_params.update(filters)
+        base_params["limit"] = page_size
+        initial_cursor = base_params.get("cursor")
+
+        async def fetch_page(cursor: str | None) -> PageResponse[ReviewSummary]:
+            params = base_params.copy()
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = await self.list_reviews(organization_id, **params)
+            return _review_page_response(page, initial_cursor)
+
+        return await async_collect_all(
+            async_paginate(fetch_page, max_items=max_items, max_pages=max_pages)
+        )
+
+    async def list_all_pull_request_reviews(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        page_size: int = 100,
+        max_pages: int | None = None,
+        max_items: int | None = None,
+        filters: ReviewFilters | None = None,
+    ) -> list[ReviewSummary]:
+        """Collect reviews for a pull request across cursor pages into a list.
+
+        Setting ``max_pages`` or ``max_items`` stops collection gracefully once that
+        bound is reached.
+
+        Example:
+            ```python
+            reviews = await client.list_all_pull_request_reviews(
+                organization_id,
+                "owner/repo",
+                42,
+                max_items=100,
+            )
+            ```
+        """
+        return await async_collect_all(
+            self.iter_pull_request_reviews(
+                organization_id,
+                repository,
+                pull_request_number,
+                page_size=page_size,
+                max_pages=max_pages,
+                max_items=max_items,
+                filters=filters,
+            )
+        )
 
     async def wait_for_review(
         self,

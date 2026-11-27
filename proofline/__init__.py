@@ -37,6 +37,13 @@ from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .pagination import (
+    PageResponse,
+    async_collect_all,
+    async_paginate,
+    collect_all,
+    paginate,
+)
 
 __all__ = [
     "AgentSession",
@@ -57,6 +64,7 @@ __all__ = [
     "FileReviewRequest",
     "FileReviewResponse",
     "KnowledgeResult",
+    "PageResponse",
     "PatchReviewRequest",
     "PatchReviewResponse",
     "PatchTriggerSource",
@@ -79,5 +87,9 @@ __all__ = [
     "StopResponse",
     "UploadedReport",
     "__version__",
+    "async_collect_all",
+    "async_paginate",
+    "collect_all",
     "models",
+    "paginate",
 ]
