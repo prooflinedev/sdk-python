@@ -2586,3 +2586,38 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+@MODES
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("page_size", 0),
+        ("page_size", 101),
+        ("max_pages", 0),
+        ("max_pages", 1001),
+        ("max_items", 0),
+        ("max_items", 100_001),
+    ],
+)
+async def test_reviews_iterator_validates_bound_range_before_requests(
+    mode: str, name: str, value: int
+) -> None:
+    with Server(lambda request, index: Reply(body=page())) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError, match="Pagination requires"):
+                await collect(client, **{name: value})
+        assert not server.requests
+
+
+@MODES
+@pytest.mark.parametrize("name", ["page_size", "max_pages", "max_items"])
+@pytest.mark.parametrize("value", [True, 1.5, "10"])
+async def test_reviews_iterator_rejects_non_integer_bounds_before_requests(
+    mode: str, name: str, value: Any
+) -> None:
+    with Server(lambda request, index: Reply(body=page())) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError, match="Pagination requires"):
+                await collect(client, **{name: value})
+        assert not server.requests

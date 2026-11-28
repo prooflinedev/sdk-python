@@ -146,8 +146,16 @@ def _review_url(base_url: str, organization_id: UUID, review_id: UUID) -> str:
     )
 
 
+def _in_range(value: object, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
 def _page_limits(page_size: int, max_pages: int, max_items: int) -> None:
-    if not 1 <= page_size <= 100 or not 1 <= max_pages <= 1_000 or not 1 <= max_items <= 100_000:
+    if not (
+        _in_range(page_size, 1, 100)
+        and _in_range(max_pages, 1, 1_000)
+        and _in_range(max_items, 1, 100_000)
+    ):
         raise ValueError(
             "Pagination requires page_size 1..100, max_pages 1..1000, max_items 1..100000."
         )
