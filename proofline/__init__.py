@@ -37,6 +37,7 @@ from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
+from .trail import CommitEvidence, FailedDeployTrail, TrailGap
 
 __all__ = [
     "AgentSession",
@@ -44,6 +45,7 @@ __all__ = [
     "AssessmentGap",
     "AsyncProoflineClient",
     "CheckGap",
+    "CommitEvidence",
     "CommitReviewRequest",
     "CommitReviewResponse",
     "CoverageUploadRequest",
@@ -54,6 +56,7 @@ __all__ = [
     "ExportDataset",
     "ExportFormat",
     "ExportPage",
+    "FailedDeployTrail",
     "FileReviewRequest",
     "FileReviewResponse",
     "KnowledgeResult",
@@ -77,6 +80,7 @@ __all__ = [
     "SecretStr",
     "StartSession",
     "StopResponse",
+    "TrailGap",
     "UploadedReport",
     "__version__",
     "models",

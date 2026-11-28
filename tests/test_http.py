@@ -14,7 +14,7 @@ import threading
 import time
 import tomllib
 import traceback
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,17 +65,27 @@ from proofline._transport import REFUSAL_SHAPES
 from .fixtures import (
     ASSESSMENT,
     CODE_ASSESSMENT,
+    DEPLOY_ENVIRONMENT,
+    DEPLOYMENT_REVIEW,
+    FAILED_COMMIT,
     FINDING,
+    HEALTHY_COMMIT,
+    MIDDLE_COMMITS,
     ORG,
+    OTHER_DEPLOY_ENVIRONMENT,
     PRIVATE,
     REPOSITORY,
     REVIEW,
     TOKEN,
     assessment,
     code_assessment,
+    commit_page,
+    deploy,
     finding,
     page,
     review,
+    summary,
+    verifications,
 )
 from .http_server import Reply, Request, Server
 
@@ -2586,3 +2596,451 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+def deploys_path(commit: str) -> str:
+    return (
+        f"/api/v1/organizations/{ORG}/repositories/{REPOSITORY}"
+        f"/commits/{commit}/deploy-verifications"
+    )
+
+
+def reviews_route(commit: str, kind: str | None = None) -> str:
+    route = f"reviews?search={commit}"
+    if kind is not None:
+        route += f"&kind={kind}"
+    return route
+
+
+def trail_peer(routes: dict[str, Reply]) -> Callable[[Request, int], Reply]:
+    # An unrouted request gets no reply, so it surfaces as a gap the test rejects.
+    def respond(request: Request, index: int) -> Reply:
+        assert request.method == "GET"
+        assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+        parts = urlsplit(request.path)
+        if parts.path == f"/api/v1/organizations/{ORG}/reviews":
+            query = parse_qs(parts.query)
+            assert query["repository"] == [str(REPOSITORY)]
+            assert set(query) <= {"repository", "search", "kind"}
+            kind = query["kind"][0] if "kind" in query else None
+            return routes[reviews_route(query["search"][0], kind)]
+        return routes[parts.path]
+
+    return respond
+
+
+def trail_requests(server: Server) -> list[str]:
+    paths: list[str] = []
+    for request in server.requests:
+        parts = urlsplit(request.path)
+        query = parse_qs(parts.query)
+        search = query.get("search")
+        if search:
+            kind = query["kind"][0] if "kind" in query else None
+            paths.append(reviews_route(search[0], kind))
+        else:
+            paths.append(parts.path)
+    return paths
+
+
+@MODES
+async def test_failed_deploy_trail_collects_failing_check_healthy_commit_and_range(
+    mode: str,
+) -> None:
+    middle, unrecorded = MIDDLE_COMMITS
+    pull_request = {**summary(), "head_commit_sha": FAILED_COMMIT}
+    deployment = {
+        **summary(),
+        "id": str(DEPLOYMENT_REVIEW),
+        "public_key": "rev_deployment",
+        "kind": "DEPLOYMENT",
+        "head_commit_sha": FAILED_COMMIT,
+    }
+    elsewhere = {**summary(), "head_commit_sha": "9" * 40}
+    routes = {
+        deploys_path(FAILED_COMMIT): Reply(
+            body=verifications(
+                deploy(
+                    "VERIFIED",
+                    regressed=True,
+                    results=("HEALTHY", "REGRESSED", "REGRESSED", "HEALTHY"),
+                )
+            )
+        ),
+        deploys_path(middle): Reply(
+            body=verifications(
+                deploy("VERIFIED", environment=OTHER_DEPLOY_ENVIRONMENT), deploy("INCOMPLETE")
+            )
+        ),
+        deploys_path(unrecorded): Reply(body=verifications()),
+        deploys_path(HEALTHY_COMMIT): Reply(
+            body=verifications(
+                deploy("VERIFIED_UNTIL_SUPERSEDED", task="deploy:web"),
+                deploy("VERIFIED_UNTIL_SUPERSEDED"),
+            )
+        ),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"): Reply(body=commit_page(deployment)),
+        reviews_route(FAILED_COMMIT): Reply(body=commit_page(pull_request, deployment, elsewhere)),
+        f"/api/v1/organizations/{ORG}/reviews/{REVIEW}": Reply(
+            body={
+                **review(),
+                "head_commit_sha": FAILED_COMMIT,
+                "assessments": [{**assessment(), "findings": [finding()]}],
+            }
+        ),
+        f"/api/v1/organizations/{ORG}/reviews/deployments/rev_deployment": Reply(
+            body={**review(), **deployment}
+        ),
+        reviews_route(middle, "DEPLOYMENT"): Reply(body=commit_page()),
+        reviews_route(middle): Reply(body=commit_page()),
+        reviews_route(unrecorded, "DEPLOYMENT"): Reply(body=commit_page()),
+        reviews_route(unrecorded): Reply(body=commit_page()),
+    }
+    with Server(trail_peer(routes)) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[middle, unrecorded, HEALTHY_COMMIT, "0" * 40],
+            )
+    assert trail.gaps == ()
+    assert trail.commit_sha == FAILED_COMMIT
+    assert trail.failed_deploy.regressed is True
+    assert trail.failing_check.checkpoint is models.DeployCheckpoint.MINUTES_20
+    assert trail.healthy_commit_sha == HEALTHY_COMMIT
+    assert trail.healthy_deploy.deployment_task == "deploy"
+    assert [item.commit_sha for item in trail.commit_range] == [FAILED_COMMIT, middle, unrecorded]
+    failed, between, empty = trail.commit_range
+    assert [item.kind for item in failed.reviews] == ["DEPLOYMENT", "PR"]
+    assert [item.claim for item in failed.findings] == [PRIVATE]
+    assert [item.state for item in between.deploys] == ["VERIFIED", "INCOMPLETE"]
+    assert (empty.deploys, empty.reviews, empty.findings) == ((), (), ())
+    assert trail_requests(server) == [
+        deploys_path(FAILED_COMMIT),
+        deploys_path(middle),
+        deploys_path(unrecorded),
+        deploys_path(HEALTHY_COMMIT),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"),
+        reviews_route(FAILED_COMMIT),
+        f"/api/v1/organizations/{ORG}/reviews/deployments/rev_deployment",
+        f"/api/v1/organizations/{ORG}/reviews/{REVIEW}",
+        reviews_route(middle, "DEPLOYMENT"),
+        reviews_route(middle),
+        reviews_route(unrecorded, "DEPLOYMENT"),
+        reviews_route(unrecorded),
+    ]
+    assert PRIVATE not in repr(trail)
+    assert TOKEN not in repr(trail)
+
+
+@MODES
+async def test_failed_deploy_trail_keeps_partial_evidence_when_reads_fail(mode: str) -> None:
+    middle, never_read = MIDDLE_COMMITS
+    refused = {
+        "type": "urn:proofline:forbidden",
+        "title": "forbidden",
+        "detail": f"{PRIVATE} {TOKEN}",
+    }
+    routes = {
+        deploys_path(FAILED_COMMIT): Reply(body=verifications(deploy("FAILED", results=()))),
+        deploys_path(middle): Reply(403, refused),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"): Reply(
+            body=commit_page({**summary(), "head_commit_sha": FAILED_COMMIT}, truncated=True)
+        ),
+        reviews_route(FAILED_COMMIT): Reply(
+            body=commit_page({**summary(), "head_commit_sha": FAILED_COMMIT}, truncated=True)
+        ),
+        f"/api/v1/organizations/{ORG}/reviews/{REVIEW}": Reply(
+            500, {"title": "internal error", "status": 500, "detail": None}
+        ),
+        reviews_route(middle, "DEPLOYMENT"): Reply(
+            404, {"title": "not found", "status": 404, "detail": "No such repository."}
+        ),
+        reviews_route(middle): Reply(
+            404, {"title": "not found", "status": 404, "detail": "No such repository."}
+        ),
+    }
+    with Server(trail_peer(routes)) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[middle, never_read, HEALTHY_COMMIT],
+            )
+    assert trail.failed_deploy.state == "FAILED"
+    assert trail.failing_check is None
+    assert (trail.healthy_commit_sha, trail.healthy_deploy) == (None, None)
+    assert [item.commit_sha for item in trail.commit_range] == [FAILED_COMMIT, middle]
+    assert [(gap.commit_sha, gap.reason) for gap in trail.gaps] == [
+        (FAILED_COMMIT, "NO_FAILING_CHECK"),
+        (middle, "DEPLOYS_UNAVAILABLE"),
+        (FAILED_COMMIT, "NO_HEALTHY_DEPLOY"),
+        (FAILED_COMMIT, "REVIEWS_TRUNCATED"),
+        (FAILED_COMMIT, "REVIEWS_TRUNCATED"),
+        (FAILED_COMMIT, "REVIEW_UNAVAILABLE"),
+        (middle, "REVIEWS_UNAVAILABLE"),
+        (middle, "REVIEWS_UNAVAILABLE"),
+    ]
+    assert [gap.error.status if gap.error is not None else None for gap in trail.gaps] == [
+        None,
+        403,
+        None,
+        None,
+        None,
+        500,
+        404,
+        404,
+    ]
+    assert trail.gaps[1].error.detail == f"{PRIVATE} [redacted]"
+    for gap in trail.gaps:
+        if gap.error is not None:
+            assert gap.error.__traceback__ is None
+            assert gap.error.__context__ is None
+    assert PRIVATE not in repr(trail)
+    assert TOKEN not in repr(trail)
+    assert trail_requests(server) == [
+        deploys_path(FAILED_COMMIT),
+        deploys_path(middle),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"),
+        reviews_route(FAILED_COMMIT),
+        f"/api/v1/organizations/{ORG}/reviews/{REVIEW}",
+        reviews_route(middle, "DEPLOYMENT"),
+        reviews_route(middle),
+    ]
+
+
+@MODES
+@pytest.mark.parametrize(
+    ("reply", "environment_id", "reason"),
+    [
+        (Reply(body=verifications()), None, "COMMIT_NOT_RECORDED"),
+        (Reply(body=verifications(deploy("VERIFIED"))), None, "NO_FAILED_DEPLOY"),
+        (
+            Reply(
+                body=verifications(
+                    deploy("FAILED", environment=OTHER_DEPLOY_ENVIRONMENT, results=())
+                )
+            ),
+            DEPLOY_ENVIRONMENT,
+            "NO_FAILED_DEPLOY",
+        ),
+        (
+            Reply(404, {"title": "not found", "status": 404, "detail": "No such repository."}),
+            None,
+            "DEPLOYS_UNAVAILABLE",
+        ),
+    ],
+)
+async def test_failed_deploy_trail_without_a_failed_deploy_reads_no_earlier_commit(
+    mode: str, reply: Reply, environment_id: UUID | None, reason: str
+) -> None:
+    routes = {
+        deploys_path(FAILED_COMMIT): reply,
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"): Reply(body=commit_page()),
+        reviews_route(FAILED_COMMIT): Reply(body=commit_page()),
+    }
+    with Server(trail_peer(routes)) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[HEALTHY_COMMIT],
+                environment_id=environment_id,
+            )
+    assert (trail.failed_deploy, trail.failing_check) == (None, None)
+    assert (trail.healthy_commit_sha, trail.healthy_deploy) == (None, None)
+    assert [item.commit_sha for item in trail.commit_range] == [FAILED_COMMIT]
+    assert [(gap.commit_sha, gap.reason) for gap in trail.gaps] == [(FAILED_COMMIT, reason)]
+    assert trail_requests(server) == [
+        deploys_path(FAILED_COMMIT),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"),
+        reviews_route(FAILED_COMMIT),
+    ]
+
+
+@MODES
+async def test_failed_deploy_trail_refuses_invalid_commits_before_any_request(mode: str) -> None:
+    with Server(lambda request, index: Reply(body=verifications())) as server:
+        async with session(mode, server.url) as client:
+            for commit, earlier, extra in [
+                (FAILED_COMMIT[:12], [], {}),
+                (FAILED_COMMIT.upper(), [], {}),
+                (FAILED_COMMIT, [FAILED_COMMIT], {}),
+                (FAILED_COMMIT, [], {"timeout": -1}),
+                (FAILED_COMMIT, [], {"timeout": float("nan")}),
+                (FAILED_COMMIT, [], {"timeout": float("inf")}),
+            ]:
+                with pytest.raises(ValueError):
+                    await call(
+                        client,
+                        "failed_deploy_trail",
+                        ORG,
+                        REPOSITORY,
+                        commit,
+                        earlier_commits=earlier,
+                        **extra,
+                    )
+    assert server.requests == []
+
+
+@MODES
+async def test_failed_deploy_trail_turns_a_malformed_body_into_a_gap(mode: str) -> None:
+    middle, later = MIDDLE_COMMITS
+    routes = {
+        deploys_path(FAILED_COMMIT): Reply(
+            body=verifications(
+                deploy(
+                    "FAILED",
+                    regressed=True,
+                    results=("REGRESSED", "HEALTHY", "HEALTHY", "HEALTHY"),
+                )
+            )
+        ),
+        deploys_path(middle): Reply(body=f"not json {PRIVATE}".encode()),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"): Reply(body=commit_page()),
+        reviews_route(FAILED_COMMIT): Reply(body=commit_page()),
+        reviews_route(middle, "DEPLOYMENT"): Reply(body=commit_page()),
+        reviews_route(middle): Reply(body=commit_page()),
+    }
+    with Server(trail_peer(routes)) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[middle, later],
+            )
+    assert [(gap.commit_sha, gap.reason) for gap in trail.gaps] == [
+        (middle, "DEPLOYS_UNAVAILABLE"),
+        (FAILED_COMMIT, "NO_HEALTHY_DEPLOY"),
+    ]
+    error = trail.gaps[0].error
+    assert error is not None
+    assert error.type == "urn:proofline:sdk:invalid-response"
+    assert error.__traceback__ is None
+    assert error.__context__ is None
+    assert PRIVATE not in error.detail
+    assert PRIVATE not in repr(trail)
+    assert later not in "".join(trail_requests(server))
+
+
+@MODES
+async def test_failed_deploy_trail_stops_reading_at_its_timeout(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    middle, later = MIDDLE_COMMITS
+
+    def respond(request: Request, index: int) -> Reply:
+        clock.now += 10
+        if urlsplit(request.path).path == deploys_path(FAILED_COMMIT):
+            return Reply(
+                body=verifications(
+                    deploy(
+                        "FAILED",
+                        regressed=True,
+                        results=("REGRESSED", "HEALTHY", "HEALTHY", "HEALTHY"),
+                    )
+                )
+            )
+        return Reply(body=verifications(deploy("VERIFIED")))
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[middle, later],
+                timeout=15,
+            )
+    assert trail.failing_check is not None
+    assert trail.failing_check.checkpoint is models.DeployCheckpoint.LANDING
+    assert [(gap.commit_sha, gap.reason) for gap in trail.gaps] == [
+        (middle, "DEPLOYS_UNAVAILABLE"),
+        (FAILED_COMMIT, "NO_HEALTHY_DEPLOY"),
+        (FAILED_COMMIT, "REVIEWS_UNAVAILABLE"),
+        (FAILED_COMMIT, "REVIEWS_UNAVAILABLE"),
+        (middle, "REVIEWS_UNAVAILABLE"),
+        (middle, "REVIEWS_UNAVAILABLE"),
+    ]
+    assert [gap.error.type if gap.error is not None else None for gap in trail.gaps] == [
+        "urn:proofline:sdk:timeout",
+        None,
+        "urn:proofline:sdk:timeout",
+        "urn:proofline:sdk:timeout",
+        "urn:proofline:sdk:timeout",
+        "urn:proofline:sdk:timeout",
+    ]
+    assert len(server.requests) == 2
+    assert later not in "".join(request.path for request in server.requests)
+
+
+@MODES
+async def test_failed_deploy_trail_reports_an_unreadable_deployment_review(mode: str) -> None:
+    deployment = {
+        **summary(),
+        "id": str(DEPLOYMENT_REVIEW),
+        "public_key": "rev_deployment",
+        "kind": "DEPLOYMENT",
+        "head_commit_sha": FAILED_COMMIT,
+    }
+    routes = {
+        deploys_path(FAILED_COMMIT): Reply(
+            body=verifications(
+                deploy(
+                    "FAILED",
+                    regressed=True,
+                    results=("REGRESSED", "HEALTHY", "HEALTHY", "HEALTHY"),
+                )
+            )
+        ),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"): Reply(body=commit_page(deployment)),
+        reviews_route(FAILED_COMMIT): Reply(body=commit_page()),
+        f"/api/v1/organizations/{ORG}/reviews/deployments/rev_deployment": Reply(
+            403,
+            {
+                "type": "urn:proofline:forbidden",
+                "title": "forbidden",
+                "detail": f"{PRIVATE} {TOKEN}",
+            },
+        ),
+    }
+    with Server(trail_peer(routes)) as server:
+        async with session(mode, server.url) as client:
+            trail = await call(
+                client,
+                "failed_deploy_trail",
+                ORG,
+                REPOSITORY,
+                FAILED_COMMIT,
+                earlier_commits=[],
+            )
+    assert [(gap.commit_sha, gap.reason) for gap in trail.gaps] == [
+        (FAILED_COMMIT, "NO_HEALTHY_DEPLOY"),
+        (FAILED_COMMIT, "REVIEW_UNAVAILABLE"),
+    ]
+    assert trail.gaps[1].error is not None
+    assert trail.gaps[1].error.status == 403
+    assert trail.gaps[1].error.__traceback__ is None
+    assert PRIVATE not in repr(trail)
+    assert TOKEN not in repr(trail)
+    assert trail_requests(server) == [
+        deploys_path(FAILED_COMMIT),
+        reviews_route(FAILED_COMMIT, "DEPLOYMENT"),
+        reviews_route(FAILED_COMMIT),
+        f"/api/v1/organizations/{ORG}/reviews/deployments/rev_deployment",
+    ]
