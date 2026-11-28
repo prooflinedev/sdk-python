@@ -14,7 +14,7 @@ import threading
 import time
 import tomllib
 import traceback
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1388,6 +1388,47 @@ async def test_head_commit_must_be_a_full_sha_before_any_request(mode: str) -> N
             result = await call(client, "wait_for_review", ORG, REVIEW, head_commit_sha="D" * 64)
             assert (result.status, result.gaps, result.reason) == ("COMPLETED", (), None)
         assert len(server.requests) == 1
+
+
+@MODES
+@pytest.mark.parametrize("value", ["", ".", ".."])
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("list_pull_request_reviews", lambda value: (ORG, value, 7)),
+        ("get_pull_request_review", lambda value: (ORG, value, 7, 1)),
+        ("get_deployment_review", lambda value: (ORG, value)),
+    ],
+)
+async def test_traversal_path_coordinates_are_refused_before_any_request(
+    mode: str, name: str, arguments: Callable[[str], tuple[Any, ...]], value: str
+) -> None:
+    # Percent-encoding leaves "." and ".." intact, so the URL would resolve them as dot segments
+    # and reach another endpoint, such as list_reviews for a deployment key of "..".
+    with Server(lambda request, index: Reply(body={})) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ValueError, match="traversal segment"):
+                await call(client, name, *arguments(value))
+        assert server.requests == []
+
+
+@MODES
+async def test_dotted_path_coordinates_stay_one_encoded_segment(mode: str) -> None:
+    detail = review_at("a" * 40)
+
+    def reply(request: Request, index: int) -> Reply:
+        return Reply(body=page() if request.path.endswith("/7") else detail)
+
+    with Server(reply) as server:
+        async with session(mode, server.url) as client:
+            await call(client, "list_pull_request_reviews", ORG, "owner/.github", 7)
+            await call(client, "get_pull_request_review", ORG, "owner/.github", 7, 1)
+            await call(client, "get_deployment_review", ORG, "...")
+        assert [request.path for request in server.requests] == [
+            f"/api/v1/organizations/{ORG}/reviews/pr/owner%2F.github/7",
+            f"/api/v1/organizations/{ORG}/reviews/pr/owner%2F.github/7/runs/1",
+            f"/api/v1/organizations/{ORG}/reviews/deployments/...",
+        ]
 
 
 @MODES

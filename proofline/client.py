@@ -163,6 +163,14 @@ def _head_commit(value: str | None) -> None:
         raise ValueError("The head commit must be a full 40 or 64 character hexadecimal SHA.")
 
 
+def _coordinate(value: str) -> str:
+    # Percent-encoding keeps "." and "..", which the URL then resolves as dot segments, so
+    # get_deployment_review(org, "..") would read list_reviews. The TypeScript SDK refuses them too.
+    if value in ("", ".", ".."):
+        raise ValueError("A path coordinate must be nonempty and not a traversal segment.")
+    return value
+
+
 def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
     if not isinstance(page.truncated, bool):
         raise _transport.invalid_response()
@@ -353,7 +361,7 @@ class ProoflineClient(Operations):
             list_pull_request_reviews.sync_detailed,
             ReviewPage,
             organization_id,
-            repository,
+            _coordinate(repository),
             pull_request_number,
             **params,
         )
@@ -365,14 +373,17 @@ class ProoflineClient(Operations):
             get_pull_request_review.sync_detailed,
             CustomerReviewDetail,
             organization_id,
-            repository,
+            _coordinate(repository),
             pull_request_number,
             run_number,
         )
 
     def get_deployment_review(self, organization_id: UUID, public_key: str) -> CustomerReviewDetail:
         return self._call(
-            get_deployment_review.sync_detailed, CustomerReviewDetail, organization_id, public_key
+            get_deployment_review.sync_detailed,
+            CustomerReviewDetail,
+            organization_id,
+            _coordinate(public_key),
         )
 
     def get_review(self, organization_id: UUID, review_id: UUID) -> CustomerReviewDetail:
@@ -727,7 +738,7 @@ class AsyncProoflineClient(AsyncOperations):
             list_pull_request_reviews.asyncio_detailed,
             ReviewPage,
             organization_id,
-            repository,
+            _coordinate(repository),
             pull_request_number,
             **params,
         )
@@ -739,7 +750,7 @@ class AsyncProoflineClient(AsyncOperations):
             get_pull_request_review.asyncio_detailed,
             CustomerReviewDetail,
             organization_id,
-            repository,
+            _coordinate(repository),
             pull_request_number,
             run_number,
         )
@@ -751,7 +762,7 @@ class AsyncProoflineClient(AsyncOperations):
             get_deployment_review.asyncio_detailed,
             CustomerReviewDetail,
             organization_id,
-            public_key,
+            _coordinate(public_key),
         )
 
     async def get_review(self, organization_id: UUID, review_id: UUID) -> CustomerReviewDetail:
