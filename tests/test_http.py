@@ -106,6 +106,61 @@ async def collect(client: Client, **kwargs: Any) -> list[Any]:
     return list(iterator)
 
 
+async def wait_for_all(aws: Any, **kwargs: Any) -> Any:
+    kwargs["return_when"] = asyncio.ALL_COMPLETED
+    return await asyncio.wait(aws, **kwargs)
+
+
+async def finish_sender(sender: asyncio.Task[Any], *, check: bool = True) -> None:
+    """Reap a signal task; only propagate its timeout when the probe succeeded."""
+    try:
+        if check:
+            await asyncio.wait_for(sender, 1.0)
+    finally:
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
+
+
+class ManualTimer:
+    """A call_at handle that fires only when the test explicitly says so."""
+
+    def __init__(
+        self, callback: Any, args: tuple[Any, ...], kwargs: dict[str, Any] | None = None
+    ) -> None:
+        self.callback = callback
+        self.args = args
+        self.kwargs = kwargs or {}
+        self.owner = getattr(callback, "__self__", None)
+        self.cancelled = False
+
+    def fire(self) -> None:
+        if not self.cancelled:
+            self.callback(*self.args, **self.kwargs)
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+def patch_helper_timer(monkeypatch: pytest.MonkeyPatch, loop: Any) -> list[ManualTimer]:
+    """Control the helper cutoff without capturing asyncio.wait_for's watchdog."""
+    timers: list[ManualTimer] = []
+    real_call_at = loop.call_at
+
+    def call_at(when: float, callback: Any, *args: Any, **kwargs: Any) -> Any:
+        if (
+            getattr(callback, "__name__", None) == "set_result"
+            and isinstance(getattr(callback, "__self__", None), asyncio.Future)
+            and args == (None,)
+        ):
+            timer = ManualTimer(callback, args, kwargs)
+            timers.append(timer)
+            return timer
+        return real_call_at(when, callback, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "call_at", call_at)
+    return timers
+
+
 class Clock:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.now = 100.0
@@ -117,6 +172,40 @@ class Clock:
         monkeypatch.setattr(_transport, "sleep", self.sleep)
         monkeypatch.setattr(client_module, "async_sleep", self.async_sleep)
         monkeypatch.setattr(_transport, "async_sleep", self.async_sleep)
+        monkeypatch.setattr(client_module, "_wait_for_event", self.wait_for_event)
+        monkeypatch.setattr(client_module, "_async_wait_for_event", self.async_wait_for_event)
+
+    def wait_for_event(self, event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        woke = bool(event.is_set())
+        if woke and deadline is not None:
+            deadline.record(self.now)
+        if woke:
+            return True
+        self.sleep(timeout)
+        if event.is_set() and deadline is not None and self.now < deadline.end:
+            deadline.record(self.now)
+            woke = True
+        return woke
+
+    async def async_wait_for_event(
+        self, event: Any, cutoff: float, signal: Any | None = None
+    ) -> bool:
+        arrived_at = self.now if event.is_set() else None
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if arrived_at is None and event.is_set():
+                arrived_at = self.now
+                break
+        if arrived_at is None:
+            self.sleep(max(0.0, cutoff - self.now))
+            await asyncio.sleep(0)
+            if event.is_set():
+                arrived_at = self.now
+        if arrived_at is not None and arrived_at < cutoff:
+            if signal is not None:
+                signal.record(arrived_at)
+            return True
+        return False
 
     def sleep(self, delay: float) -> None:
         self.delays.append(delay)
@@ -1397,6 +1486,16 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
     clock = Clock(monkeypatch)
     body = review("RUNNING")
     body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+
+    def unexpected_event_wait(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("event wait called without cancel_event")
+
+    def unexpected_async_event_wait(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("async event wait called without cancel_event")
+
+    monkeypatch.setattr(client_module, "_wait_for_event", unexpected_event_wait)
+    monkeypatch.setattr(client_module, "_async_wait_for_event", unexpected_async_event_wait)
+
     with Server(lambda request, index: Reply(body=body)) as server:
         async with session(mode, server.url) as client:
             result = await call(client, "wait_for_review", ORG, REVIEW, timeout=0)
@@ -1412,6 +1511,1703 @@ async def test_polling_backoff_and_timeout_keep_review_url_and_last_record(
             assert result.review_url == f"{server.url}/orgs/by-id/{ORG}/reviews/{REVIEW}"
         assert clock.delays == [5, 10, 20, 40, 60, 60, 60, 5]
         assert len(server.requests) == 8
+
+
+async def wait_until(predicate: Any) -> None:
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the wait helper did not reach the expected state")
+
+
+async def test_async_wait_for_event_latches_a_set_then_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+    event = asyncio.Event()
+    task = asyncio.create_task(real_wait(event, clock.now + 10.0))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        clock.now = 100.5
+        event.set()
+        event.clear()
+        assert await asyncio.wait_for(task, 1.0) is True
+        assert "set" not in vars(event)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_ignores_a_signal_after_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+    event = asyncio.Event()
+    cutoff = clock.now + 0.01
+    task = asyncio.create_task(real_wait(event, cutoff))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        cutoff_future = timers[0].owner
+        assert isinstance(cutoff_future, asyncio.Future)
+        assert cutoff_future not in event._waiters
+        clock.now = cutoff + 1.0
+        event.set()
+        timers[0].fire()
+        assert await asyncio.wait_for(task, 1.0) is False
+        assert event.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_latches_a_captured_setter_on_the_waiter_future(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+    event = asyncio.Event()
+    setter = event.set
+    task = asyncio.create_task(real_wait(event, clock.now + 10.0))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        clock.now = 100.5
+        setter()
+        assert await asyncio.wait_for(task, 1.0) is True
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_uses_a_base_waiter_for_an_inherited_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+
+    class InheritedEvent(asyncio.Event):
+        pass
+
+    event = InheritedEvent()
+    task = asyncio.create_task(real_wait(event, clock.now + 10.0))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        clock.now = 100.5
+        event.set()
+        assert await asyncio.wait_for(task, 1.0) is True
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_does_not_call_a_subclass_wait_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+
+    class CountingEvent(asyncio.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_calls = 0
+
+        async def wait(self) -> bool:
+            self.wait_calls += 1
+            raise AssertionError("the helper must not call an overriding wait()")
+
+    event = CountingEvent()
+    task = asyncio.create_task(real_wait(event, clock.now + 10.0))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        clock.now = 100.5
+        event.set()
+        assert await asyncio.wait_for(task, 1.0) is True
+        assert event.wait_calls == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_does_not_call_an_instance_wait_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+    event = asyncio.Event()
+    calls: list[int] = []
+
+    async def wait_override() -> bool:
+        calls.append(1)
+        raise AssertionError("the helper must not call an instance wait override")
+
+    event.wait = wait_override  # type: ignore[method-assign]
+    task = asyncio.create_task(real_wait(event, clock.now + 10.0))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        clock.now = 100.5
+        event.set()
+        assert await asyncio.wait_for(task, 1.0) is True
+        assert calls == []
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_overlapping_waits_keep_both_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+    event = asyncio.Event()
+    setter = event.set
+    first = asyncio.create_task(real_wait(event, clock.now + 0.01))
+    second = asyncio.create_task(real_wait(event, clock.now + 10.0))
+    try:
+        await wait_until(lambda: len(event._waiters) >= 2)
+        timers[0].fire()
+        assert await asyncio.wait_for(first, 1.0) is False
+        assert event.set == setter
+        assert "set" not in vars(event)
+        clock.now = 100.001
+        event.set()
+        assert await asyncio.wait_for(second, 1.0) is True
+        assert not event._waiters
+    finally:
+        first.cancel()
+        second.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_restores_the_waiter_without_touching_the_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+    event = asyncio.Event()
+    setter = event.set
+    task = asyncio.create_task(real_wait(event, clock.now + 0.01))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        future = next(iter(event._waiters))
+        timers[0].fire()
+        assert await asyncio.wait_for(task, 1.0) is False
+        assert event.set == setter
+        assert "set" not in vars(event)
+        assert future.cancelled()
+        assert not event._waiters
+        assert id(future) not in client_module._async_future_watches
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_cancels_timer_when_waiter_registration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    loop = asyncio.get_running_loop()
+    handles: list[asyncio.TimerHandle] = []
+    real_call_at = loop.call_at
+
+    def record_call_at(when: float, callback: Any, *args: Any) -> asyncio.TimerHandle:
+        handle = real_call_at(when, callback, *args)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(loop, "call_at", record_call_at)
+
+    def fail(*args: Any) -> Any:
+        raise RuntimeError("registration failed")
+
+    monkeypatch.setattr(client_module, "_watch_async_waiter", fail)
+    with pytest.raises(RuntimeError, match="registration failed"):
+        await real_wait(asyncio.Event(), loop.time() + 100.0)
+    assert handles
+    assert all(handle.cancelled() for handle in handles)
+
+
+async def test_async_wait_for_event_cancels_timer_when_future_hook_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    loop = asyncio.get_running_loop()
+    handles: list[asyncio.TimerHandle] = []
+    real_call_at = loop.call_at
+
+    def record_call_at(when: float, callback: Any, *args: Any) -> asyncio.TimerHandle:
+        handle = real_call_at(when, callback, *args)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(loop, "call_at", record_call_at)
+
+    def fail(*args: Any) -> None:
+        raise RuntimeError("future hook failed")
+
+    monkeypatch.setattr(client_module, "_watch_async_future", fail)
+    event = asyncio.Event()
+    with pytest.raises(RuntimeError, match="future hook failed"):
+        await real_wait(event, loop.time() + 100.0)
+    assert handles
+    assert all(handle.cancelled() for handle in handles)
+    assert not event._waiters
+    assert id(event) not in client_module._async_signal_watches
+
+
+async def test_async_future_watch_keeps_one_hook_for_overlapping_observers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event()
+    future = asyncio.get_running_loop().create_future()
+    original_set_result = future.set_result
+    first = client_module._SignalDeadline(clock.now + 0.01)
+    second = client_module._SignalDeadline(clock.now + 0.05)
+
+    client_module._watch_async_future(future, event, first)
+    client_module._watch_async_future(future, event, second)
+    try:
+        assert future.set_result is not original_set_result
+        assert client_module._unwatch_async_future(future, first) is False
+        assert future.set_result is not original_set_result
+
+        clock.now = 100.02
+        event.set()
+        future.set_result(True)
+        assert first.signalled_at is None
+        assert second.signalled_at == 100.02
+        assert client_module._unwatch_async_future(future, second) is True
+        assert future.set_result == original_set_result
+    finally:
+        client_module._unwatch_async_future(future, first)
+        client_module._unwatch_async_future(future, second)
+
+
+def test_cancellation_signal_reads_the_flag_before_the_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    deadline = client_module._SignalDeadline(101.0)
+
+    def is_set() -> bool:
+        # The flag becomes true only after the old pre-clock read would have
+        # sampled 100.5, so a late signal must not be stamped with that value.
+        clock.now = 101.5
+        return True
+
+    monkeypatch.setattr(event, "is_set", is_set)
+    assert client_module._cancellation_signal(event, deadline) is False
+    assert deadline.signalled_at is None
+
+
+def test_condition_hook_ignores_a_late_flag_after_the_setter_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class LateFlagEvent(threading.Event):
+        def set(self) -> None:
+            clock.now = 101.5
+            super().set()
+
+    event = LateFlagEvent()
+    deadline = client_module._SignalDeadline(101.0)
+    client_module._track_thread_signal(event, deadline)
+    try:
+        event.set()
+        assert event.is_set()
+        assert deadline.signalled_at is None
+    finally:
+        client_module._untrack_thread_signal(event, deadline)
+    assert "set" not in vars(event)
+
+
+async def test_async_wait_for_event_supports_a_read_only_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+
+    class ReadOnlySetEvent(asyncio.Event):
+        @property
+        def set(self) -> Any:
+            return asyncio.Event.set.__get__(self, asyncio.Event)
+
+    event = ReadOnlySetEvent()
+    task = asyncio.create_task(real_wait(event, clock.now + 10.0))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        clock.now = 100.5
+        event.set()
+        assert await asyncio.wait_for(task, 1.0) is True
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_wait_for_event_requires_notification_on_the_event() -> None:
+    class BackingOnlyEvent(asyncio.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backing = asyncio.Event()
+
+        def is_set(self) -> bool:
+            return self.backing.is_set()
+
+        def set(self) -> None:
+            self.backing.set()
+
+    event = BackingOnlyEvent()
+    task = asyncio.create_task(client_module._async_wait_for_event(event, time.monotonic() + 0.05))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        event.set()
+        assert await asyncio.wait_for(task, 1.0) is False
+        assert event.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_condition_observation_preserves_a_replacement_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+
+    def replacement() -> None:
+        return None
+
+    client_module._track_thread_signal(event, deadline)
+    try:
+        event.set = replacement  # type: ignore[method-assign]
+    finally:
+        client_module._untrack_thread_signal(event, deadline)
+    assert event.set is replacement
+
+
+async def test_async_wait_for_event_preserves_a_replacement_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._async_wait_for_event
+    clock = Clock(monkeypatch)
+    timers = patch_helper_timer(monkeypatch, asyncio.get_running_loop())
+    event = asyncio.Event()
+
+    def replacement() -> None:
+        return None
+
+    event.set = replacement  # type: ignore[method-assign]
+    task = asyncio.create_task(real_wait(event, clock.now + 0.01))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        timers[0].fire()
+        assert await asyncio.wait_for(task, 1.0) is False
+        assert event.set is replacement
+        assert not event._waiters
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+
+
+async def test_async_future_watch_preserves_a_replacement_set_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event()
+    future = asyncio.get_running_loop().create_future()
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+
+    def replacement(result: Any) -> None:
+        return None
+
+    client_module._watch_async_future(future, event, deadline)
+    try:
+        future.set_result = replacement  # type: ignore[method-assign]
+    finally:
+        client_module._unwatch_async_future(future, deadline)
+    assert future.set_result is replacement
+
+
+async def test_async_wait_for_event_unregisters_waiter_when_restore_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    timers = patch_helper_timer(monkeypatch, loop)
+    event = asyncio.Event()
+    real_restore = client_module._AsyncFutureWatch.restore
+    captured: list[Any] = []
+
+    def raise_on_restore(watch: Any) -> None:
+        captured.append(watch)
+        raise RuntimeError("restore failed")
+
+    monkeypatch.setattr(client_module._AsyncFutureWatch, "restore", raise_on_restore)
+    task = asyncio.create_task(client_module._async_wait_for_event(event, loop.time() + 100.0))
+    try:
+        await wait_until(lambda: bool(event._waiters))
+        future = next(iter(event._waiters))
+        timers[0].fire()
+        with pytest.raises(RuntimeError, match="restore failed"):
+            await asyncio.wait_for(task, 1.0)
+        assert not event._waiters
+        assert future.cancelled()
+        assert id(future) not in client_module._async_future_watches
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for timer in timers:
+            timer.cancel()
+        monkeypatch.setattr(client_module._AsyncFutureWatch, "restore", real_restore)
+        for watch in captured:
+            real_restore(watch)
+
+
+async def test_async_waiter_registration_failure_drops_the_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event()
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+    captured: list[asyncio.Future[Any]] = []
+
+    def fail(*args: Any) -> None:
+        captured.append(args[0])
+        raise RuntimeError("hook failed")
+
+    monkeypatch.setattr(client_module, "_watch_async_future", fail)
+    with pytest.raises(RuntimeError, match="hook failed"):
+        client_module._watch_async_waiter(event, deadline)
+    assert captured
+    assert captured[0].cancelled()
+    assert not event._waiters
+    assert id(captured[0]) not in client_module._async_future_watches
+    assert id(event) not in client_module._async_signal_watches
+
+
+def test_condition_tracker_validates_each_subscriber_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    condition = threading.Condition(threading.Lock())
+    first = threading.Event()
+    second = threading.Event()
+    first._cond = condition
+    second._cond = condition
+    first_deadline = client_module._SignalDeadline(clock.now + 10.0)
+    second_deadline = client_module._SignalDeadline(clock.now + 10.0)
+    client_module._track_thread_signal(first, first_deadline)
+    client_module._track_thread_signal(second, second_deadline)
+    try:
+        first.set()
+        assert first_deadline.signalled_at == clock.now
+        assert second_deadline.signalled_at is None
+
+        client_module._untrack_thread_signal(first, first_deadline)
+        tracker = client_module._notify_trackers.get(id(condition))
+        assert tracker is not None
+        assert len(tracker.subscribers) == 1
+
+        second.set()
+        assert second_deadline.signalled_at == clock.now
+    finally:
+        client_module._untrack_thread_signal(first, first_deadline)
+        client_module._untrack_thread_signal(second, second_deadline)
+
+
+def test_condition_tracker_preserves_a_replaced_notify_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    condition = threading.Condition(threading.Lock())
+    event = threading.Event()
+    event._cond = condition
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+
+    def replacement() -> None:
+        return None
+
+    client_module._track_thread_signal(event, deadline)
+    try:
+        condition.notify_all = replacement  # type: ignore[method-assign]
+    finally:
+        client_module._untrack_thread_signal(event, deadline)
+    assert condition.notify_all is replacement
+    assert "notify" not in vars(condition)
+
+
+def test_condition_tracker_stamps_one_notification_once_for_all_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    condition = threading.Condition(threading.Lock())
+    event = threading.Event()
+    event._cond = condition
+    first = client_module._SignalDeadline(101.0)
+    second = client_module._SignalDeadline(102.0)
+    client_module._track_thread_signal(event, first)
+    client_module._track_thread_signal(event, second)
+    readings = iter((100.5, 101.5))
+    monkeypatch.setattr(client_module, "monotonic", lambda: next(readings))
+    try:
+        event.set()
+        assert first.signalled_at == 100.5
+        assert second.signalled_at == 100.5
+    finally:
+        client_module._untrack_thread_signal(event, first)
+        client_module._untrack_thread_signal(event, second)
+
+
+def test_condition_tracker_rolls_back_both_hooks_when_setup_fails() -> None:
+    class FailNotifyCondition(threading.Condition):
+        def __init__(self, lock: Any) -> None:
+            self.fail_notify = True
+            super().__init__(lock)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name == "notify" and getattr(self, "fail_notify", False):
+                raise RuntimeError("notify failed")
+            super().__setattr__(name, value)
+
+    condition = FailNotifyCondition(threading.Lock())
+    event = threading.Event()
+    event._cond = condition
+    deadline = client_module._SignalDeadline(101.0)
+    with pytest.raises(RuntimeError, match="notify failed"):
+        client_module._track_thread_signal(event, deadline)
+    assert "notify_all" not in vars(condition)
+    assert "notify" not in vars(condition)
+    assert id(condition) not in client_module._notify_trackers
+
+
+def test_sync_deadline_lock_is_reentrant_for_signal_handlers() -> None:
+    # A nested notification that deadlocks must not leave the parent test
+    # holding the deadline lock during cleanup, so probe it in a subprocess.
+    code = """
+import sys
+import threading
+
+sys.path.insert(0, sys.argv[1])
+from proofline import client
+
+event = threading.Event()
+deadline = client._SignalDeadline(float("inf"))
+client._track_thread_signal(event, deadline)
+done = threading.Event()
+
+def handler():
+    with client._notify_lock:
+        event.set()
+        done.set()
+
+thread = threading.Thread(target=handler, daemon=True)
+thread.start()
+assert done.wait(1.0), "nested notification deadlocked on the deadline lock"
+assert deadline.signalled_at is not None
+thread.join(1.0)
+client._untrack_thread_signal(event, deadline)
+print("OK")
+"""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+
+
+def test_sync_set_publication_holds_the_deadline_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+    client_module._track_sync_cancel(event, deadline)
+    real_record = deadline.record
+    observed: list[bool] = []
+
+    def record(now: float) -> bool:
+        observed.append(bool(client_module._notify_lock._is_owned()))
+        return real_record(now)
+
+    monkeypatch.setattr(deadline, "record", record)
+    try:
+        event.set()
+        assert observed
+        assert all(observed)
+        assert deadline.signalled_at == clock.now
+    finally:
+        client_module._untrack_sync_cancel(event, deadline)
+
+
+async def test_async_wait_for_event_does_not_replace_the_event_setter() -> None:
+    event = asyncio.Event()
+    setter = event.set
+
+    assert await client_module._async_wait_for_event(event, time.monotonic() - 1.0) is False
+    assert event.set == setter
+    assert not event._waiters
+
+
+async def test_async_wait_for_event_propagates_external_cancellation() -> None:
+    event = asyncio.Event()
+    task = asyncio.create_task(client_module._async_wait_for_event(event, time.monotonic() + 10.0))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_sleep_with_cancel_returns_true_at_deadline_without_a_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    assert client_module._sleep_with_cancel(5, event, cutoff=clock.now) is True
+    assert clock.delays == []
+
+
+def test_sleep_with_cancel_ignores_a_signal_set_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    clock.now = 101.0
+    event.set()
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is True
+    assert clock.delays == []
+
+
+def test_sleep_with_cancel_latches_delivery_before_a_late_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        clock.now = 100.5
+        wait_event.set()
+        clock.now = 102.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert clock.delays == []
+
+
+def test_sleep_with_cancel_records_a_captured_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    setter = event.set
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        clock.now = 100.5
+        setter()
+        clock.now = 102.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert clock.delays == []
+
+
+def test_sleep_with_cancel_records_a_set_clear_before_wait_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    condition = event._cond
+    notify_all = condition.notify_all
+    setter = event.set
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        clock.now = 100.5
+        wait_event.set()
+        wait_event.clear()
+        clock.now = 102.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert event.set == setter
+    assert condition.notify_all == notify_all
+    assert clock.delays == []
+
+
+def test_sleep_with_cancel_latches_an_inherited_wait_set_clear_before_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class InheritedEvent(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            event = self
+
+            class RaceCondition(threading.Condition):
+                def notify_all(self, *args: Any, **kwargs: Any) -> None:
+                    event._flag = True
+                    try:
+                        super().notify_all(*args, **kwargs)
+                    finally:
+                        event._flag = False
+
+            self._cond = RaceCondition(threading.Lock())
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        clock.now = 100.5
+        wait_event.set()
+        clock.now = 102.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    event = InheritedEvent()
+    condition = event._cond
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert clock.delays == []
+    assert "notify_all" not in vars(condition)
+    assert "notify" not in vars(condition)
+
+
+def test_sleep_with_cancel_ignores_an_unrelated_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    event.other = threading.Condition()  # type: ignore[attr-defined]
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        other = getattr(wait_event, "other")
+        with other:
+            other.notify_all()
+        clock.now = 101.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is True
+    assert "notify_all" not in vars(event.other)  # type: ignore[attr-defined]
+
+
+def test_sleep_with_cancel_ignores_an_unrelated_own_condition_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        with wait_event._cond:
+            wait_event._cond.notify_all()
+        clock.now = 101.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is True
+    assert clock.delays == []
+
+
+def test_sleep_with_cancel_accepts_a_read_only_setter_through_its_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._wait_for_event
+    Clock(monkeypatch)
+    monkeypatch.setattr(client_module, "_wait_for_event", real_wait)
+
+    class ReadOnlySetEvent(threading.Event):
+        @property
+        def set(self) -> Any:
+            raise AttributeError("set is read-only")
+
+        def wait(self, timeout: float | None = None) -> bool:
+            return False
+
+    event = ReadOnlySetEvent()
+    condition = event._cond
+    notify_all = condition.notify_all
+    assert client_module._sleep_with_cancel(0, event) is True
+    assert condition.notify_all == notify_all
+    assert "set" not in vars(event)
+
+
+def test_sleep_with_cancel_tracks_a_backing_thread_event() -> None:
+    # A deadlocked notification must be terminable by the parent test.
+    code = """
+import sys
+import threading
+
+root = sys.argv[1]
+sys.path.insert(0, root)
+from tests import test_http as t
+
+class BackingEvent(threading.Event):
+    def __init__(self):
+        super().__init__()
+        self.backing = threading.Event()
+        self.is_set = threading.Event.is_set.__get__(self, threading.Event)
+
+    def set(self):
+        super().set()
+        self.backing.set()
+
+event = BackingEvent()
+ready = threading.Event()
+failures = []
+real_track = t.client_module._track_sync_cancel
+
+def track(event_arg, deadline):
+    real_track(event_arg, deadline)
+    ready.set()
+
+t.client_module._track_sync_cancel = track
+t.client_module.monotonic = lambda: now[0]
+now = [100.0]
+
+def signal():
+    if not ready.wait(2.0):
+        failures.append("the cancellation observers were never installed")
+        now[0] = 101.5
+        event.set()
+        return
+    now[0] = 100.5
+    event.set()
+    now[0] = 102.0
+
+thread = threading.Thread(target=signal, daemon=True)
+thread.start()
+result = t.client_module._sleep_with_cancel(5, event, cutoff=101.0)
+thread.join(2.0)
+assert not thread.is_alive()
+assert failures == []
+assert result is False
+assert "notify_all" not in vars(event.backing._cond)
+print("OK")
+"""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+
+
+def test_sleep_with_cancel_restores_inherited_condition_methods(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._wait_for_event
+    Clock(monkeypatch)
+    monkeypatch.setattr(client_module, "_wait_for_event", real_wait)
+
+    class ClassCondition(threading.Condition):
+        def notify_all(self, *args: Any, **kwargs: Any) -> None:
+            super().notify_all(*args, **kwargs)
+
+        def notify(self, *args: Any, **kwargs: Any) -> None:
+            super().notify(*args, **kwargs)
+
+    class InheritedEvent(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self._cond = ClassCondition(threading.Lock())
+
+    event = InheritedEvent()
+    condition = event._cond
+    assert client_module._sleep_with_cancel(0, event) is True
+    assert "notify_all" not in vars(condition)
+    assert "notify" not in vars(condition)
+    assert condition.notify_all.__func__ is ClassCondition.notify_all
+    assert condition.notify.__func__ is ClassCondition.notify
+
+
+def test_sleep_with_cancel_preserves_an_instance_condition_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._wait_for_event
+    Clock(monkeypatch)
+    monkeypatch.setattr(client_module, "_wait_for_event", real_wait)
+    event = threading.Event()
+    condition = event._cond
+
+    def notify_all() -> None:
+        return None
+
+    condition.notify_all = notify_all
+    assert client_module._sleep_with_cancel(0, event) is True
+    assert condition.notify_all is notify_all
+
+
+def test_sleep_with_cancel_ignores_a_nested_marker_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    event.marker = threading.Event()  # type: ignore[attr-defined]
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        marker = getattr(wait_event, "marker")
+        marker.set()
+        clock.now = 101.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is True
+    assert "notify_all" not in vars(event.marker._cond)  # type: ignore[attr-defined]
+
+
+def test_sleep_with_cancel_does_not_call_is_set_under_the_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._wait_for_event
+    clock = Clock(monkeypatch)
+    monkeypatch.setattr(client_module, "_wait_for_event", real_wait)
+
+    held = False
+
+    class ReentrantEvent(threading.Event):
+        def is_set(self) -> bool:
+            assert not held, "is_set called under the condition"
+            return bool(self._flag)
+
+    event = ReentrantEvent()
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        nonlocal held
+        with wait_event._cond:
+            held = True
+            try:
+                wait_event._cond.notify_all()
+            finally:
+                held = False
+        clock.now = 101.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is True
+
+
+def test_sleep_with_cancel_does_not_wrap_a_replaced_backing_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class SwappingEvent(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backing = threading.Event()
+
+        def is_set(self) -> bool:
+            return self.backing.is_set()
+
+        def set(self) -> None:
+            self.backing.set()
+
+    event = SwappingEvent()
+    original_condition = event.backing._cond
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        wait_event.backing = threading.Event()
+        wait_event.backing.set()
+        clock.now = 100.5
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert clock.delays == []
+    assert "notify_all" not in vars(original_condition)
+    assert "notify_all" not in vars(event.backing._cond)
+
+
+def test_sleep_with_cancel_observes_an_overridden_setter_with_inherited_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class DelegatingEvent(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backing = threading.Event()
+
+        def set(self) -> None:
+            super().set()
+            self.backing.set()
+
+    event = DelegatingEvent()
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        clock.now = 100.5
+        wait_event.set()
+        wait_event.backing.clear()
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert "set" not in vars(event)
+
+
+def test_sleep_with_cancel_supports_an_instance_wait_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_wait = client_module._wait_for_event
+    clock = Clock(monkeypatch)
+    monkeypatch.setattr(client_module, "_wait_for_event", real_wait)
+
+    class NeverWaitEvent(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            raise AssertionError("the SDK must not call the caller's wait() override")
+
+    event = NeverWaitEvent()
+    ready = threading.Event()
+    failures: list[str] = []
+    real_track = client_module._track_sync_cancel
+
+    def track(event_arg: Any, deadline: Any) -> None:
+        real_track(event_arg, deadline)
+        ready.set()
+
+    monkeypatch.setattr(client_module, "_track_sync_cancel", track)
+
+    def signal() -> None:
+        if not ready.wait(2.0):
+            failures.append("the cancellation observers were never installed")
+            clock.now = 101.5
+            event.set()
+            return
+        clock.now = 100.5
+        event.set()
+        clock.now = 102.0
+
+    thread = threading.Thread(target=signal, daemon=True)
+    thread.start()
+    try:
+        assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    finally:
+        thread.join(2.0)
+    assert not thread.is_alive()
+    assert failures == []
+    assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_review_cancel_event_stops_before_any_request(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    event.set()
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert server.requests == []
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
+    assert result.review is None
+    assert clock.delays == []
+
+
+def test_async_cancel_event_is_reusable_across_event_loops() -> None:
+    event = asyncio.Event()
+    failures: list[BaseException] = []
+
+    def run_once() -> None:
+        async def main() -> None:
+            task = asyncio.create_task(
+                client_module._async_wait_for_event(event, time.monotonic() + 10.0)
+            )
+            for _ in range(200):
+                if event._waiters:
+                    break
+                await asyncio.sleep(0)
+            else:
+                raise AssertionError("the waiter was not registered")
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            asyncio.run(main())
+        except BaseException as error:
+            failures.append(error)
+
+    run_once()
+    run_once()
+    assert failures == []
+    assert event._loop is None
+    assert not event._waiters
+
+
+async def test_async_wait_for_review_accepts_a_read_only_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Clock(monkeypatch)
+
+    class ReadOnlySetEvent(asyncio.Event):
+        @property
+        def set(self) -> Any:
+            return asyncio.Event.set.__get__(self, asyncio.Event)
+
+    event = ReadOnlySetEvent()
+    with Server(lambda request, index: Reply(body=review())) as server:
+        async with session("async", server.url) as client:
+            result = await client.wait_for_review(ORG, REVIEW, timeout=100, cancel_event=event)
+        assert len(server.requests) == 1
+    assert result.status == "COMPLETED"
+    assert "set" not in vars(event)
+
+
+def test_sync_wait_for_review_cancel_event_wakes_real_backoff_in_subprocess() -> None:
+    # A deadlocked synchronous worker must be terminable by the parent test.
+    code = """
+import sys
+import threading
+import time
+from pathlib import Path
+
+root = sys.argv[1]
+sys.path.insert(0, root)
+from tests import test_http as t
+
+body = t.review("RUNNING")
+body.update(assessment_count=0, assessments=[], code_assessment=t.code_assessment("RUNNING"))
+event = threading.Event()
+ready = threading.Event()
+real_track = t.client_module._track_sync_cancel
+
+
+class ReadyCondition(threading.Condition):
+    def wait(self, timeout=None):
+        # The caller holds the condition lock here, so the sender cannot set
+        # the event until this waiter is registered and the lock is released.
+        ready.set()
+        return super().wait(timeout)
+
+
+class ReadySignalEvent(threading.Event):
+    def __init__(self):
+        super().__init__()
+        self._cond = ReadyCondition(self._cond._lock)
+
+
+def track(event_arg, deadline):
+    real_track(event_arg, deadline)
+    deadline.signal_event = ReadySignalEvent()
+
+
+t.client_module._track_sync_cancel = track
+
+
+def set_later():
+    if not ready.wait(2.0):
+        event.set()
+        return
+    event.set()
+
+
+threading.Thread(target=set_later, daemon=True).start()
+started = time.monotonic()
+with t.Server(lambda request, index: t.Reply(body=body)) as server:
+    with t.ProoflineClient(t.SecretStr(t.TOKEN), base_url=server.url) as client:
+        result = client.wait_for_review(
+            t.ORG, t.REVIEW, timeout=5, cancel_event=event
+        )
+assert time.monotonic() - started < 2.0
+assert ready.is_set()
+assert len(server.requests) == 1
+assert result.status == "STOPPED"
+assert result.reason == "The wait was cancelled by the caller."
+assert result.review is not None
+assert result.review.id == t.REVIEW
+print("OK")
+"""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+
+
+def test_async_wait_for_review_cancel_event_wakes_real_backoff_in_subprocess() -> None:
+    # An event-loop lockup must be terminable by the parent test.
+    code = """
+import asyncio
+import sys
+import time
+
+root = sys.argv[1]
+sys.path.insert(0, root)
+from tests import test_http as t
+
+async def main():
+    body = t.review("RUNNING")
+    body.update(
+        assessment_count=0, assessments=[], code_assessment=t.code_assessment("RUNNING")
+    )
+    event = asyncio.Event()
+    ready = asyncio.Event()
+    real_wait = t.client_module._async_wait_for_event
+
+    async def async_wait(*args, **kwargs):
+        helper = asyncio.create_task(real_wait(*args, **kwargs))
+        try:
+            await t.wait_until(lambda: len(event._waiters) >= 2)
+            ready.set()
+            return await helper
+        finally:
+            helper.cancel()
+            await asyncio.gather(helper, return_exceptions=True)
+
+    t.client_module._async_wait_for_event = async_wait
+
+    async def set_later():
+        await asyncio.wait_for(ready.wait(), 2.0)
+        event.set()
+
+    setter = asyncio.create_task(set_later())
+    started = time.monotonic()
+    with t.Server(lambda request, index: t.Reply(body=body)) as server:
+        async with t.session("async", server.url) as client:
+            result = await t.call(
+                client, "wait_for_review", t.ORG, t.REVIEW, timeout=5, cancel_event=event
+            )
+    await t.finish_sender(setter)
+    assert time.monotonic() - started < 2.0
+    assert ready.is_set()
+    assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
+    assert result.review is not None
+    assert result.review.id == t.REVIEW
+
+asyncio.run(main())
+print("OK")
+"""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+
+
+@MODES
+async def test_wait_for_review_cancel_event_stops_after_the_read_that_saw_it(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    loop = asyncio.get_running_loop() if mode == "async" else None
+
+    def respond(request: Request, index: int) -> Reply:
+        if loop is None:
+            event.set()
+        else:
+            loop.call_soon_threadsafe(event.set)
+        return Reply(body=review("RUNNING"))
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.review.id == REVIEW
+    assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_review_cancellation_keeps_the_head_commit_gap(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    loop = asyncio.get_running_loop() if mode == "async" else None
+    body = review_at(OTHER_HEAD, "RUNNING")
+
+    def respond(request: Request, index: int) -> Reply:
+        if loop is None:
+            event.set()
+        else:
+            loop.call_soon_threadsafe(event.set)
+        return Reply(body=body)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=100,
+                head_commit_sha=HEAD,
+                cancel_event=event,
+            )
+        assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
+    assert result.review is not None
+    assert result.review.head_commit_sha.lower() == OTHER_HEAD.lower()
+    assert PINNED_ELSEWHERE in gap_facts(result)
+
+
+@MODES
+async def test_wait_for_review_cancelled_read_rejects_wrong_review_id(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    loop = asyncio.get_running_loop() if mode == "async" else None
+    body = review("RUNNING")
+    body["id"] = str(UUID(int=1))
+    body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+
+    def respond(request: Request, index: int) -> Reply:
+        if loop is None:
+            event.set()
+        else:
+            loop.call_soon_threadsafe(event.set)
+        return Reply(body=body)
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event)
+            assert raised.value.type == "urn:proofline:sdk:invalid-response"
+            assert "invalid identity" in raised.value.detail
+            assert event.is_set()
+            assert len(server.requests) == 1
+
+
+@MODES
+async def test_wait_for_review_invalid_response_after_deadline_keeps_timeout(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            calls = 0
+
+            def get_review(*args: Any, **kwargs: Any) -> Any:
+                nonlocal calls
+                calls += 1
+                clock.now += 101.0
+                raise _transport.invalid_response()
+
+            monkeypatch.setattr(client, "get_review", get_review)
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+            assert calls == 1
+    assert result.status == "TIMED_OUT"
+    assert result.review is None
+    assert not event.is_set()
+
+
+@MODES
+async def test_wait_for_review_late_cancellation_after_read_keeps_timeout(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            real_get_review = client.get_review
+
+            if mode == "sync":
+
+                def get_review(*args: Any, **kwargs: Any) -> Any:
+                    result = real_get_review(*args, **kwargs)
+                    clock.now += 101.0
+                    event.set()
+                    return result
+
+            else:
+
+                async def get_review(*args: Any, **kwargs: Any) -> Any:
+                    result = await real_get_review(*args, **kwargs)
+                    clock.now += 101.0
+                    event.set()
+                    return result
+
+            monkeypatch.setattr(client, "get_review", get_review)
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+    assert result.status == "TIMED_OUT"
+    assert result.review is not None
+    assert event.is_set()
+
+
+@MODES
+async def test_wait_for_review_cancel_event_during_erroring_read_keeps_last_record(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    body = review("RUNNING")
+    body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+    with Server(lambda request, index: Reply(body=body)) as server:
+        async with session(mode, server.url) as client:
+            real_get_review = client.get_review
+            calls = 0
+
+            def get_review(*args: Any, **kwargs: Any) -> Any:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    event.set()
+                    raise ProoflineError(503, "urn:proofline:sdk:test", "boom")
+                return real_get_review(*args, **kwargs)
+
+            monkeypatch.setattr(client, "get_review", get_review)
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
+    assert result.review is not None
+    assert result.review.id == REVIEW
+
+
+@MODES
+async def test_wait_for_review_cancel_before_next_poll_keeps_last_record(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+
+    if mode == "async":
+
+        async def async_wait_for_event(
+            wait_event: Any, cutoff: float, signal: Any | None = None
+        ) -> bool:
+            clock.sleep(max(0.0, cutoff - clock.now))
+            wait_event.set()
+            await asyncio.sleep(0)
+            return False
+
+        monkeypatch.setattr(client_module, "_async_wait_for_event", async_wait_for_event)
+    else:
+
+        def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+            clock.sleep(timeout)
+            wait_event.set()
+            return False
+
+        monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.review is not None
+    assert result.review.id == REVIEW
+    assert clock.delays == [5.0]
+
+
+@MODES
+async def test_wait_for_review_invalid_response_after_set_clear_still_raises(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            if mode == "sync":
+
+                def get_review(*args: Any, **kwargs: Any) -> Any:
+                    event.set()
+                    event.clear()
+                    raise _transport.invalid_response()
+
+            else:
+
+                async def get_review(*args: Any, **kwargs: Any) -> Any:
+                    event.set()
+                    event.clear()
+                    raise _transport.invalid_response()
+
+            monkeypatch.setattr(client, "get_review", get_review)
+            with pytest.raises(ProoflineError) as raised:
+                await call(client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event)
+            assert raised.value.type == "urn:proofline:sdk:invalid-response"
+            assert len(server.requests) == 0
+
+
+@MODES
+async def test_wait_for_review_records_cancellation_at_the_backoff_cutoff(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    body = review("RUNNING")
+    body.update(assessment_count=0, assessments=[], code_assessment=code_assessment("RUNNING"))
+
+    if mode == "sync":
+        calls = 0
+
+        def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+            nonlocal calls
+            calls += 1
+            assert calls == 1, "the backoff should not poll again after the signal"
+            clock.now = 105.0
+            wait_event.set()
+            wait_event.clear()
+            return False
+
+        monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    else:
+        calls = 0
+
+        async def async_wait_for_event(
+            wait_event: Any, cutoff: float, signal: Any | None = None
+        ) -> bool:
+            nonlocal calls
+            calls += 1
+            assert calls == 1, "the backoff should not poll again after the signal"
+            clock.now = 105.0
+            wait_event.set()
+            wait_event.clear()
+            return False
+
+        monkeypatch.setattr(client_module, "_async_wait_for_event", async_wait_for_event)
+
+    with Server(lambda request, index: Reply(body=body)) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+
+    assert len(server.requests) == 1
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
+    assert result.review is not None
+    assert result.review.id == REVIEW
+
+
+@MODES
+async def test_wait_for_review_resets_deadline_when_observer_cleanup_raises(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    real_untrack = client_module._untrack_sync_cancel
+    real_restore = client_module._AsyncFutureWatch.restore
+    sync_args: list[tuple[Any, ...]] = []
+    async_watches: list[Any] = []
+
+    if mode == "sync":
+
+        def untrack(*args: Any) -> None:
+            sync_args.append(args)
+            raise RuntimeError("cleanup failed")
+
+        monkeypatch.setattr(client_module, "_untrack_sync_cancel", untrack)
+
+        def get_review(*args: Any, **kwargs: Any) -> Any:
+            event.set()
+            raise ProoflineError(503, "urn:proofline:sdk:test", "boom")
+
+    else:
+
+        def raise_restore(watch: Any) -> None:
+            async_watches.append(watch)
+            raise RuntimeError("cleanup failed")
+
+        monkeypatch.setattr(client_module._AsyncFutureWatch, "restore", raise_restore)
+
+        async def get_review(*args: Any, **kwargs: Any) -> Any:
+            event.set()
+            raise ProoflineError(503, "urn:proofline:sdk:test", "boom")
+
+    try:
+        with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+            async with session(mode, server.url) as client:
+                monkeypatch.setattr(client, "get_review", get_review)
+                with pytest.raises(RuntimeError, match="cleanup failed"):
+                    await call(
+                        client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+                    )
+                assert _transport.DEADLINE.get() is None
+                if mode == "async":
+                    assert async_watches
+                    assert all(
+                        id(w.future) not in client_module._async_future_watches
+                        for w in async_watches
+                    )
+                    assert not event._waiters
+        assert server.requests == []
+    finally:
+        for args in sync_args:
+            real_untrack(*args)
+        monkeypatch.setattr(client_module._AsyncFutureWatch, "restore", real_restore)
+        for watch in async_watches:
+            real_restore(watch)
+
+
+@MODES
+async def test_wait_for_review_rejects_an_unknown_cancel_event_type(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Clock(monkeypatch)
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            with pytest.raises(TypeError, match="cancel_event"):
+                await call(
+                    client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=object()
+                )
+        assert server.requests == []
 
 
 @MODES
@@ -2586,3 +4382,674 @@ async def test_export_ndjson_preserves_unicode_line_separators(mode: str) -> Non
                 assert len(exported.rows) == 1
                 assert exported.rows[0]["claim"] == row["claim"]
                 assert exported.next_cursor == "next-page"
+
+
+def test_sync_wait_for_review_accepts_a_read_only_standard_setter() -> None:
+    class ReadOnlySetEvent(threading.Event):
+        @property
+        def set(self) -> Any:
+            return threading.Event.set.__get__(self, threading.Event)
+
+    event = ReadOnlySetEvent()
+    with Server(lambda request, index: Reply(body=review())) as server:
+        with ProoflineClient(SecretStr(TOKEN), base_url=server.url) as client:
+            result = client.wait_for_review(ORG, REVIEW, timeout=100, cancel_event=event)
+        assert len(server.requests) == 1
+    assert result.status == "COMPLETED"
+    assert "set" not in vars(event)
+
+
+async def test_async_waiter_registration_rejects_a_foreign_loop_waiter() -> None:
+    class ForeignWaiter:
+        _loop = object()
+
+    event = asyncio.Event()
+    foreign = ForeignWaiter()
+    event._waiters.append(foreign)  # type: ignore[arg-type]
+    deadline = client_module._SignalDeadline(time.monotonic() + 10.0)
+    try:
+        with pytest.raises(RuntimeError, match="different event loop"):
+            client_module._watch_async_waiter(event, deadline)
+        assert list(event._waiters) == [foreign]
+        assert id(event) not in client_module._async_signal_watches
+    finally:
+        event._waiters.remove(foreign)  # type: ignore[arg-type]
+
+
+def test_condition_tracker_registration_waits_for_a_restoring_teardown() -> None:
+    # A stuck restore must not keep the parent pytest process alive.
+    code = """
+import sys
+import threading
+
+sys.path.insert(0, sys.argv[1])
+from proofline import client
+
+condition = threading.Condition()
+event = threading.Event()
+event._cond = condition
+original_notify_all = condition.notify_all
+original_notify = condition.notify
+first = client._SignalDeadline(101.0)
+second = client._SignalDeadline(101.0)
+client._track_thread_signal(event, first)
+tracker = client._notify_trackers[id(condition)]
+real_restore = tracker.restore
+ready_to_restore = threading.Event()
+allow_restore = threading.Event()
+
+def slow_restore():
+    ready_to_restore.set()
+    if allow_restore.wait(5.0):
+        real_restore()
+
+tracker.restore = slow_restore
+registered = threading.Event()
+
+def teardown():
+    client._untrack_thread_signal(event, first)
+
+def register():
+    client._track_thread_signal(event, second)
+    registered.set()
+
+leaver = threading.Thread(target=teardown, daemon=True)
+joiner = threading.Thread(target=register, daemon=True)
+leaver.start()
+assert ready_to_restore.wait(2.0), "the old wrapper was never retired"
+joiner.start()
+assert not registered.wait(0.05), "registration saw the outgoing wrapper"
+allow_restore.set()
+assert registered.wait(2.0), "registration did not follow restoration"
+leaver.join(2.0)
+joiner.join(2.0)
+assert not leaver.is_alive()
+assert not joiner.is_alive()
+assert id(condition) in client._notify_trackers
+client._untrack_thread_signal(event, second)
+assert condition.notify_all == original_notify_all
+assert condition.notify == original_notify
+assert id(condition) not in client._notify_trackers
+print("OK")
+"""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+
+
+def test_async_future_registration_waits_for_a_restoring_teardown() -> None:
+    code = """
+import asyncio
+import sys
+import threading
+
+sys.path.insert(0, sys.argv[1])
+from proofline import client
+
+ready_to_restore = threading.Event()
+allow_restore = threading.Event()
+
+
+async def main():
+    event = asyncio.Event()
+    future = asyncio.get_running_loop().create_future()
+    first = client._SignalDeadline(101.0)
+    second = client._SignalDeadline(101.0)
+    client._watch_async_future(future, event, first)
+    watch = client._async_future_watches[id(future)]
+    real_restore = watch.restore
+
+    def slow_restore():
+        ready_to_restore.set()
+        if allow_restore.wait(5.0):
+            real_restore()
+
+    watch.restore = slow_restore
+    teardown = asyncio.create_task(
+        asyncio.to_thread(client._unwatch_async_future, future, first)
+    )
+    joiner = None
+    try:
+        assert await asyncio.to_thread(ready_to_restore.wait, 5.0)
+        registered = threading.Event()
+
+        def register():
+            client._watch_async_future(future, event, second)
+            registered.set()
+
+        joiner = asyncio.create_task(asyncio.to_thread(register))
+        await asyncio.sleep(0.05)
+        assert not registered.is_set(), "registration saw the outgoing future hook"
+        allow_restore.set()
+        await asyncio.wait_for(teardown, 2.0)
+        assert await asyncio.to_thread(registered.wait, 2.0)
+        assert await asyncio.wait_for(joiner, 2.0) is None
+        assert client._unwatch_async_future(future, second) is True
+    finally:
+        allow_restore.set()
+        for task in (teardown, joiner):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (teardown, joiner) if task is not None),
+            return_exceptions=True,
+        )
+        try:
+            real_restore()
+        except Exception:
+            pass
+    assert "set_result" not in getattr(future, "__dict__", {})
+
+
+asyncio.run(main())
+print("OK")
+"""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+
+
+def test_condition_tracker_rolls_back_a_failing_first_assignment() -> None:
+    class FailNotifyAllCondition(threading.Condition):
+        def __init__(self, lock: Any) -> None:
+            self.fail_assign = True
+            super().__init__(lock)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name == "notify_all" and getattr(self, "fail_assign", False):
+                raise RuntimeError("notify_all assignment failed")
+            super().__setattr__(name, value)
+
+    condition = FailNotifyAllCondition(threading.Lock())
+    event = threading.Event()
+    event._cond = condition
+    deadline = client_module._SignalDeadline(101.0)
+    with pytest.raises(RuntimeError, match="notify_all assignment failed"):
+        client_module._track_thread_signal(event, deadline)
+    assert "notify_all" not in vars(condition)
+    assert "notify" not in vars(condition)
+    assert id(condition) not in client_module._notify_trackers
+
+
+async def test_async_future_watch_stamps_one_notification_for_all_observers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event()
+    future = asyncio.get_running_loop().create_future()
+    first = client_module._SignalDeadline(clock.now + 0.1)
+    second = client_module._SignalDeadline(clock.now + 0.2)
+    client_module._watch_async_future(future, event, first)
+    client_module._watch_async_future(future, event, second)
+    try:
+        clock.now = 100.02
+        event.set()
+        future.set_result(True)
+        assert first.signalled_at == second.signalled_at == 100.02
+    finally:
+        client_module._unwatch_async_future(future, first)
+        client_module._unwatch_async_future(future, second)
+
+
+def test_condition_tracker_includes_a_subscriber_registered_during_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    early = client_module._SignalDeadline(clock.now + 10.0)
+    late = client_module._SignalDeadline(clock.now + 10.0)
+
+    class InterleavingEvent(threading.Event):
+        def set(self) -> None:
+            client_module._track_thread_signal(self, late)
+            super().set()
+            self.clear()
+
+    event = InterleavingEvent()
+    client_module._track_thread_signal(event, early)
+    try:
+        event.set()
+        assert early.signalled_at == clock.now
+        assert late.signalled_at == clock.now
+    finally:
+        client_module._untrack_thread_signal(event, early)
+        client_module._untrack_thread_signal(event, late)
+    assert "set" not in vars(event)
+
+
+def test_condition_tracker_samples_time_before_the_publication_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    condition = threading.Condition(threading.Lock())
+    event = threading.Event()
+    event._cond = condition
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+    client_module._track_thread_signal(event, deadline)
+
+    class AdvancingLock:
+        def __enter__(self) -> Any:
+            clock.now = 101.5
+            return self
+
+        def __exit__(self, *args: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(client_module, "_notify_lock", AdvancingLock())
+    try:
+        event.set()
+        assert deadline.signalled_at == 100.0
+    finally:
+        client_module._untrack_thread_signal(event, deadline)
+
+
+@MODES
+async def test_wait_for_review_reuses_the_read_latch_for_backoff(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    pulses = 0
+    held: list[Any] = []
+    real_signal = client_module._cancellation_signal
+
+    def signal(event_arg: Any, deadline: Any) -> bool:
+        nonlocal pulses
+        result = real_signal(event_arg, deadline)
+        pulses += 1
+        # This is the post-read check; the pulse must reach the backoff latch.
+        if pulses == (3 if mode == "async" else 2):
+            event.set()
+            event.clear()
+        return result
+
+    monkeypatch.setattr(client_module, "_cancellation_signal", signal)
+
+    def checked(delay: float, event_arg: Any, cutoff: Any = None, latched: Any = None) -> bool:
+        held.append(latched)
+        assert latched is not None
+        assert real_signal(event_arg, latched) is True
+        return False
+
+    async def observed_async(
+        delay: float, event_arg: Any, cutoff: Any = None, latched: Any = None
+    ) -> bool:
+        return checked(delay, event_arg, cutoff, latched)
+
+    if mode == "async":
+        monkeypatch.setattr(client_module, "_async_sleep_with_cancel", observed_async)
+    else:
+        monkeypatch.setattr(client_module, "_sleep_with_cancel", checked)
+
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=100, cancel_event=event
+            )
+        assert len(server.requests) == 1
+    assert pulses == (3 if mode == "async" else 2)
+    assert len(held) == 1
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
+    assert result.review is not None
+    assert result.review.id == REVIEW
+    assert clock.delays == []
+
+
+def test_condition_tracker_stamps_a_standard_event_once_for_all_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readings = iter((100.5, 101.5))
+    monkeypatch.setattr(client_module, "monotonic", lambda: next(readings))
+    event = threading.Event()
+    first = client_module._SignalDeadline(101.0)
+    second = client_module._SignalDeadline(102.0)
+    client_module._track_thread_signal(event, first)
+    client_module._track_thread_signal(event, second)
+    try:
+        event.set()
+        assert first.signalled_at == second.signalled_at == 100.5
+    finally:
+        client_module._untrack_thread_signal(event, first)
+        client_module._untrack_thread_signal(event, second)
+
+
+def test_sleep_with_cancel_does_not_backdate_a_late_flag_from_an_unverified_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class GatedEvent(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.hinted = threading.Event()
+            self.revealed = threading.Event()
+
+        def is_set(self) -> bool:
+            return self.revealed.is_set()
+
+        def set(self) -> None:
+            self.revealed.set()
+            self.hinted.set()
+
+    event = GatedEvent()
+    ready = threading.Event()
+
+    def track(event_arg: Any, deadline: Any) -> None:
+        client_module._track_thread_signal(event_arg, deadline)
+        ready.set()
+
+    monkeypatch.setattr(client_module, "_track_sync_cancel", track)
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        assert ready.wait(2.0), "the cancellation observers were never installed"
+        clock.now = 100.5
+        wait_event.hinted.set()
+        assert wait_event.revealed.wait(2.0), "the late signal never arrived"
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+
+    def signal() -> None:
+        assert ready.wait(2.0)
+        while not event.hinted.wait(0.001):
+            pass
+        clock.now = 101.5
+        event.revealed.set()
+
+    thread = threading.Thread(target=signal, daemon=True)
+    thread.start()
+    try:
+        assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is True
+    finally:
+        thread.join(2.0)
+    assert not thread.is_alive()
+
+
+def test_async_waiter_registration_is_atomic_across_event_loops() -> None:
+    # Competing loops must not leave half-registered waiters behind on failure.
+    code = """
+import asyncio
+import sys
+import threading
+
+sys.path.insert(0, sys.argv[1])
+from proofline import client
+
+event = asyncio.Event()
+results = []
+attempted = threading.Event()
+release = threading.Event()
+
+def run():
+    async def main():
+        deadline = client._SignalDeadline(__import__("time").monotonic() + 10.0)
+        try:
+            waiter = client._watch_async_waiter(event, deadline)
+            results.append("registered")
+            assert attempted.wait(5.0)
+            assert release.wait(5.0)
+            client._unwatch_async_waiter(waiter, deadline)
+        except RuntimeError:
+            results.append("rejected")
+        finally:
+            attempted.set()
+            release.set()
+    asyncio.run(main())
+
+threads = [threading.Thread(target=run, daemon=True) for _ in range(2)]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(5.0)
+assert not any(thread.is_alive() for thread in threads)
+assert sorted(results) == ["registered", "rejected"]
+assert not event._waiters
+assert id(event) not in client._async_signal_watches
+print("OK")
+"""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+
+
+async def test_async_wait_for_review_rejects_a_set_foreign_loop_event_before_a_request() -> None:
+    class BoundEvent(asyncio.Event):
+        _loop = object()
+
+    event = BoundEvent()
+    event.set()
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session("async", server.url) as client:
+            with pytest.raises(RuntimeError, match="different event loop"):
+                await client.wait_for_review(ORG, REVIEW, timeout=100, cancel_event=event)
+        assert server.requests == []
+
+
+def test_condition_tracker_drains_under_the_deadline_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Clock(monkeypatch)
+    event = threading.Event()
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+    client_module._track_thread_signal(event, deadline)
+
+    ownership: list[bool] = []
+
+    class CheckPublicationLock:
+        def __enter__(self) -> Any:
+            ownership.append(bool(client_module._notify_lock._is_owned()))
+            return self
+
+        def __exit__(self, *args: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(client_module, "_publication_lock", CheckPublicationLock())
+    try:
+        event.set()
+        assert True in ownership
+        assert deadline.signalled_at == clock.now
+    finally:
+        client_module._untrack_thread_signal(event, deadline)
+
+
+def test_condition_tracker_restores_both_hooks_after_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = threading.Event()
+    condition = event._cond
+    original_notify = condition.notify
+    deadline = client_module._SignalDeadline(time.monotonic() + 10.0)
+    client_module._track_thread_signal(event, deadline)
+    tracker = client_module._notify_trackers[id(condition)]
+    saved = tracker.saved_notify_all
+    installed = tracker.installed_notify_all
+    had_instance = tracker.had_notify_all
+    real_restore = client_module._restore_method
+
+    def restore_method(target: Any, name: str, had: bool, saved_value: Any, wrapper: Any) -> None:
+        if name == "notify_all":
+            raise RuntimeError("notify_all restore failed")
+        real_restore(target, name, had, saved_value, wrapper)
+
+    monkeypatch.setattr(client_module, "_restore_method", restore_method)
+    with pytest.raises(RuntimeError, match="notify_all restore failed"):
+        client_module._untrack_thread_signal(event, deadline)
+    assert condition.notify == original_notify
+    assert "notify_all" in vars(condition)
+    real_restore(condition, "notify_all", had_instance, saved, installed)
+    assert "notify_all" not in vars(condition)
+
+
+async def test_async_event_set_publishes_once_for_all_watched_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event()
+    signal = client_module._AsyncSignalWatch(event)
+    client_module._async_signal_watches[id(event)] = signal
+    loop = asyncio.get_running_loop()
+    futures = [loop.create_future() for _ in range(3)]
+    deadlines = [client_module._SignalDeadline(clock.now + 10.0) for _ in futures]
+    calls: list[tuple[tuple[Any, ...], ...]] = []
+    real_publish = client_module._publish_signals
+
+    def counted(items: tuple[tuple[Any, ...], ...]) -> None:
+        calls.append(items)
+        real_publish(items)
+
+    monkeypatch.setattr(client_module, "_publish_signals", counted)
+    for future, deadline in zip(futures, deadlines):
+        client_module._watch_async_future(future, event, deadline, signal)
+    event._waiters.extend(futures)
+    try:
+        clock.now = 100.5
+        event.set()
+        assert len(calls) == 1
+        assert all(deadline.signalled_at == 100.5 for deadline in deadlines)
+        assert all(future.done() for future in futures)
+    finally:
+        for future in futures:
+            try:
+                event._waiters.remove(future)
+            except ValueError:
+                pass
+        for deadline in deadlines:
+            client_module._unwatch_async_future(future, deadline)
+        client_module._async_signal_watches.pop(id(event), None)
+
+
+async def test_async_future_observer_stays_armed_after_an_unverified_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class GatedEvent(asyncio.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate = False
+
+        def is_set(self) -> bool:
+            return self.gate and super().is_set()
+
+    event = GatedEvent()
+    deadline = client_module._SignalDeadline(clock.now + 10.0)
+    waiter = client_module._watch_async_waiter(event, deadline)
+    future = waiter.future
+    assert future is not None
+    try:
+        clock.now = 100.1
+        event.set()
+        assert not future.done()
+        assert deadline.signalled_at is None
+        event.clear()
+        clock.now = 100.2
+        event.gate = True
+        event.set()
+        assert future.done()
+        assert deadline.signalled_at == 100.2
+    finally:
+        client_module._unwatch_async_waiter(waiter, deadline)
+
+
+async def test_async_wait_for_review_checks_loop_ownership_under_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[bool] = []
+    real_check = client_module._check_async_event_loop
+
+    def checked(event: Any) -> None:
+        observed.append(bool(client_module._async_future_lock._is_owned()))
+        real_check(event)
+
+    monkeypatch.setattr(client_module, "_check_async_event_loop", checked)
+    cancel = asyncio.Event()
+    with Server(lambda request, index: Reply(body=review())) as server:
+        async with session("async", server.url) as client:
+            result = await client.wait_for_review(ORG, REVIEW, timeout=100, cancel_event=cancel)
+        assert len(server.requests) == 1
+    assert result.status == "COMPLETED"
+    assert observed and all(observed)
+
+
+def test_sleep_with_cancel_accepts_a_getter_only_wrapper_around_the_standard_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock(monkeypatch)
+
+    class WrappedEvent(threading.Event):
+        @property
+        def set(self) -> Any:
+            return lambda: threading.Event.set(self)
+
+    event = WrappedEvent()
+
+    def wait_for_event(wait_event: Any, timeout: float, deadline: Any | None = None) -> bool:
+        clock.now = 100.5
+        wait_event.set()
+        wait_event.clear()
+        clock.now = 102.0
+        return False
+
+    monkeypatch.setattr(client_module, "_wait_for_event", wait_for_event)
+    assert client_module._sleep_with_cancel(5, event, cutoff=101.0) is False
+    assert "set" not in vars(event)
+
+
+@MODES
+async def test_wait_for_review_ignores_a_signal_delivered_during_validation(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(monkeypatch)
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    real_head = client_module._head_commit
+
+    def head(value: str | None) -> None:
+        if value is not None:
+            event.set()
+        real_head(value)
+
+    monkeypatch.setattr(client_module, "_head_commit", head)
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client,
+                "wait_for_review",
+                ORG,
+                REVIEW,
+                timeout=0,
+                head_commit_sha=HEAD,
+                cancel_event=event,
+            )
+        assert len(server.requests) == 0
+    assert result.status == "TIMED_OUT"
+    assert clock.delays == []
+
+
+@MODES
+async def test_wait_for_review_timeout_zero_honors_an_event_set_at_entry(mode: str) -> None:
+    event = asyncio.Event() if mode == "async" else threading.Event()
+    event.set()
+    with Server(lambda request, index: Reply(body=review("RUNNING"))) as server:
+        async with session(mode, server.url) as client:
+            result = await call(
+                client, "wait_for_review", ORG, REVIEW, timeout=0, cancel_event=event
+            )
+        assert server.requests == []
+    assert result.status == "STOPPED"
+    assert result.reason == "The wait was cancelled by the caller."
