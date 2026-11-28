@@ -211,6 +211,37 @@ if result.get("isError"):
 
 Calls under `client.fixes` never retry. Results retain untrusted-text wrappers, availability, assessment gaps, and `isError`. `PENDING` and `NOT_VERIFIED` do not establish a fix, and a tool request never records a human disposition.
 
+## GitHub Actions
+
+Workflow jobs with `id-token: write` can exchange their GitHub Actions OIDC identity for a short-lived Proofline credential instead of provisioning a static `PROOFLINE_TOKEN` secret:
+
+```python
+from proofline import (
+    ProoflineClient,
+    format_github_annotations,
+    read_github_actions_event,
+)
+
+event = read_github_actions_event()
+head_sha = event.commit_under_test if event is not None else None
+
+with ProoflineClient.from_github_actions() as client:
+    assert client.organization_id is not None
+    outcome = client.wait_for_review(
+        client.organization_id,
+        review_id,
+        head_commit_sha=head_sha,
+    )
+    annotations = format_github_annotations(outcome, head_commit_sha=head_sha)
+    if annotations:
+        print(annotations)
+```
+
+`ProoflineClient.from_github_actions()` and `await AsyncProoflineClient.from_github_actions()` exchange the runner's `ACTIONS_ID_TOKEN_REQUEST_URL` token at `/api/v1/ci/github-actions/credentials`, bind `client.organization_id` and `client.repository_id`, and renew the lease automatically in a single-flight lock before expiration. Both `GitHubActionsCredentials` and `AsyncGitHubActionsCredentials` can also be constructed explicitly with `.from_env()` and passed as `token=...`.
+
+- `read_github_actions_event()` extracts validated commit metadata from `GITHUB_EVENT_PATH` so `pull_request` and `workflow_run` jobs track the PR head commit rather than a merge ref.
+- `format_github_annotations(outcome)` formats unresolved findings and incomplete-review warnings as workflow commands with path-traversal checks, bidi/control sanitization, and property/data escaping. Withheld values are omitted, and incomplete or gap-bearing outcomes always emit a warning annotation.
+
 ## Development
 
 The repository bundles its public API contract in `openapi.public.json`. New public operations generate typed methods on both `ProoflineClient` and `AsyncProoflineClient` along with the code in `proofline/_generated/`.

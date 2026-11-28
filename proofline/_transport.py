@@ -7,13 +7,13 @@ import math
 import os
 import re
 from asyncio import sleep as async_sleep
-from collections.abc import AsyncIterator, Callable, Generator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from time import monotonic, sleep
-from typing import Any, TypeAlias, cast
+from typing import Any, Protocol, TypeAlias, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 import anyio
@@ -67,15 +67,57 @@ RunNowRefusal: TypeAlias = (
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
 
 
+@runtime_checkable
+class TokenProvider(Protocol):
+    def token(self) -> SecretStr: ...
+    def secrets(self) -> tuple[SecretStr, ...]: ...
+
+
+@runtime_checkable
+class AsyncTokenProvider(Protocol):
+    async def atoken(self) -> SecretStr: ...
+    def secrets(self) -> tuple[SecretStr, ...]: ...
+
+
+TokenSource: TypeAlias = SecretStr | TokenProvider | AsyncTokenProvider
+
+
+def secret_values(source: TokenSource | Iterable[SecretStr]) -> tuple[SecretStr, ...]:
+    if isinstance(source, SecretStr):
+        return (source,)
+    if isinstance(source, (TokenProvider, AsyncTokenProvider)):
+        return source.secrets()
+    return tuple(source)
+
+
 class BearerAuth(httpx2.Auth):
-    def __init__(self, token: SecretStr) -> None:
+    def __init__(self, token: TokenSource) -> None:
         self._token = token
 
-    def auth_flow(
+    def sync_auth_flow(
         self, request: httpx2.Request
     ) -> Generator[httpx2.Request, httpx2.Response, None]:
         request.headers.pop("Cookie", None)
-        request.headers["Authorization"] = f"Bearer {self._token.get_secret_value()}"
+        if isinstance(self._token, SecretStr):
+            secret = self._token
+        elif isinstance(self._token, TokenProvider):
+            secret = self._token.token()
+        else:
+            raise TypeError("Sync client requires a SecretStr or sync TokenProvider.")
+        request.headers["Authorization"] = f"Bearer {secret.get_secret_value()}"
+        yield request
+
+    async def async_auth_flow(
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
+        request.headers.pop("Cookie", None)
+        if isinstance(self._token, SecretStr):
+            secret = self._token
+        elif isinstance(self._token, AsyncTokenProvider):
+            secret = await self._token.atoken()
+        else:
+            raise TypeError("Async client requires a SecretStr or AsyncTokenProvider.")
+        request.headers["Authorization"] = f"Bearer {secret.get_secret_value()}"
         yield request
 
 
@@ -109,16 +151,23 @@ class ProoflineError(Exception):
         return f"ProoflineError(status={self.status})"
 
 
-def token_value(token: str | SecretStr | None) -> SecretStr:
-    secret = (
-        token
-        if isinstance(token, SecretStr)
-        else SecretStr(token if token is not None else os.environ.get("PROOFLINE_TOKEN", ""))
-    )
+def validate_token(
+    token: str | SecretStr, *, error_message: str = "Pass a Proofline token or set PROOFLINE_TOKEN."
+) -> SecretStr:
+    secret = token if isinstance(token, SecretStr) else SecretStr(token)
     value = secret.get_secret_value()
-    if not value or any(character.isspace() for character in value):
-        raise ValueError("Pass a Proofline token or set PROOFLINE_TOKEN.")
+    if not value or any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value
+    ):
+        raise ValueError(error_message)
     return secret
+
+
+def token_value(token: str | SecretStr | None) -> SecretStr:
+    return validate_token(
+        token if token is not None else os.environ.get("PROOFLINE_TOKEN", ""),
+        error_message="Pass a Proofline token or set PROOFLINE_TOKEN.",
+    )
 
 
 def base_url(value: str) -> str:
@@ -232,13 +281,19 @@ def retry_delay(value: str | None, attempt: int) -> float | None:
     return delay if math.isfinite(delay) and delay <= 60 else None
 
 
-def redacted(value: object, raw: str) -> object:
+def redacted(value: object, raw: str | Iterable[str]) -> object:
+    raws = (raw,) if isinstance(raw, str) else tuple(raw)
+    secrets = tuple(sorted({item for item in raws if item}, key=len, reverse=True))
+    if not secrets:
+        return value
     if isinstance(value, str):
-        return value.replace(raw, "[redacted]")
+        for secret in secrets:
+            value = value.replace(secret, "[redacted]")
+        return value
     if isinstance(value, list):
-        return [redacted(item, raw) for item in value]
+        return [redacted(item, secrets) for item in value]
     if isinstance(value, dict):
-        return {key: redacted(item, raw) for key, item in value.items()}
+        return {key: redacted(item, secrets) for key, item in value.items()}
     return value
 
 
@@ -276,7 +331,7 @@ REFUSAL_SHAPES: dict[str, Callable[[dict[str, Any]], bool]] = {
 }
 
 
-def problem(response: httpx2.Response, token: SecretStr) -> ProoflineError:
+def problem(response: httpx2.Response, token: TokenSource | Iterable[SecretStr]) -> ProoflineError:
     try:
         body = response.json()
     except (ValueError, UnicodeError):
@@ -287,7 +342,8 @@ def problem(response: httpx2.Response, token: SecretStr) -> ProoflineError:
             "about:blank",
             "Proofline returned an HTTP error without a problem document.",
         )
-    body = cast(dict[str, Any], redacted(body, token.get_secret_value()))
+    raw_secrets = tuple(secret.get_secret_value() for secret in secret_values(token))
+    body = cast(dict[str, Any], redacted(body, raw_secrets))
     kind = body["type"] if isinstance(body.get("type"), str) else "about:blank"
     title = body["title"] if isinstance(body.get("title"), str) else None
     if isinstance(body.get("detail"), str):
@@ -432,31 +488,107 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
         await self._inner.aclose()
 
 
+def _prepare_sync_response(response: httpx2.Response, deadline: float) -> None:
+    if 300 <= response.status_code < 400:
+        response.close()
+        raise redirect_error(response.status_code) from None
+    if encoded_response(response):
+        response.close()
+        raise encoding_error(response.status_code) from None
+    if not isinstance(response.stream, httpx2.SyncByteStream):
+        response.close()
+        raise unreadable_problem(response.status_code)
+    response.stream = DeadlineStream(response.stream, response.status_code, deadline)
+
+
+async def _prepare_async_response(response: httpx2.Response, deadline: float) -> None:
+    if 300 <= response.status_code < 400:
+        await response.aclose()
+        raise redirect_error(response.status_code) from None
+    if encoded_response(response):
+        await response.aclose()
+        raise encoding_error(response.status_code) from None
+    if not isinstance(response.stream, httpx2.AsyncByteStream):
+        await response.aclose()
+        raise unreadable_problem(response.status_code)
+    response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
+
+
+def validate_timeout(timeout: float) -> float:
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("The HTTP timeout must be a finite positive number of seconds.")
+    return timeout
+
+
+def read_checked_sync(
+    inner: httpx2.BaseTransport,
+    request: httpx2.Request,
+    timeout: float,
+) -> httpx2.Response:
+    limit_timeout(request)
+    deadline = monotonic() + timeout
+    marker = IO_DEADLINE.set(io_deadline(deadline))
+    try:
+        response = inner.handle_request(request)
+    finally:
+        IO_DEADLINE.reset(marker)
+    _prepare_sync_response(response, deadline)
+    return response
+
+
+async def read_checked_async(
+    inner: httpx2.AsyncBaseTransport,
+    request: httpx2.Request,
+    timeout: float,
+) -> httpx2.Response:
+    limit_timeout(request)
+    deadline = monotonic() + timeout
+    try:
+        with anyio.fail_after(io_budget(deadline)):
+            response = await inner.handle_async_request(request)
+    except TimeoutError:
+        raise httpx2.ReadTimeout("The request deadline expired.") from None
+    await _prepare_async_response(response, deadline)
+    return response
+
+
+class SingleAttemptTransport(httpx2.BaseTransport):
+    def __init__(self, timeout: float) -> None:
+        self._timeout = validate_timeout(timeout)
+        self._inner = SyncHTTPTransport()
+
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        return read_checked_sync(self._inner, request, self._timeout)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class AsyncSingleAttemptTransport(httpx2.AsyncBaseTransport):
+    def __init__(self, timeout: float) -> None:
+        self._timeout = validate_timeout(timeout)
+        self._inner = httpx2.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        return await read_checked_async(self._inner, request, self._timeout)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class RetryTransport(httpx2.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: TokenSource, timeout: float) -> None:
         self._token = token
         self._timeout = timeout
         self._inner = SyncHTTPTransport()
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
-            limit_timeout(request)
-            deadline = monotonic() + self._timeout
-            marker = IO_DEADLINE.set(io_deadline(deadline))
-            try:
-                response = self._inner.handle_request(request)
-            finally:
-                IO_DEADLINE.reset(marker)
-            if 300 <= response.status_code < 400:
-                response.close()
-                raise redirect_error(response.status_code) from None
-            if encoded_response(response):
-                response.close()
-                raise encoding_error(response.status_code) from None
-            if not isinstance(response.stream, httpx2.SyncByteStream):
-                response.close()
-                raise unreadable_problem(response.status_code)
-            response.stream = DeadlineStream(response.stream, response.status_code, deadline)
+            if attempt > 0 and isinstance(self._token, TokenProvider):
+                request.headers["Authorization"] = (
+                    f"Bearer {self._token.token().get_secret_value()}"
+                )
+            response = read_checked_sync(self._inner, request, self._timeout)
             if 200 <= response.status_code < 300:
                 return response
             try:
@@ -484,30 +616,17 @@ class RetryTransport(httpx2.BaseTransport):
 
 
 class AsyncRetryTransport(httpx2.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: TokenSource, timeout: float) -> None:
         self._token = token
         self._timeout = timeout
         self._inner = httpx2.AsyncHTTPTransport()
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
-            limit_timeout(request)
-            deadline = monotonic() + self._timeout
-            try:
-                with anyio.fail_after(io_budget(deadline)):
-                    response = await self._inner.handle_async_request(request)
-            except TimeoutError:
-                raise httpx2.ReadTimeout("The request deadline expired.") from None
-            if 300 <= response.status_code < 400:
-                await response.aclose()
-                raise redirect_error(response.status_code) from None
-            if encoded_response(response):
-                await response.aclose()
-                raise encoding_error(response.status_code) from None
-            if not isinstance(response.stream, httpx2.AsyncByteStream):
-                await response.aclose()
-                raise unreadable_problem(response.status_code)
-            response.stream = AsyncDeadlineStream(response.stream, response.status_code, deadline)
+            if attempt > 0 and isinstance(self._token, AsyncTokenProvider):
+                secret = await self._token.atoken()
+                request.headers["Authorization"] = f"Bearer {secret.get_secret_value()}"
+            response = await read_checked_async(self._inner, request, self._timeout)
             if 200 <= response.status_code < 300:
                 return response
             try:

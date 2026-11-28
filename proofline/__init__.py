@@ -35,6 +35,14 @@ from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
+from .github_actions import (
+    AsyncGitHubActionsCredentials,
+    GitHubActionsCredentials,
+    GitHubActionsEvent,
+    GitHubActionsLease,
+    format_github_annotations,
+    read_github_actions_event,
+)
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
 
@@ -42,6 +50,7 @@ __all__ = [
     "AgentSession",
     "AgentVendor",
     "AssessmentGap",
+    "AsyncGitHubActionsCredentials",
     "AsyncProoflineClient",
     "CheckGap",
     "CommitReviewRequest",
@@ -56,6 +65,9 @@ __all__ = [
     "ExportPage",
     "FileReviewRequest",
     "FileReviewResponse",
+    "GitHubActionsCredentials",
+    "GitHubActionsEvent",
+    "GitHubActionsLease",
     "KnowledgeResult",
     "PatchReviewRequest",
     "PatchReviewResponse",
@@ -79,5 +91,7 @@ __all__ = [
     "StopResponse",
     "UploadedReport",
     "__version__",
+    "format_github_annotations",
     "models",
+    "read_github_actions_event",
 ]
