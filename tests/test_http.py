@@ -1737,7 +1737,61 @@ async def test_cursor_pagination_preserves_filters_and_refuses_cycles_or_bounds(
             with pytest.raises(ProoflineError) as raised:
                 await collect(client, max_items=1, filters={"cursor": "initial"})
             assert raised.value.type == "urn:proofline:sdk:pagination-limit"
+@MODES
+async def test_pull_request_review_iterator_preserves_filters_and_pagination(
+    mode: str,
+) -> None:
+    async def collect_pull_request_reviews(client: Client, **kwargs: Any) -> list[Any]:
+        iterator = client.iter_pull_request_reviews(
+            ORG, "repo/name", 42, **kwargs
+        )
+        if hasattr(iterator, "__aiter__"):
+            return [item async for item in iterator]
+        return list(iterator)
 
+    def respond(request: Request, index: int) -> Reply:
+        assert urlsplit(request.path).path == (
+            f"/api/v1/organizations/{ORG}/reviews/pr/repo%2Fname/42"
+        )
+        query = parse_qs(urlsplit(request.path).query)
+        assert query["repository"] == [str(REPOSITORY)]
+        assert query["status"] == ["COMPLETED"]
+        assert query["limit"] == ["2"]
+        assert query["query"] == [STRUCTURED_QUERY]
+        assert query["search"] == ["text & space"]
+        if index == 0:
+            assert "cursor" not in query
+        else:
+            assert query["cursor"] == ["next-cursor"]
+        return Reply(
+            body=page(
+                cursor="next-cursor" if index == 0 else None,
+                truncated=index == 0,
+            )
+        )
+
+    filters = {
+        "repository": REPOSITORY,
+        "status": "COMPLETED",
+        "query": STRUCTURED_QUERY,
+        "search": "text & space",
+    }
+
+    with Server(respond) as server:
+        async with session(mode, server.url) as client:
+            items = await collect_pull_request_reviews(
+                client,
+                page_size=2,
+                filters=filters,
+            )
+            assert [item.id for item in items] == [REVIEW, REVIEW]
+            assert filters == {
+                "repository": REPOSITORY,
+                "status": "COMPLETED",
+                "query": STRUCTURED_QUERY,
+                "search": "text & space",
+            }
+        assert len(server.requests) == 2
 
 def test_token_environment_and_https_origin_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROOFLINE_TOKEN", TOKEN)
