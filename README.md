@@ -76,6 +76,30 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Failing a job on open findings
+
+`gate_review(outcome, *, fail_on)` measures a `ReviewOutcome` against a `WARNING` or `SERIOUS` threshold with the rules of `proofline ci review --fail-on`, so a Python pipeline fails the same way the CLI does.
+
+```python
+import sys
+from proofline import ProoflineClient, gate_review
+
+with ProoflineClient() as client:
+    requested = client.request_review(organization_id, repository_id, 12)
+    outcome = client.wait_for_review(organization_id, requested.review_id)
+    result = gate_review(outcome, fail_on="SERIOUS")
+    if result != "NOT_REACHED":
+        print(f"Proofline: {result}, {outcome.review_url}")
+        sys.exit({"REACHED": 3, "NOT_COMPLETE": 2, "UNAVAILABLE": 4}[result])
+```
+
+- `REACHED`: the completed review has an open finding at or above the threshold.
+- `NOT_REACHED`: the completed review has none.
+- `NOT_COMPLETE`: the review is incomplete, failed, or stopped, whatever it found.
+- `UNAVAILABLE`: the wait timed out, or the completed review lacks valid open-finding counts, so the threshold cannot be measured.
+
+The server counts open findings from their current decisions, so dismissed findings and unexpired risk acceptances do not count. A code-only finding counts while it is not `RESOLVED` and its complete CODE assessment is of the review's own commits. A severity the SDK does not know reaches every threshold. The exit codes above are the CLI's. The threshold is the caller's and applies to any review; it is separate from the server's opt-in `merge_gate` decision.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.

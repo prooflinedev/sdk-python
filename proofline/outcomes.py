@@ -76,10 +76,8 @@ def _optional_texts(value: object) -> bool:
     )
 
 
-def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | None:
-    # A CODE result cannot replace a missing ENV result or its check receipts.
-    if review.assessment_count != 0 or review.assessments:
-        return None
+def _recorded_code(review: CustomerReviewDetail) -> CustomerCodeAssessment | None:
+    # The CODE record of this review's own commits with published findings.
     code = review.code_assessment
     if (
         not isinstance(code, CustomerCodeAssessment)
@@ -101,6 +99,13 @@ def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | N
     if any(finding.risk_domain == _WITHHELD_MARKER for finding in code.findings):
         return None
     return code
+
+
+def _code_assessment(review: CustomerReviewDetail) -> CustomerCodeAssessment | None:
+    # A CODE result cannot replace a missing ENV result or its check receipts.
+    if review.assessment_count != 0 or review.assessments:
+        return None
+    return _recorded_code(review)
 
 
 def _validate(review: CustomerReviewDetail, review_id: UUID | None) -> None:

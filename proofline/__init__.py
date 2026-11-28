@@ -35,6 +35,7 @@ from ._transport import VERSION as __version__
 from ._transport import ProoflineError, RunNowRefusal
 from .client import AsyncProoflineClient, ProoflineClient, ReviewFilters
 from .exports import ExportDataset, ExportFormat, ExportPage
+from .gate import GateResult, gate_review
 from .knowledge import KnowledgeResult
 from .outcomes import AssessmentGap, CheckGap, ReviewOutcome
 
@@ -56,6 +57,8 @@ __all__ = [
     "ExportPage",
     "FileReviewRequest",
     "FileReviewResponse",
+    "GateResult",
+    "gate_review",
     "KnowledgeResult",
     "PatchReviewRequest",
     "PatchReviewResponse",
